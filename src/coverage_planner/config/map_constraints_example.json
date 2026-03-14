@@ -1,0 +1,29 @@
+{
+  "map_id": "map_4d965af2",
+  "map_md5": "4d965af21d38b5c5f05457bf76fb77d5",
+  "no_go_areas": [
+    {
+      "area_id": "no_go_dock_front",
+      "name": "Dock Front Keepout",
+      "enabled": true,
+      "polygon": [
+        [6.10, 64.90],
+        [7.10, 64.90],
+        [7.10, 66.10],
+        [6.10, 66.10]
+      ]
+    }
+  ],
+  "virtual_walls": [
+    {
+      "wall_id": "wall_corridor_split_01",
+      "name": "Corridor Split 01",
+      "enabled": true,
+      "buffer_m": 0.575,
+      "polyline": [
+        [4.20, 63.80],
+        [4.20, 67.20]
+      ]
+    }
+  ]
+}

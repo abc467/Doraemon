@@ -1,0 +1,21 @@
+<launch>
+  <arg name="config_root" default="$(find cleanrobot)/config/cartographer"/>
+  <arg name="landmark_param_yaml" default="$(find cleanrobot)/config/cartographer/landmark_719.yaml"/>
+  <arg name="runtime_ns" default="/cartographer/runtime"/>
+  <arg name="map_topic" default="/map"/>
+  <arg name="resolution" default="0.05"/>
+  <arg name="publish_period_sec" default="1.0"/>
+  <arg name="auto_start" default="true"/>
+
+  <node pkg="cleanrobot" type="cartographer_supervisor_node.py" name="cartographer_supervisor" output="screen">
+    <param name="runtime_ns" value="$(arg runtime_ns)"/>
+    <param name="config_root" value="$(arg config_root)"/>
+    <param name="landmark_param_yaml" value="$(arg landmark_param_yaml)"/>
+    <param name="mode" value="mapping"/>
+    <param name="map_topic" value="$(arg map_topic)"/>
+    <param name="resolution" value="$(arg resolution)"/>
+    <param name="publish_period_sec" value="$(arg publish_period_sec)"/>
+    <param name="auto_start" value="$(arg auto_start)"/>
+    <param name="include_unfrozen_submaps" value="true"/>
+  </node>
+</launch>

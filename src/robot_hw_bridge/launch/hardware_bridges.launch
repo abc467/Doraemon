@@ -1,0 +1,64 @@
+<launch>
+  <arg name="enable_docking_stack" default="true"/>
+  <arg name="dock_base_frame" default="base_link"/>
+  <arg name="dock_scan_topic" default="/scan"/>
+  <arg name="dock_pose_topic" default="/dock_pose"/>
+  <arg name="dock_cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="dock_backwards" default="false"/>
+  <arg name="dock_target_dist" default="0.68"/>
+  <arg name="dock_pose_stale_timeout_s" default="0.25"/>
+  <arg name="dock_pose_lost_timeout_s" default="1.0"/>
+
+  <!-- M-core chassis TCP bridge -->
+  <node pkg="robot_hw_bridge" type="mcore_tcp_bridge.py" name="mcore_tcp_bridge" output="screen">
+    <param name="server_ip" value="192.168.16.10"/>
+    <param name="server_port" value="5001"/>
+    <param name="timeout" value="5.0"/>
+    <param name="reconnect_delay" value="1.0"/>
+    <param name="charge_cmd_repeat" value="2"/>
+    <param name="vel_water_pump" value="0"/>
+    <param name="vel_water_suction" value="0"/>
+    <param name="height_scrub" value="38"/>
+  </node>
+
+  <!-- Station TCP bridge -->
+  <node pkg="robot_hw_bridge" type="station_tcp_bridge.py" name="station_tcp_bridge" output="screen">
+    <param name="server_ip" value="192.168.16.123"/>
+    <param name="server_port" value="5007"/>
+    <param name="timeout" value="5.0"/>
+    <param name="reconnect_delay" value="2.0"/>
+    <param name="tx_repeat" value="2"/>
+  </node>
+
+  <!-- Dock + supply + charge manager -->
+  <node pkg="robot_hw_bridge" type="dock_supply_manager.py" name="dock_supply_manager" output="screen">
+    <param name="target_soc" value="0.80"/>
+    <param name="target_clean_level" value="35"/>
+    <param name="enable_drain" value="true"/>
+    <param name="enable_refill" value="true"/>
+    <param name="docking_action_name" value="docking_action"/>
+    <param name="docking_action_wait_s" value="5.0"/>
+    <param name="docking_target_dist" value="$(arg dock_target_dist)"/>
+    <param name="docking_timeout_s" value="120.0"/>
+    <param name="station_in_place_timeout_s" value="5.0"/>
+    <param name="pre_dock_settle_s" value="0.5"/>
+    <param name="charge_timeout_s" value="10800.0"/>
+    <param name="exit_mode" value="none"/>  <!-- none/back -->
+    <param name="back_distance" value="2.2"/>
+    <param name="back_speed" value="0.10"/>
+  </node>
+
+  <group if="$(arg enable_docking_stack)">
+    <include file="$(find my_docking_controller)/launch/my_docking_controller.launch">
+      <arg name="start_dock_tracker" value="true"/>
+      <arg name="base_frame" value="$(arg dock_base_frame)"/>
+      <arg name="scan_topic" value="$(arg dock_scan_topic)"/>
+      <arg name="dock_pose_topic" value="$(arg dock_pose_topic)"/>
+      <arg name="cmd_vel_topic" value="$(arg dock_cmd_vel_topic)"/>
+      <arg name="dock_backwards" value="$(arg dock_backwards)"/>
+      <arg name="target_dist" value="$(arg dock_target_dist)"/>
+      <arg name="pose_stale_timeout_s" value="$(arg dock_pose_stale_timeout_s)"/>
+      <arg name="pose_lost_timeout_s" value="$(arg dock_pose_lost_timeout_s)"/>
+    </include>
+  </group>
+</launch>

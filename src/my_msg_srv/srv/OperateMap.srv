@@ -1,0 +1,24 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+
+uint8 operation # get; add(unsupported); modify; Delete(soft-disable); getAll
+string map_name
+string map_version
+PgmData map
+bool set_active
+
+---
+
+bool success
+string message
+PgmData map
+PgmData[] maps # getAll: latest asset heads; get: the requested asset detail
+
+# add: v1 不负责建图保存，统一改走 /clean_robot_server/mapping_server
+# modify: 更新资产元数据（display_name/description/enabled），可选 set_active
+# Delete: 软删除/禁用 map_name，不删除磁盘文件
+# get: 按 map_name/map_version 查询；version 为空时取活动版本或最新版本
+# getAll: 返回所有地图资产的最新版本元数据

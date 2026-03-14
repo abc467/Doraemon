@@ -1,0 +1,4 @@
+string profile_name
+uint8 vel_water_pump
+uint8 vel_water_suction
+uint8 height_scrub

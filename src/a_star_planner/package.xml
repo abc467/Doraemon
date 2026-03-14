@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>a_star_planner</name>
+  <version>1.0.0</version>
+  <description>A move_base global planner plugin using the Theta* algorithm.</description>
+
+  <maintainer email="your_email@todo.com">Your Name</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>costmap_2d</depend>
+  <depend>geometry_msgs</depend>
+  <depend>mbf_costmap_core</depend>
+  <depend>nav_core</depend>
+  <depend>pluginlib</depend>
+  <depend>roscpp</depend>
+  <depend>tf2_ros</depend>
+
+  <export>
+    <nav_core plugin="${prefix}/plugins.xml" />
+    <mbf_costmap_core plugin="${prefix}/plugins.xml" />
+  </export>
+</package>

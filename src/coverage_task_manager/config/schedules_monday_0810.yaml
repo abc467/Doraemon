@@ -1,0 +1,14 @@
+schedules:
+  - id: "weekly_mon_1010_zone_demo_1loop"
+    enabled: true
+    type: "weekly"          # weekly | daily | once
+    dow: [0]                # Monday=0 ... Sunday=6
+    time: "11:25"           # 本地时间 HH:MM
+    oneshot: false          # weekly 重复就 false
+
+    task:
+      zone_id: "zone_demo"
+      loops: 1
+      plan_profile_name: "cover_standard"
+      sys_profile_name: "standard"
+      clean_mode: "scrub"

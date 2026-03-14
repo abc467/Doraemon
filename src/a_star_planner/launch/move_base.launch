@@ -1,0 +1,49 @@
+<launch>
+  <!-- 1. 加载机器人模型（生成基础TF链：base_footprint→base_link等，优先启动） -->
+  <include file="$(find turtlebot3_bringup)/launch/turtlebot3_model.launch"/>
+
+  <!-- 2. 发布静态地图（提前启动，确保`map`坐标系和`/map`话题存在） -->
+  <node pkg="map_server" type="map_server" name="map_server" 
+        args="$(find a_star_planner)/maps/turtlebot3_world.yaml" output="screen">
+    <param name="frame_id" value="map"/>  <!-- 强制地图坐标系为`map`，与全局代价地图匹配 -->
+  </node>
+
+  <!-- 3. 启动AMCL定位（加载独立参数文件，话题重映射正确） -->
+  <node pkg="amcl" type="amcl" name="amcl" output="screen">
+    <rosparam file="$(find a_star_planner)/config/amcl_params.yaml" command="load"/>
+    <remap from="scan" to="/scan"/>  <!-- 订阅激光雷达数据（与Gazebo发布话题一致） -->
+    <remap from="odom" to="/odom"/>  <!-- 订阅里程计数据（与机器人模型发布话题一致） -->
+  </node>
+
+  <!-- 4. 启动move_base（核心导航，关键修改：分命名空间加载通用参数） -->
+  <node pkg="move_base" type="move_base" name="move_base" output="screen">
+    <!-- 加载顶层参数（如规划器类型、控制器频率等） -->
+    <rosparam file="$(find a_star_planner)/config/move_base_params.yaml" command="load"/>
+    
+    <!-- 加载全局规划器参数（命名空间：GlobalPlanner，适配自定义A*规划器） -->
+    <rosparam file="$(find a_star_planner)/config/global_planner_params.yaml" command="load" ns="GlobalPlanner"/>
+    
+    <!-- 加载局部规划器参数（命名空间：DWAPlannerROS，确保局部避障生效） -->
+    <rosparam file="$(find a_star_planner)/config/local_planner_params.yaml" command="load" ns="DWAPlannerROS"/>
+    
+    <!-- 第一步：加载全局代价地图专属参数（如坐标系、更新频率等） -->
+    <rosparam file="$(find a_star_planner)/config/global_costmap_params.yaml" command="load" ns="global_costmap"/>
+    
+    <!-- 第二步：加载局部代价地图专属参数（如滚动窗口、地图尺寸等） -->
+    <rosparam file="$(find a_star_planner)/config/local_costmap_params.yaml" command="load" ns="local_costmap"/>
+    
+    <!-- 关键修改1：通用参数加载到全局代价地图命名空间 → 让全局膨胀层读到0 -->
+    <rosparam file="$(find a_star_planner)/config/costmap_common_params.yaml" command="load" ns="global_costmap"/>
+    
+    <!-- 关键修改2：通用参数加载到局部代价地图命名空间 → 让局部膨胀层读到0 -->
+    <rosparam file="$(find a_star_planner)/config/costmap_common_params.yaml" command="load" ns="local_costmap"/>
+    
+    <!-- 保留安全兜底参数（避免static_layer配置遗漏，确保静态地图正常加载） -->
+    <param name="global_costmap/static_layer/map_topic" value="/map" />
+    <param name="global_costmap/static_map" value="true" />
+  </node>
+
+  <!-- 5. 启动Rviz（最后启动，确保所有话题/TF已就绪，加载自定义配置） -->
+  <node pkg="rviz" type="rviz" name="rviz_planner" output="screen" 
+        args="-d $(find a_star_planner)/config/rviz.rviz"/>
+</launch>

@@ -1,0 +1,11 @@
+string robot_id
+string map_name
+string map_version
+---
+bool success
+string message
+string map_name
+string map_version
+string map_id
+string map_md5
+string yaml_path

@@ -1,0 +1,16 @@
+<library path="lib/liba_star_planner_lib">
+  <class name="a_star_planner/AStarROSWrapper" 
+         type="a_star_planner::AStarROSWrapper" 
+         base_class_type="nav_core::BaseGlobalPlanner">
+    <description>
+      A global planner plugin that uses the Theta* algorithm.
+    </description>
+  </class>
+  <class name="a_star_planner/AStarMBFPlanner"
+         type="a_star_planner::AStarROSWrapper"
+         base_class_type="mbf_costmap_core::CostmapPlanner">
+    <description>
+      A MBF-native global planner plugin that uses the Theta* algorithm.
+    </description>
+  </class>
+</library>

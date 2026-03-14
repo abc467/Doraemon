@@ -1,0 +1,17 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+
+uint8 operation # get; add; modify; Delete; getAll; 
+int32 id 
+CleanTask task
+string map_name
+string map_version
+--- 
+
+bool success
+string message
+CleanTask task
+CleanTask[] tasks # 只有在 getAll 时才有效

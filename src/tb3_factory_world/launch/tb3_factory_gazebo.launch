@@ -1,0 +1,30 @@
+<launch>
+  <!-- Choose TurtleBot3 model: burger / waffle / waffle_pi -->
+  <arg name="model" default="burger"/>
+  <arg name="world" default="$(find tb3_factory_world)/worlds/factory_50x70_3blocks.world"/>
+  <arg name="x_pos" default="1.0"/>
+  <arg name="y_pos" default="1.0"/>
+  <arg name="z_pos" default="0.01"/>
+
+  <param name="use_sim_time" value="true"/>
+
+  <!-- Start Gazebo with our factory world -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(arg world)"/>
+    <arg name="paused" value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="true"/>
+    <arg name="headless" value="false"/>
+  </include>
+
+  <!-- Robot description -->
+  <param name="robot_description"
+         command="$(find xacro)/xacro '$(find turtlebot3_description)/urdf/turtlebot3_$(arg model).urdf.xacro'"/>
+
+  <!-- Publish TF -->
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher" output="screen"/>
+
+  <!-- Spawn TurtleBot3 into Gazebo -->
+  <node pkg="gazebo_ros" type="spawn_model" name="spawn_turtlebot3" output="screen"
+        args="-urdf -model turtlebot3_$(arg model) -param robot_description -x $(arg x_pos) -y $(arg y_pos) -z $(arg z_pos)"/>
+</launch>

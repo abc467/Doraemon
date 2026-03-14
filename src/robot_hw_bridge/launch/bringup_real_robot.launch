@@ -1,0 +1,82 @@
+<launch>
+  <!--
+    Real-robot bringup (minimal):
+      - hardware TCP bridges
+      - docking controller (fine docking action)
+      - coverage task+executor system, with dock_supply enabled
+
+    Usage:
+      roslaunch robot_hw_bridge bringup_real_robot.launch
+  -->
+
+  <arg name="start_navigation" default="true"/>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="maps_root" default="/data/maps"/>
+  <arg name="robot_id" default="local_robot"/>
+  <arg name="map_name" default=""/>
+  <arg name="map_version" default=""/>
+  <arg name="legacy_map_src_glob" default=""/>
+  <arg name="cartographer_mode" default="localization"/>
+  <arg name="cartographer_runtime_ns" default="/cartographer/runtime"/>
+  <arg name="cartographer_config_root" default="$(find cleanrobot)/config/cartographer"/>
+
+  <!-- start TCP bridges + supply manager -->
+  <include file="$(find robot_hw_bridge)/launch/hardware_bridges.launch"/>
+
+  <group if="$(arg start_navigation)">
+    <include file="$(find cleanrobot)/launch/cartographer_localization.launch">
+      <arg name="config_root" value="$(arg cartographer_config_root)"/>
+      <arg name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
+      <arg name="map_name" value="$(arg map_name)"/>
+      <arg name="map_version" value="$(arg map_version)"/>
+      <arg name="auto_start" value="false"/>
+    </include>
+
+    <node pkg="coverage_planner" type="cartographer_runtime_manager_node.py" name="cartographer_runtime_manager" output="screen">
+      <param name="plan_db_path" value="$(arg plan_db_path)"/>
+      <param name="ops_db_path" value="$(arg ops_db_path)"/>
+      <param name="robot_id" value="$(arg robot_id)"/>
+      <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
+      <param name="map_name" value="$(arg map_name)"/>
+      <param name="map_version" value="$(arg map_version)"/>
+      <param name="activate_service" value="/map_assets/activate"/>
+      <param name="relocalize_service" value="/map_assets/relocalize"/>
+      <param name="reload_service" value="/cartographer/runtime/reload"/>
+      <param name="map_topic" value="/map"/>
+    </node>
+
+    <include file="$(find clean_robot_description)/launch/mbf_nav.launch">
+      <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+      <arg name="ops_db_path" value="$(arg ops_db_path)"/>
+      <arg name="robot_id" value="$(arg robot_id)"/>
+      <arg name="map_name" value="$(arg map_name)"/>
+      <arg name="map_version" value="$(arg map_version)"/>
+      <arg name="start_static_map_manager" value="false"/>
+    </include>
+  </group>
+
+  <node pkg="coverage_planner" type="map_asset_manager_node.py" name="map_asset_manager" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="maps_root" value="$(arg maps_root)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="map_topic" value="/map"/>
+    <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
+    <param name="cartographer_save_state_service" value="/cartographer/runtime/save_state"/>
+    <param name="set_active_on_save" value="true"/>
+  </node>
+
+  <!-- task+executor system (task manager owns auto charge) -->
+  <include file="$(find coverage_task_manager)/launch/task_system.launch">
+    <arg name="task_auto_charge_enable" value="true"/>
+    <arg name="executor_auto_charge_enable" value="false"/>
+    <arg name="dock_supply_enable" value="true"/>
+    <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+    <arg name="ops_db_path" value="$(arg ops_db_path)"/>
+    <arg name="maps_root" value="$(arg maps_root)"/>
+    <arg name="robot_id" value="$(arg robot_id)"/>
+    <arg name="run_map_migration" value="false"/>
+    <arg name="legacy_map_src_glob" value="$(arg legacy_map_src_glob)"/>
+  </include>
+
+</launch>

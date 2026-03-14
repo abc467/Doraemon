@@ -1,0 +1,336 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.5.1-0-g916b5db  Build Version: 1.5.7152.31018
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot name="clean_robot">
+  <link name="base_footprint">
+  </link>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+  </joint>
+  <link name="rotateCentral">
+  </link>
+  <joint name="rotateCentral_joint" type="fixed">
+    <origin xyz="-0.21 0 -0.057" rpy="0 0 0" />
+    <axis xyz="0 1 0" />
+    <parent link="base_link"/>
+    <child link="rotateCentral"/>
+  </joint>
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0.00240726108493841 0.000418202039983564 0.00979407155909989" rpy="0 0 0" />
+      <mass value="28.1386020223436" />
+      <inertia ixx="1.02468969743477" ixy="0.0158941047042103" ixz="-0.00370358705210533" iyy="2.18751601311466" iyz="-2.28678674738598E-05" izz="3.20778172827221" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/base_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.866666666666667 0.866666666666667 0.890196078431372 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_wheel_link">
+    <inertial>
+      <origin xyz="-4.0925E-05 -0.023024 -0.00050223" rpy="0 0 0" />
+      <mass value="1.0564" />
+      <inertia ixx="0.0039835" ixy="-2.5313E-06" ixz="-2.7501E-06" iyy="0.004638" iyz="-3.3138E-05" izz="0.0041315" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/left_wheel.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/left_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="-0.21 0.35525 -0.057" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <axis xyz="0 1 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="right_wheel_link">
+    <inertial>
+      <origin xyz="4.0925E-05 0.023024 -0.00050223" rpy="0 0 0" />
+      <mass value="1.0564" />
+      <inertia ixx="0.0039835" ixy="-2.5313E-06" ixz="2.7501E-06" iyy="0.004638" iyz="3.3138E-05" izz="0.0041315" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/right_wheel.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/right_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_wheel_joint" type="continuous">
+    <origin xyz="-0.21 -0.35525 -0.057" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <axis xyz="0 1 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="gyro_link">
+    <inertial>
+      <origin xyz="3.1965E-05 -1.3878E-17 0.0060316" rpy="0 0 0" />
+      <mass value="0.02361" />
+      <inertia ixx="5.4191E-06" ixy="5.5519E-21" ixz="1.8141E-09" iyy="4.3874E-06" iyz="7.0038E-21" izz="9.3231E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/gyro.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.74118 0.90196 0.95686 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/gyro.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="gyro_joint" type="fixed">
+    <!-- <origin xyz="0.09075 0.234 0.5377" rpy="0 0 0" /> -->
+    <origin xyz="0.09075 0.234 0.5377" rpy="0 0 1.5708" />
+     <!-- <origin xyz="0.09075 0.234 0.5377" rpy="-3.1416 0 1.5708" /> -->
+    <!-- <origin xyz="0 0 0" rpy="0 0 1.5708" /> -->
+    <!-- <origin xyz="0 0 0" rpy="0 0 3.14" /> -->
+    <parent link="base_link" />
+    <child link="gyro_link" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="front_laser">
+    <inertial>
+      <origin xyz="-0.550525948072943 0.0400079398991852 0.235547624375764" rpy="0 0 0" />
+      <mass value="292.649704989435" />
+      <inertia ixx="44.0373395468623" ixy="2.81633498450796" ixz="1.66357751279977" iyy="43.7828032777511" iyz="-2.18059444316504" izz="37.7889157054444" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/front_laser.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/front_laser.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="front_laser" type="fixed">
+    <origin xyz="0.42468 0.36619 0.0495" rpy="0 0 0.7854" />
+    <parent link="base_link" />
+    <child link="front_laser" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="back_laser">
+    <inertial>
+      <origin xyz="-0.606063155895012 0.0792949530645376 0.235547624375765" rpy="0 0 0" />
+      <mass value="292.649704989435" />
+      <inertia ixx="44.0373395468623" ixy="2.81633498450796" ixz="-1.66357751279979" iyy="43.7828032777511" iyz="2.18059444316503" izz="37.7889157054444" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/back_laser.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/back_laser.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="back_laser" type="fixed">
+    <origin xyz="-0.47752 -0.36729 0.0495" rpy="0 0 -2.3562" />
+    <parent link="base_link" />
+    <child link="back_laser" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="left_camera">
+    <inertial>
+      <origin xyz="-0.0141516366925666 -3.26056080095505E-05 0.00213468650215209" rpy="0 0 0" />
+      <mass value="0.0330606537395875" />
+      <inertia ixx="2.18493760077461E-05" ixy="-6.17717819624996E-09" ixz="1.25370444127801E-07" iyy="2.18264141606428E-05" iyz="-1.50421742192633E-09" izz="3.29669338756779E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/left_camera.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/left_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="left_camera" type="fixed">
+    <origin xyz="-0.36459 0.38251 0.79049" rpy="0.59889 0.72678 0.47536" />
+    <parent link="base_link" />
+    <child link="left_camera" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="right_camera">
+    <inertial>
+      <origin xyz="-0.0141516361666065 -3.26036350821735E-05 0.00213466768908482" rpy="0 0 0" />
+      <mass value="0.0330606483873418" />
+      <inertia ixx="2.18493477974992E-05" ixy="-6.17679741189438E-09" ixz="1.25366332467947E-07" iyy="2.18263835224402E-05" iyz="-1.50439378133062E-09" izz="3.29669552730337E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/right_camera.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/right_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="right_camera" type="fixed">
+    <origin xyz="-0.36449 -0.38247 0.79057" rpy="-0.59889 0.72678 -0.47536" />
+    <parent link="base_link" />
+    <child link="right_camera" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="up_camera">
+    <inertial>
+      <origin xyz="-0.0141516243722175 -3.26096145666366E-05 0.00213464076433513" rpy="0 0 0" />
+      <mass value="0.0330606354180295" />
+      <inertia ixx="2.1849341566882E-05" ixy="-6.17921287204605E-09" ixz="1.25356970547292E-07" iyy="2.18263739734521E-05" iyz="-1.49626199314348E-09" izz="3.29669412757788E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/up_camera.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/up_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="up_camera" type="fixed">
+    <origin xyz="0.30874 0 0.83696" rpy="1.5708 0.20944 0" />
+    <parent link="base_link" />
+    <child link="up_camera" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="down_camera">
+    <inertial>
+      <origin xyz="-0.0141516246150703 -3.2608990155269E-05 0.00213463913380307" rpy="0 0 0" />
+      <mass value="0.0330606407134946" />
+      <inertia ixx="2.18493246164614E-05" ixy="-6.1789784629534E-09" ixz="1.25354729142066E-07" iyy="2.18263555001382E-05" iyz="-1.49709330581095E-09" izz="3.29669547205362E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/down_camera.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/down_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="down_camera" type="fixed">
+    <origin xyz="0.468 0 0.17399" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="down_camera" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+  <link name="laser">
+    <inertial>
+      <origin xyz="4.01377249381607E-07 -0.0004029337120008 -0.0123695383858642" rpy="0 0 0" />
+      <mass value="0.231565199535219" />
+      <inertia ixx="0.000154249816516349" ixy="3.19274550737147E-09" ixz="1.57803601278125E-09" iyy="0.000148311975446975" iyz="-2.12876270026058E-06" izz="0.000139022675797784" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/laser.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/laser.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <origin xyz="0.14712 -0.00045106 0.94715" rpy="0 0 1.5708" />
+    <parent link="base_link" />
+    <child link="laser" />
+    <axis xyz="0 0 0" />
+    <limit lower="-3.14" upper="3.14" effort="100" velocity="1" />
+  </joint>
+</robot>

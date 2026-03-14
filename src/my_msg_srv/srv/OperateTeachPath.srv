@@ -1,0 +1,21 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+
+uint8 operation # get, add, modify, Delete, getAll
+int32 id
+TeachPath teachpath
+int32 mapId
+---
+
+TeachPath teachpath
+TeachPath[] teachpaths
+bool success
+string message
+
+# get: 指定 id , 返回 teachpath
+# Delete: 指定 id , 删除对应的 teachpath
+# Modify: 指定 teachpath, 修改对应的 teachpath
+# getAll: 返回所有 teachpaths

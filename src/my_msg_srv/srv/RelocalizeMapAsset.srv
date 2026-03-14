@@ -1,0 +1,13 @@
+string robot_id
+string map_name
+string map_version
+string frame_id
+float64 x
+float64 y
+float64 yaw
+---
+bool success
+string message
+string localization_state
+string map_name
+string map_version

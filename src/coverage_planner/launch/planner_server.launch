@@ -1,0 +1,11 @@
+<launch>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="planner_defaults_yaml" default="$(find coverage_planner)/config/planner_server_defaults.yaml"/>
+  <arg name="allow_legacy_unscoped_plan" default="true"/>
+
+  <node pkg="coverage_planner" type="planner_server_node.py" name="coverage_planner_server" output="screen">
+    <rosparam command="load" file="$(arg planner_defaults_yaml)"/>
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="allow_legacy_unscoped_plan" value="$(arg allow_legacy_unscoped_plan)"/>
+  </node>
+</launch>

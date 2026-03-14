@@ -1,0 +1,112 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="tb3_factory_50x70">
+    <!-- Basic lighting -->
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <!-- Ground plane -->
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- ====== Boundary walls: 50m (X) x 70m (Y) ====== -->
+    <!-- Thickness: 0.2m, Height: 2.0m -->
+    <model name="wall_bottom">
+      <static>true</static>
+      <pose>25 -0.100 1.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>50.400 0.200 2.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>50.400 0.200 2.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_top">
+      <static>true</static>
+      <pose>25 70.100 1.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>50.400 0.200 2.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>50.400 0.200 2.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_left">
+      <static>true</static>
+      <pose>-0.100 35 1.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.200 70.400 2.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.200 70.400 2.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_right">
+      <static>true</static>
+      <pose>50.100 35 1.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>0.200 70.400 2.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>0.200 70.400 2.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ====== Obstacles (3 long blocks) ====== -->
+    <!-- Obstacle 1: X 2.5..12.5, Y 5..65 -->
+    <model name="obs_left_10x60">
+      <static>true</static>
+      <pose>7.5 35 0.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>8 58 1.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>8 58 1.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Obstacle 2: X 15..35, Y 5..65 -->
+    <model name="obs_mid_20x60">
+      <static>true</static>
+      <pose>25 35 0.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>18 58 1.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>18 58 1.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Obstacle 3: X 37.5..47.5, Y 5..65 -->
+    <model name="obs_right_10x60">
+      <static>true</static>
+      <pose>42.5 35 0.000 0 0 0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry><box><size>8 58 1.000</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><box><size>8 58 1.000</size></box></geometry>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

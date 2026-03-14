@@ -1,0 +1,11 @@
+# 请求消息
+int8 operation # 操作类型，0：查询路径，1：删除路径, 2：添加路径, 3：更新路径, 4：查询所有路径
+int32 id  # 要查询/更新的路径 ID
+string serialized_path # 要添加/更新的路径
+
+---
+
+# 响应消息
+string serialized_path  # 序列化后的 ccpp_path 数据
+int32[] ids # 所有路径的 ID
+string[] serialized_paths # 序列化后的所有 ccpp_path 数据

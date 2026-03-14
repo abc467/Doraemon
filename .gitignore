@@ -1,0 +1,11 @@
+/build/
+/devel/
+/logs/
+/.catkin_tools/
+/.catkin_workspace
+/.vscode/
+**/__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.swo

@@ -1,0 +1,54 @@
+# ===== Goal =====
+string zone_id
+int32  zone_version
+
+# Preferred structured geometry
+coverage_msgs/ZoneGeometry geom
+
+# Optional: if caller cannot send structured geometry, send JSON string:
+# {"frame_id":"map","outer":[[x,y],...],"holes":[[[x,y],...],...],"prec":3}
+string polygon_json
+
+# Execution profile (meta for task layer; planning may not use it)
+string profile_name
+
+# Debug
+bool   debug_publish_markers
+bool   export_input
+
+# Planner params (keep same semantics as your R&D script)
+float32 split_angle_deg
+string  turn_model
+float32 viz_step_m
+float32 path_step_m
+float32 turn_step_m
+float32 line_w
+bool    mute_stderr
+
+float32 wall_margin_m
+float32 turn_margin_m
+
+float32 edge_corner_radius_m
+float32 edge_corner_pull
+int32   edge_corner_min_pts
+
+float32 pre_proj_min
+float32 pre_proj_max
+float32 pre_prefix_max
+float32 e_pre_min
+float32 e_pre_max
+
+---
+# ===== Result =====
+bool   ok
+string plan_id
+string error_code
+string error_message
+int32  blocks
+float32 total_path_length_m
+
+---
+# ===== Feedback =====
+string stage
+float32 progress
+string message

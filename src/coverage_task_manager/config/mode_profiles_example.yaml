@@ -1,0 +1,28 @@
+# Example mode profile catalog.
+#
+# Load it into parameter server:
+#   <rosparam command="load" file="$(find coverage_task_manager)/config/mode_profiles_example.yaml"/>
+#
+# Then in task_manager.launch set:
+#   <param name="mode_profiles" value="$(arg mode_profiles)"/>  (or load directly)
+#
+# Fields:
+#   mbf_controller_name: MBF controller instance name selected by sys_profile
+#   actuator_profile_name: cleaning actuator profile name (default = key)
+#   default_clean_mode: optional default clean_mode (scrub/dry/vacuum/inspect)
+
+mode_profiles:
+  heavy:
+    mbf_controller_name: "MPPI_Heavy_Controller"
+    actuator_profile_name: "heavy"
+    default_clean_mode: "scrub"
+
+  standard:
+    mbf_controller_name: "MPPI_Standard_Controller"
+    actuator_profile_name: "standard"
+    default_clean_mode: "scrub"
+
+  eco:
+    mbf_controller_name: "MPPI_Eco_Controller"
+    actuator_profile_name: "eco"
+    default_clean_mode: "scrub"

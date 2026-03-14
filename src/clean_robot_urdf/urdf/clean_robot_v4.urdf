@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="clean_robot">
+
+  <link name="base_footprint">
+  </link>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+  </joint>
+
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0.00240726108493841 0.000418202039983564 0.00979407155909989" rpy="0 0 0" />
+      <mass value="28.1386020223436" />
+      <inertia ixx="1.02468969743477" ixy="0.0158941047042103" ixz="-0.00370358705210533" iyy="2.18751601311466" iyz="-2.28678674738598E-05" izz="3.20778172827221" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/base_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.866666666666667 0.866666666666667 0.890196078431372 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="left_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder length="0.1" radius="0.15"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1 1"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="left_wheel_joint" type="fixed">
+    <origin xyz="0 0.385 -0.095500000000001" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="left_wheel_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+  <link name="right_wheel_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder length="0.1" radius="0.15"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0 0 1 1"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="right_wheel_joint" type="fixed">
+    <origin xyz="0 -0.385 -0.095500000000001" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="right_wheel_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+  <link name="laser">
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <origin xyz="-0.174000000000006 0 0.94085" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="laser" />
+    <axis xyz="0 0 0" />
+  </joint>
+  <link name="gyro_link">
+    <inertial>
+      <origin xyz="3.1965E-05 -1.3878E-17 0.0060316" rpy="0 0 0" />
+      <mass value="0.02361" />
+      <inertia ixx="5.4191E-06" ixy="5.5519E-21" ixz="1.8141E-09" iyy="4.3874E-06" iyz="7.0038E-21" izz="9.3231E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/gyro.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.74118 0.90196 0.95686 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://clean_robot_urdf/meshes/gyro.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="gyro_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <parent link="base_link" />
+    <child link="gyro_link" />
+    <axis xyz="0 0 0" />
+  </joint>
+</robot>

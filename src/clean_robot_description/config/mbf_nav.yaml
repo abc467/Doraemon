@@ -1,0 +1,451 @@
+# =========================
+# Move Base Flex (MBF) 插件注册
+# =========================
+planners:
+  - name: ThetaStarPlanner
+    type: "mbf_global_planner/ThetaStarPlanner"
+  # - name: AStarPlanner
+  #   type: "a_star_planner/AStarMBFPlanner"
+
+controllers:
+  - name: MPPI_Standard_Controller
+    type: "local_planner/MPPIController"
+  - name: MPPI_Heavy_Controller
+    type: "local_planner/MPPIController"
+  - name: MPPI_Eco_Controller
+    type: "local_planner/MPPIController"
+  # - name: MyPlanner
+  #   type: "my_planner/MyPlanner"
+
+recovery_behaviors:
+  - name: clear_costmap
+    type: "clear_costmap_recovery/ClearCostmapRecovery"
+  # - name: rotate
+  #   type: "rotate_recovery/RotateRecovery"
+
+# 常用节奏
+# planner/controller 的频率与 patience 已拆到 mbf_timing.yaml，
+# 并同时加载到 move_base_flex 和 move_base_legacy_relay，避免 relay 用默认 5.0 覆盖 MBF。
+recovery_enabled: true
+
+
+# =========================
+# 全局规划器参数（theta_star_planner_mbf / Theta*）
+# 注意：这里必须用“实例名 ThetaStarPlanner”
+# =========================
+ThetaStarPlanner:
+  allow_unknown: true
+  terminal_checking_interval: 1024
+  w_traversal_cost: 1.0
+  w_euc_cost: 2.0
+  w_heuristic_cost: 1.0
+  goal_tolerance: 0.05
+  path_check_interval: 0.10
+  path_max_age: 60.0
+
+
+# =========================
+# 点对点导航局部控制器（my_planner）
+# =========================
+# MyPlanner:
+#   max_vel_x: 0.30
+#   acc_lim_x: 0.30
+#   max_vel_theta: 0.30
+#   acc_lim_theta: 1.0
+#   lookahead_dist: 0.50
+#   goal_tolerance: 0.02
+
+
+# =========================
+# MPPI 局部控制器（实例 1：全覆盖清扫）
+# =========================
+
+MPPI_Standard_Controller: &mppi_standard_controller
+  # 目标容忍度（单位：米）
+  goal_tolerance: 0.6      # 机器人与目标的距离小于此值时认为到达目标
+  angle_tolerance: 0.4     # 机器人朝向与目标角度的容忍度（单位：弧度）
+
+  # 模型参数
+  time_steps: 30           # 预测时域步数
+  model_dt: 0.15            # 模型时间步长（秒）  0.1
+  batch_size: 2000         # 每次优化采样的轨迹数量
+
+  # 控制输入噪声（标准差）
+  vx_std: 0.2              # 线速度x的噪声标准差
+  vy_std: 0.2              # 线速度y的噪声标准差（差速驱动应为0）
+  wz_std: 0.2              # 角速度z的噪声标准差
+
+  # 控制输入限制
+  vx_max: 0.5             # 最大线速度x（正方向）
+  vx_min: 0.0             # 最小线速度x（负方向，倒车）
+  vy_max: 0.0              # 最大线速度y（差速驱动应为0）
+  wz_max: 0.3              # 最大角速度z
+
+  # 优化参数
+  iteration_count: 1       # 每次控制周期的优化迭代次数
+  prune_distance: 1.7      # 轨迹修剪距离（超过此距离的轨迹点被忽略）
+  transform_tolerance: 0.1 # TF变换的等待容忍时间（秒）
+  temperature: 0.3         # 软最大值温度参数（控制随机性）
+  gamma: 0.015             # 折扣因子（未来代价的权重衰减）
+
+  # 运动模型
+  motion_model: "DiffDrive" # 差速驱动模型
+
+  # 重试机制
+  retry_attempt_limit: 2   # 路径重试次数限制
+
+  # 可视化
+  visualize: true          # 是否启用轨迹可视化
+  TrajectoryVisualizer:
+     trajectory_step: 5    # 可视化轨迹的步长
+     time_step: 3          # 可视化时间步长
+
+  # 评估函数（Critic）配置
+  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic", 
+            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic", 
+            "PreferForwardCritic", "TwirlingCritic"]
+
+  # --- 各Critic详细配置 ---
+
+  # 约束评估（避免碰撞）
+  ConstraintCritic:
+     enabled: true
+     cost_power: 1         # 代价指数
+     cost_weight: 5.0      # 代价权重
+
+  # 代价地图评估（路径代价）
+  CostCritic:
+     enabled: true
+     cost_power: 1
+     cost_weight: 3.81    # 3.81 
+     critical_cost: 300.0  # 临界代价阈值
+     consider_footprint: false # 是否考虑机器人轮廓
+     collision_cost: 1000000.0 # 碰撞代价
+     near_goal_distance: 1.0   # 接近目标时的特殊处理距离
+     trajectory_point_step: 2  # 轨迹点采样步长
+
+  # 目标角度评估（朝向目标角度）
+  GoalAngleCritic:
+     enabled: true
+     cost_power: 1
+     cost_weight: 3.0
+     threshold_to_consider: 0.4 # 仅当距离目标<0.4米时激活
+
+  # 目标位置评估（到达目标）
+  GoalCritic:
+     enabled: true
+     cost_power: 1
+     cost_weight: 5.0      # 高权重确保目标优先
+     threshold_to_consider: 1.0 # 激活距离阈值
+
+  # 路径对齐评估（轨迹与路径对齐）
+  PathAlignCritic:
+     enabled: true
+     cost_power: 1
+     cost_weight: 8.0     # 高权重确保严格对齐  10.0
+     max_path_occupancy_ratio: 0.07 # 路径占用比例限制
+     offset_from_furthest: 20       # 从最远点开始的偏移量
+     trajectory_point_step: 4       # 轨迹点采样步长
+     threshold_to_consider: 0.4     # 激活阈值
+     use_path_orientations: true    # 是否使用路径朝向信息
+
+  # 路径角度评估（轨迹角度与路径一致）
+  PathAngleCritic:
+     enabled: true
+     vx_min: -0.35         # 激活的最小速度
+     offset_from_furthest: 4
+     cost_power: 1
+     cost_weight: 2.2
+     threshold_to_consider: 0.4
+     max_angle_to_furthest: 0.8     # 与最远点的最大角度差
+     mode: 2               # 计算模式
+
+  # 路径跟随评估（靠近全局路径）
+  PathFollowCritic:
+     enabled: true
+     threshold_to_consider: 0.4
+     offset_from_furthest: 6
+     cost_power: 1
+     cost_weight: 5.0
+
+  # 优先向前评估（避免频繁转向）
+  PreferForwardCritic:
+     enabled: true
+     threshold_to_consider: 0.4
+     cost_power: 1
+     cost_weight: 5.0      # 高权重减少不必要的转向
+
+  # 旋转评估（避免原地旋转）
+  TwirlingCritic:
+     enabled: true
+     threshold_to_consider: 0.3
+     cost_power: 1
+     cost_weight: 2.0      # 较低权重，仅轻微惩罚旋转
+
+MPPI_Heavy_Controller:
+  <<: *mppi_standard_controller
+  vx_max: 0.35
+  wz_max: 0.22
+  vx_std: 0.15
+  wz_std: 0.15
+  prune_distance: 1.5
+  temperature: 0.25
+
+MPPI_Eco_Controller:
+  <<: *mppi_standard_controller
+  vx_max: 0.45
+  wz_max: 0.26
+  vx_std: 0.18
+  wz_std: 0.18
+  prune_distance: 1.6
+  temperature: 0.35
+
+# MPPI_Clean_Controller:
+#   visualize: true
+#   goal_tolerance: 0.60
+#   angle_tolerance: 0.40
+
+#   # MPPI 内部也会读取 controller_frequency（用于 offset/shift 判定）
+#   controller_frequency: 20.0
+
+#   # 模型/采样
+#   time_steps: 80
+#   model_dt: 0.1
+#   # time_steps: 30
+#   # model_dt: 0.15
+#   batch_size: 2000
+
+#   # 控制输入噪声（标准差）
+#   vx_std: 0.2
+#   vy_std: 0.0
+#   wz_std: 0.4
+
+#   # 控制输入限制
+#   vx_max: 0.5
+#   vx_min: 0.0
+#   vy_max: 0.0
+#   wz_max: 0.8
+
+#   # 加速度限制
+#   ax_max: 0.8
+#   ax_min: -0.8
+#   ay_max: 0.0
+#   az_max: 1.5
+
+#   # 优化参数
+#   iteration_count: 2
+#   temperature: 0.3
+#   gamma: 0.015
+
+#   # 路径处理
+#   max_robot_pose_search_dist: 3.0
+#   prune_distance: 1.7
+#   # max_robot_pose_search_dist: 5.0
+#   # prune_distance: 4.0
+#   transform_tolerance: 0.2
+
+#   motion_model: "DiffDrive"
+#   retry_attempt_limit: 3
+
+#   TrajectoryVisualizer:
+#     trajectory_step: 5
+#     time_step: 3
+
+#   critics:
+#     - ConstraintCritic
+#     - CostCritic
+#     - GoalAngleCritic
+#     - GoalCritic
+#     - PathAlignCritic
+#     - PathAngleCritic
+#     - PathFollowCritic
+#     - PreferForwardCritic
+#     - TwirlingCritic
+
+#   ConstraintCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 5.0
+
+#   CostCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 3.81
+#     critical_cost: 300.0
+#     consider_footprint: false
+#     collision_cost: 1000000.0
+#     near_goal_distance: 1.0
+#     inflation_layer_name: "local_costmap/inflation_layer"
+#     trajectory_point_step: 2
+
+#   GoalAngleCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 3.0
+#     threshold_to_consider: 0.4
+
+#   GoalCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 5.0
+#     threshold_to_consider: 1.0
+
+#   PathAlignCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 8.0
+#     max_path_occupancy_ratio: 0.07
+#     offset_from_furthest: 20
+#     trajectory_point_step: 4
+#     threshold_to_consider: 0.4
+#     use_path_orientations: true
+
+#   PathAngleCritic:
+#     enabled: true
+#     vx_min: -0.35
+#     offset_from_furthest: 4
+#     cost_power: 1
+#     cost_weight: 2.2
+#     threshold_to_consider: 0.4
+#     max_angle_to_furthest: 0.8
+#     mode: 2
+
+#   PathFollowCritic:
+#     enabled: true
+#     threshold_to_consider: 0.4
+#     offset_from_furthest: 6
+#     cost_power: 1
+#     cost_weight: 5.0
+
+#   PreferForwardCritic:
+#     enabled: true
+#     threshold_to_consider: 0.4
+#     cost_power: 1
+#     cost_weight: 5.0
+
+#   TwirlingCritic:
+#     enabled: true
+#     threshold_to_consider: 0.3
+#     cost_power: 1
+#     cost_weight: 0.2
+
+
+# =========================
+# MPPI 局部控制器（实例 2：重压清扫/更保守）
+# =========================
+# MPPI_Heavy_Clean_Controller:
+#   visualize: true
+#   goal_tolerance: 0.60
+#   angle_tolerance: 0.40
+#   controller_frequency: 20.0
+
+#   time_steps: 30
+#   model_dt: 0.10
+#   batch_size: 2000
+
+#   vx_std: 0.5
+#   vy_std: 0.0
+#   wz_std: 0.1
+
+#   vx_max: 0.10
+#   vx_min: 0.0
+#   vy_max: 0.0
+#   wz_max: 0.5
+
+#   ax_max: 0.5
+#   ax_min: -0.5
+#   ay_max: 0.0
+#   az_max: 1.0
+
+#   iteration_count: 1
+#   temperature: 0.3
+#   gamma: 0.015
+
+#   max_robot_pose_search_dist: 3.0
+#   prune_distance: 1.7
+#   transform_tolerance: 0.1
+
+#   motion_model: "DiffDrive"
+#   retry_attempt_limit: 2
+
+#   TrajectoryVisualizer:
+#     trajectory_step: 5
+#     time_step: 3
+
+#   critics:
+#     - ConstraintCritic
+#     - CostCritic
+#     - GoalAngleCritic
+#     - GoalCritic
+#     - PathAlignCritic
+#     - PathAngleCritic
+#     - PathFollowCritic
+#     - PreferForwardCritic
+#     - TwirlingCritic
+
+#   ConstraintCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 5.0
+
+#   CostCritic:
+#     enabled: true
+#     consider_footprint: false
+#     cost_power: 1
+#     cost_weight: 3.81
+#     critical_cost: 300.0
+#     collision_cost: 1000000.0
+#     near_goal_distance: 1.0
+#     inflation_layer_name: "local_costmap/inflation_layer"
+#     trajectory_point_step: 2
+
+#   GoalAngleCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 3.0
+#     threshold_to_consider: 0.4
+
+#   GoalCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 5.0
+#     threshold_to_consider: 1.0
+
+#   PathAlignCritic:
+#     enabled: true
+#     cost_power: 1
+#     cost_weight: 8.0
+#     max_path_occupancy_ratio: 0.07
+#     offset_from_furthest: 20
+#     trajectory_point_step: 4
+#     threshold_to_consider: 0.4
+#     use_path_orientations: true
+
+#   PathAngleCritic:
+#     enabled: true
+#     vx_min: -0.35
+#     offset_from_furthest: 4
+#     cost_power: 1
+#     cost_weight: 2.2
+#     threshold_to_consider: 0.4
+#     max_angle_to_furthest: 0.8
+#     mode: 2
+
+#   PathFollowCritic:
+#     enabled: true
+#     threshold_to_consider: 0.4
+#     offset_from_furthest: 6
+#     cost_power: 1
+#     cost_weight: 5.0
+
+#   PreferForwardCritic:
+#     enabled: true
+#     threshold_to_consider: 0.4
+#     cost_power: 1
+#     cost_weight: 5.0
+
+#   TwirlingCritic:
+#     enabled: true
+#     threshold_to_consider: 0.3
+#     cost_power: 1
+#     cost_weight: 2.0

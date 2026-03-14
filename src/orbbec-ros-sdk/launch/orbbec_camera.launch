@@ -1,0 +1,5 @@
+<launch>
+	<arg name="camera_type" value="$(env CAMERA_TYPE)" doc="astraproplus,gemini2"/>
+	<include file="$(find orbbec_camera)/launch/astra.launch" if="$(eval arg('camera_type') == 'astraproplus')"/>
+	<include file="$(find orbbec_camera)/launch/gemini2.launch" if="$(eval arg('camera_type') == 'gemini2')"/>
+</launch>
