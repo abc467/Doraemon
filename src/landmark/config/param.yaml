@@ -1,0 +1,39 @@
+
+# landmark_publisher_param:
+#   # 是否使用反光柱或反光板landmark（可同时开启）
+#   use_reflect_panel: true
+#   use_reflect_column: true
+#   #
+#   intensity_threshold: 800.0        #反光材料强度阈值，可通过rviz查看反光板，反光柱的反射强度（与雷达和反光材料有关）
+#   min_colum_points_per_cluster: 5   #雷达打在反光柱上的点数量（与雷达和反光材料有关）
+#   min_panel_points_per_cluster: 20  #雷达打在反光板上的点数量（与雷达和反光材料有关）
+#   # 
+#   column_radius_cm: 5.0            # 反光柱半径 单位：厘米
+#   position_threshold: 2.0          # 被认为是同一个landmark的最大距离 单位：米
+#   panel_length_m: 0.2              # 反光板长度 单位：米
+#   #拟合误差阈值
+#   max_circle_fit_error: 0.15      
+#   max_line_fit_error: 5.0
+
+landmark_publisher_param:
+  use_reflect_panel: true
+  use_reflect_column: false
+  intensity_threshold: 150
+  min_colum_points_per_cluster: 8.0
+  min_panel_points_per_cluster: 8.0
+  max_circle_fit_error: 0.15       
+  max_line_fit_error: 5.0
+  column_radius: 5.0           
+  position_threshold: 2.0         
+  panel_length: 0.2
+  panel_length_noise: 0.08
+  translation_weight: 50     
+  debug_mode: true
+  frame_id: "base_link"          
+
+DM_Reader:
+  PORT: 3000                #端口号
+  SERVER_IP: "192.168.127.14" #主机ip
+  BUFFER_SIZE: 1024
+  translation_weight: 50 #0.55e4
+  rotation_weight: 50 #1e5

@@ -1,0 +1,27 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+int8 ENABLE_KEEP = 0
+int8 ENABLE_DISABLE = 1
+int8 ENABLE_ENABLE = 2
+
+uint8 operation # get; add; modify; Delete(soft-disable); getAll
+string map_name
+PgmData map
+bool set_active
+int8 enabled_state # 0: 保持不变 1: 禁用 2: 启用
+
+---
+
+bool success
+string message
+PgmData map
+PgmData[] maps # getAll: latest asset heads; get: the requested asset detail
+
+# add: 纳管工作空间 map 目录中的 <map_name>.pbstream 到正式资产库，可选设为当前地图
+# modify: 更新资产元数据（description/enabled），可选 set_active
+# Delete: 软删除/禁用 map_name，不删除磁盘文件
+# get: 按 map_name 查询
+# getAll: 返回所有已纳管地图资产元数据

@@ -1,0 +1,45 @@
+# robot_localization 2D EKF 配置：保守模式
+# 思路：
+# 1. odom 只使用前向线速度 vx
+# 2. imu 只使用角速度 wz
+# 3. 不直接融合 odom 的 pose 和 odom 的角速度
+# 适合先做稳定性验证，尽量减少把轮式累计漂移直接灌进 EKF。
+
+frequency: 50
+sensor_timeout: 0.1
+two_d_mode: true
+publish_tf: false
+publish_acceleration: false
+predict_to_current_time: true
+transform_time_offset: 0.0
+transform_timeout: 0.0
+print_diagnostics: true
+
+odom_frame: odom
+base_link_frame: base_footprint
+world_frame: odom
+
+# 原始轮速里程计现在走非 odom 命名，默认订阅 /wheel_speed_raw。
+odom0: /wheel_speed_raw
+odom0_queue_size: 20
+odom0_nodelay: true
+odom0_differential: false
+odom0_relative: false
+odom0_config: [false, false, false,
+               false, false, false,
+               true,  false, false,
+               false, false, false,
+               false, false, false]
+
+# IMU 仍然走单独的 for_ekf 话题，但默认只融合角速度 wz。
+imu0: /imu_for_ekf
+imu0_queue_size: 50
+imu0_nodelay: true
+imu0_differential: false
+imu0_relative: false
+imu0_remove_gravitational_acceleration: false
+imu0_config: [false, false, false,
+              false, false, false,
+              false, false, false,
+              false, false, true,
+              false, false, false]

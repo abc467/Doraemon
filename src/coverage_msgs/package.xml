@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>coverage_msgs</name>
+  <version>0.1.0</version>
+  <description>Messages and actions for commercial coverage cleaning robot planning/execution.</description>
+
+  <maintainer email="dev@yourcompany.com">dev</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- build -->
+  <build_depend>message_generation</build_depend>
+  <build_depend>actionlib_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+
+  <!-- runtime -->
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>actionlib_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+
+  <export>
+  </export>
+</package>

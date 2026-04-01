@@ -1,0 +1,7 @@
+<library path="lib/libtheta_star_planner_mbf_lib">
+    <class name="mbf_global_planner/ThetaStarPlanner" type="mbf_global_planner::ThetaStarPlanner" base_class_type="mbf_costmap_core::CostmapPlanner">
+        <description>
+            mbf Theta* planner
+        </description>
+    </class>
+</library>

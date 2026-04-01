@@ -1,0 +1,25 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+
+uint8 operation # add; modify; getAll;
+string name     # 停车点名称:start 或 end
+geometry_msgs/Pose pose    # 停车起点或终点
+
+---
+
+bool success
+string message
+geometry_msgs/Pose startpose
+geometry_msgs/Pose endpose  
+
+### 记录用于回冲对接的停车点
+# add: 添加停车点位置, 给定name和pose
+# modify: 修改停车点位置，给定name和pose
+# getAll: 获取停车点位置，返回startpose和endpose
+
+# 前端:
+# 名称: "/clean_robot_server/parking_point_server"
+# type: geometry_msgs/Pose

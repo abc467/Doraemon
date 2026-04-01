@@ -1,0 +1,7 @@
+string profile_kind
+bool include_disabled
+string map_name
+---
+bool success
+string message
+my_msg_srv/ProfileOption[] profiles

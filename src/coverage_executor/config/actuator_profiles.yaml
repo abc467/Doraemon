@@ -1,0 +1,21 @@
+actuator_profiles:
+  standard:
+    water_pump_pwm: 28
+    suction_machine_pwm: 50
+    vacuum_motor_pwm: 50
+    height_scrub: 44
+    height_scrub_active: false
+
+  heavy:
+    water_pump_pwm: 40
+    suction_machine_pwm: 50
+    vacuum_motor_pwm: 50
+    height_scrub: 42
+    height_scrub_active: false
+
+  eco:
+    water_pump_pwm: 18
+    suction_machine_pwm: 24
+    vacuum_motor_pwm: 24
+    height_scrub: 34
+    height_scrub_active: false

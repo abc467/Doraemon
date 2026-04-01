@@ -1,0 +1,17 @@
+peakfinder_min_value=0.030000
+peakfinder_min_difference=0.001000
+detector_scales=5
+detector_sigma=0.200000
+detector_step=1.400000
+detector_dmst=2
+describer_min_rho=0.020000
+describer_max_rho=5.000000
+describer_bin_rho=4
+describer_bin_phi=4
+matcher_acceptance_threshold=0.100000
+matcher_success_probability=0.950000
+matcher_inlier_probability=0.400000
+matcher_distance_threshold=0.400000
+matcher_rigidity_threshold=0.300000
+matcher_adaptive=0
+movebase_controller="MPPIController"

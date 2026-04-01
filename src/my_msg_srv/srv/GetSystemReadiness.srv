@@ -1,0 +1,6 @@
+int32 task_id
+bool refresh_map_identity
+---
+bool success
+string message
+SystemReadiness readiness

@@ -1,0 +1,9 @@
+<library path="lib/libcoverage_constraints_nav">
+  <class name="coverage_constraints_nav/KeepoutConstraintLayer"
+         type="coverage_constraints_nav::KeepoutConstraintLayer"
+         base_class_type="costmap_2d::Layer">
+    <description>
+      Costmap layer that applies persistent no-go areas and virtual-wall keepouts.
+    </description>
+  </class>
+</library>

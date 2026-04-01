@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package cartographer.mapping.proto;
+
+import "cartographer/transform/proto/transform.proto";
+
+// NEW
+message SLAMResult{
+    message Result{
+         int32 trajectory_id = 5;
+         transform.proto.Rigid3d local_to_map = 10;
+         transform.proto.Rigid3d local_pose = 13;
+     }
+    map<int32, Result> results = 1;
+}

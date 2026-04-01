@@ -1,0 +1,379 @@
+Panels:
+  - Class: rviz/Displays
+    Help Height: 138
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Submaps1
+        - /PointCloud21
+      Splitter Ratio: 0.6006709933280945
+    Tree Height: 962
+  - Class: rviz/Selection
+    Name: Selection
+  - Class: rviz/Tool Properties
+    Expanded:
+      - /2D Pose Estimate1
+      - /2D Nav Goal1
+      - /Publish Point1
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  - Class: rviz/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz/Time
+    Name: Time
+    SyncMode: 0
+    SyncSource: PointCloud2
+Preferences:
+  PromptSaveOnExit: true
+Toolbars:
+  toolButtonStyle: 2
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 100
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        laser:
+          Value: true
+        map:
+          Value: true
+      Marker Alpha: 1
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        map:
+          laser:
+            {}
+      Update Interval: 0
+      Value: true
+    - Alpha: 1
+      Class: rviz/RobotModel
+      Collision Enabled: false
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+      Name: RobotModel
+      Robot Description: robot_description
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Class: Submaps
+      Enabled: true
+      Fade-out distance: 1
+      High Resolution: true
+      Low Resolution: false
+      Name: Submaps
+      Queue Size: 10
+      Submap query service: /submap_query
+      Submaps:
+        All: true
+        All Submap Pose Markers: true
+        Trajectory 0:
+          0.80: true
+          1.80: true
+          10.80: true
+          100.80: true
+          101.80: true
+          102.80: true
+          103.80: true
+          104.80: true
+          105.80: true
+          106.80: true
+          107.80: true
+          108.80: true
+          109.80: true
+          11.80: true
+          110.80: true
+          111.80: true
+          112.80: true
+          113.80: true
+          114.80: true
+          115.80: true
+          116.80: true
+          117.80: true
+          118.80: true
+          119.80: true
+          12.80: true
+          120.80: true
+          121.80: true
+          122.80: true
+          123.80: true
+          124.80: true
+          125.80: true
+          126.80: true
+          127.80: true
+          128.80: true
+          129.80: true
+          13.80: true
+          130.80: true
+          131.80: true
+          132.80: true
+          133.80: true
+          134.80: true
+          135.80: true
+          136.80: true
+          137.80: true
+          138.80: true
+          139.80: true
+          14.80: true
+          140.80: true
+          141.80: true
+          142.80: true
+          143.80: true
+          144.80: true
+          145.80: true
+          146.80: true
+          147.80: true
+          148.80: true
+          15.80: true
+          16.80: true
+          17.80: true
+          18.80: true
+          19.80: true
+          2.80: true
+          20.80: true
+          21.80: true
+          22.80: true
+          23.80: true
+          24.80: true
+          25.80: true
+          26.80: true
+          27.80: true
+          28.80: true
+          29.80: true
+          3.80: true
+          30.80: true
+          31.80: true
+          32.80: true
+          33.80: true
+          34.80: true
+          35.80: true
+          36.80: true
+          37.80: true
+          38.80: true
+          39.80: true
+          4.80: true
+          40.80: true
+          41.80: true
+          42.80: true
+          43.80: true
+          44.80: true
+          45.80: true
+          46.80: true
+          47.80: true
+          48.80: true
+          49.80: true
+          5.80: true
+          50.80: true
+          51.80: true
+          52.80: true
+          53.80: true
+          54.80: true
+          55.80: true
+          56.80: true
+          57.80: true
+          58.80: true
+          59.80: true
+          6.80: true
+          60.80: true
+          61.80: true
+          62.80: true
+          63.80: true
+          64.80: true
+          65.80: true
+          66.80: true
+          67.80: true
+          68.80: true
+          69.80: true
+          7.80: true
+          70.80: true
+          71.80: true
+          72.80: true
+          73.80: true
+          74.80: true
+          75.80: true
+          76.80: true
+          77.80: true
+          78.80: true
+          79.80: true
+          8.80: true
+          80.80: true
+          81.80: true
+          82.80: true
+          83.80: true
+          84.80: true
+          85.80: true
+          86.80: true
+          87.80: true
+          88.80: true
+          89.80: true
+          9.80: true
+          90.80: true
+          91.80: true
+          92.80: true
+          93.80: true
+          94.80: true
+          95.80: true
+          96.80: true
+          97.80: true
+          98.80: true
+          99.80: true
+          Submap Pose Markers: true
+          Value: true
+        Trajectory 1:
+          0.44: true
+          1.9: true
+          Submap Pose Markers: true
+          Value: true
+      Topic: /submap_list
+      Tracking frame: base_link
+      Unreliable: false
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz/PointCloud2
+      Color: 0; 255; 0
+      Color Transformer: FlatColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Min Color: 0; 0; 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Queue Size: 10
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.20000000298023224
+      Style: Flat Squares
+      Topic: /scan_matched_points2
+      Unreliable: false
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: false
+      Marker Topic: /trajectory_node_list
+      Name: Trajectories
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: false
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /landmark_poses_list
+      Name: Landmark Poses
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /constraint_list
+      Name: Constraints
+      Namespaces:
+        Inter constraints, different trajectories: true
+        Inter residuals, different trajectories: true
+        Intra constraints: true
+        Intra residuals: true
+      Queue Size: 100
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 100; 100; 100
+    Default Light: true
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+    - Class: rviz/SetInitialPose
+      Theta std deviation: 0.2617993950843811
+      Topic: /initialpose
+      X std deviation: 0.5
+      Y std deviation: 0.5
+    - Class: rviz/SetGoal
+      Topic: /move_base_simple/goal
+    - Class: rviz/PublishPoint
+      Single click: true
+      Topic: /clicked_point
+  Value: true
+  Views:
+    Current:
+      Angle: 0
+      Class: rviz/TopDownOrtho
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Scale: 7.926357269287109
+      Target Frame: <Fixed Frame>
+      X: -18.613662719726562
+      Y: 60.83762741088867
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1472
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000400000000000001f7000004bafc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b000000b000fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000b0fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000006e000004ba0000018200fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261000000010000015f000004bafc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000006e000004ba0000013200fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000009700000005efc0100000002fb0000000800540069006d0065010000000000000970000006dc00fffffffb0000000800540069006d0065010000000000000450000000000000000000000602000004ba00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Time:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 2416
+  X: 144
+  Y: 54

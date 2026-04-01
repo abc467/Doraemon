@@ -1,0 +1,16 @@
+string map_name
+string alignment_version
+string raw_frame
+string aligned_frame
+geometry_msgs/Point32 p1
+geometry_msgs/Point32 p2
+float64 pivot_x
+float64 pivot_y
+string source
+string status
+bool activate
+---
+bool success
+string message
+float64 yaw_offset_deg
+MapAlignmentConfig config

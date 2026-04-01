@@ -1,0 +1,7 @@
+string robot_id
+string map_name
+---
+bool success
+string message
+string map_name
+string localization_state

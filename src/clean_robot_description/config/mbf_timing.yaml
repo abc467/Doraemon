@@ -1,0 +1,9 @@
+# Shared timing parameters for both MBF and the legacy move_base relay.
+# The relay boots with move_base defaults (planner_patience/controller_patience = 5.0)
+# and forwards them to MBF via dynamic_reconfigure unless we override them here too.
+
+planner_frequency: 0.5
+controller_frequency: 10.0
+
+planner_patience: 20.0
+controller_patience: 30.0

@@ -1,0 +1,36 @@
+# Example recurring schedules for commercial cleaning robots.
+#
+# Usage (roslaunch):
+#   <rosparam command="load" file="$(find coverage_task_manager)/config/schedules_example.yaml"/>
+#   <param name="scheduler_enable" value="true"/>
+#
+# Notes:
+# - dow uses [0..6], Monday=0 ... Sunday=6.
+# - clean_mode: scrub/dry/vacuum/inspect
+#   * inspect = 巡检：默认不打开执行机构，只在 AI 触发时短时开启（由 executor.ai_spot_* 实现）
+# - plan_profile_name: coverage plan selection key in DB (plans.plan_profile_name), e.g. cover_standard
+# - sys_profile_name: heavy/standard/eco (switch MBF/controller + cleaning actuator params)
+
+schedules:
+  - id: "mon_6am_clean_zone_demo"
+    enabled: true
+    type: "weekly"
+    dow: [0]
+    time: "06:00"
+    task:
+      zone_id: "zone_demo"
+      loops: 2
+      plan_profile_name: "cover_standard"
+      sys_profile_name: "standard"
+      clean_mode: "scrub"
+
+  - id: "daily_23_30_inspect_zone_demo"
+    enabled: false
+    type: "daily"
+    time: "23:30"
+    task:
+      zone_id: "zone_demo"
+      loops: 1
+      plan_profile_name: "cover_standard"
+      sys_profile_name: "eco"
+      clean_mode: "inspect"

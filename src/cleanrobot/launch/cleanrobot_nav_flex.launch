@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="maps_root" default="/data/maps"/>
+  <arg name="external_maps_root" default="/home/sunnybaer/Doraemon/map"/>
+  <arg name="robot_id" default="local_robot"/>
+  <arg name="map_name" default=""/>
+  <arg name="start_planner_server" default="true"/>
+  <arg name="enable_rect_zone_planner" default="true"/>
+  <arg name="start_task_system" default="true"/>
+  <arg name="start_legacy_mapping_service" default="false"/>
+  <arg name="task_auto_charge_enable" default="true"/>
+  <arg name="executor_auto_charge_enable" default="false"/>
+  <arg name="dock_supply_enable" default="true"/>
+
+  <include file="$(find clean_robot_description)/launch/mbf_nav.launch">
+    <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+    <arg name="ops_db_path" value="$(arg ops_db_path)"/>
+    <arg name="robot_id" value="$(arg robot_id)"/>
+    <arg name="map_name" value="$(arg map_name)"/>
+    <arg name="external_maps_root" value="$(arg external_maps_root)"/>
+  </include>
+
+  <include file="$(find cleanrobot)/launch/amcl_diff.launch">
+    <arg name="use_map_topic" value="true"/>
+  </include>
+
+  <group if="$(arg start_planner_server)">
+    <include file="$(find coverage_planner)/launch/planner_server.launch">
+      <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+      <arg name="robot_id" value="$(arg robot_id)"/>
+      <arg name="map_topic" value="/map"/>
+      <arg name="enable_rect_zone_planner" value="$(arg enable_rect_zone_planner)"/>
+    </include>
+  </group>
+
+  <group if="$(arg start_task_system)">
+    <include file="$(find coverage_task_manager)/launch/task_system.launch">
+      <arg name="task_auto_charge_enable" value="$(arg task_auto_charge_enable)"/>
+      <arg name="executor_auto_charge_enable" value="$(arg executor_auto_charge_enable)"/>
+      <arg name="dock_supply_enable" value="$(arg dock_supply_enable)"/>
+      <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+      <arg name="ops_db_path" value="$(arg ops_db_path)"/>
+      <arg name="maps_root" value="$(arg maps_root)"/>
+      <arg name="robot_id" value="$(arg robot_id)"/>
+    </include>
+  </group>
+
+  <group if="$(arg start_legacy_mapping_service)">
+    <node pkg="coverage_planner" type="map_asset_manager_node.py" name="map_asset_manager" output="screen">
+      <param name="plan_db_path" value="$(arg plan_db_path)"/>
+      <param name="maps_root" value="$(arg maps_root)"/>
+      <param name="robot_id" value="$(arg robot_id)"/>
+      <param name="map_topic" value="/map"/>
+      <param name="set_active_on_save" value="true"/>
+      <param name="service_name" value="/clean_robot_server/mapping_server"/>
+    </node>
+  </group>
+
+  <include file="$(find ground_segmentation_tracking)/launch/duoxiangji.launch"/>
+  <include file="$(find my_docking_controller)/launch/my_docking_controller.launch"/>
+  <node pkg="dock_tracker" type="dock_tracker_node" name="dock_tracker_node"/>
+
+  <include file="$(find rosbridge_server)/launch/rosbridge_websocket.launch"/>
+</launch>

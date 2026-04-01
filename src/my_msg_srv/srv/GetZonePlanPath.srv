@@ -1,0 +1,20 @@
+string map_name
+string zone_id
+string alignment_version # optional; empty means use stored editor alignment or current active alignment
+string plan_profile_name # optional; empty means use zone active plan default selection
+---
+bool success
+string message
+string zone_id
+string active_plan_id
+string plan_profile_name
+string alignment_version
+string display_frame
+string storage_frame
+PolygonRing display_path
+PolygonRing map_path
+geometry_msgs/Pose2D display_entry_pose
+geometry_msgs/Pose2D entry_pose
+float64 estimated_length_m
+float64 estimated_duration_s
+string[] warnings

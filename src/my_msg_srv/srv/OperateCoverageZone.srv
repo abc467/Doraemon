@@ -1,0 +1,16 @@
+uint8 get = 0
+uint8 getAll = 1
+uint8 Delete = 2
+
+uint8 operation
+string map_name
+string zone_id
+string alignment_version # 可选；为空时优先用 zone 编辑元数据，否则回退当前 active alignment
+string plan_profile_name # 可选；用于选择指定 active plan
+bool include_disabled
+---
+
+bool success
+string message
+CoverageZone zone
+CoverageZone[] zones

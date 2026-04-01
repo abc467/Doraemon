@@ -1,0 +1,22 @@
+landmark_publisher_param:
+  use_reflect_panel: true
+  use_reflect_column: false
+  intensity_threshold: 800.0
+  min_colum_points_per_cluster: 8.0
+  min_panel_points_per_cluster: 15.0
+  max_circle_fit_error: 0.15       
+  max_line_fit_error: 5.0
+  column_radius: 5.0           
+  position_threshold: 2.0         
+  panel_length: 0.2
+  panel_length_noise: 0.05
+  translation_weight: 50     
+  debug_mode: true
+  frame_id: "base_link" 
+DM_Reader:
+  PORT: 3000
+  SERVER_IP: "192.168.16.11"
+  BUFFER_SIZE: 1024
+  translation_weight: 50 
+  rotation_weight: 50 
+

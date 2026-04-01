@@ -1,0 +1,7 @@
+<library path="lib/libmppi_controller_lib">
+        <class name ="local_planner/MPPIController" type ="local_planner::MPPIController" base_class_type= "nav_core::BaseLocalPlanner">
+                <description>
+                        MPPIController Plugin for BaseLocalPlanner
+                </description>
+        </class>
+</library>

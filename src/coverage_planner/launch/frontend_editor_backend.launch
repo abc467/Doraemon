@@ -1,0 +1,42 @@
+<launch>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="robot_id" default="local_robot"/>
+  <arg name="maps_root" default="/data/maps"/>
+  <arg name="external_maps_root" default="/home/sunnybaer/Doraemon/map"/>
+  <arg name="map_topic" default="/map"/>
+
+  <arg name="start_rosbridge" default="true"/>
+  <arg name="rosbridge_address" default="0.0.0.0"/>
+  <arg name="rosbridge_port" default="9090"/>
+
+  <arg name="start_map_asset_service" default="true"/>
+  <arg name="enable_site_editor_service" default="true"/>
+  <arg name="enable_rect_zone_planner" default="false"/>
+
+  <include if="$(arg start_rosbridge)" file="$(find rosbridge_server)/launch/rosbridge_websocket.launch">
+    <arg name="address" value="$(arg rosbridge_address)"/>
+    <arg name="port" value="$(arg rosbridge_port)"/>
+  </include>
+
+  <node if="$(arg start_map_asset_service)"
+        pkg="coverage_planner"
+        type="map_asset_service_node.py"
+        name="map_asset_service"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="maps_root" value="$(arg maps_root)"/>
+    <param name="external_maps_root" value="$(arg external_maps_root)"/>
+    <param name="map_topic" value="$(arg map_topic)"/>
+    <param name="service_name" value="/clean_robot_server/map_server"/>
+  </node>
+
+  <include file="$(find coverage_planner)/launch/planner_server.launch">
+    <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+    <arg name="robot_id" value="$(arg robot_id)"/>
+    <arg name="enable_rect_zone_planner" value="$(arg enable_rect_zone_planner)"/>
+    <arg name="enable_site_editor_service" value="$(arg enable_site_editor_service)"/>
+  </include>
+</launch>

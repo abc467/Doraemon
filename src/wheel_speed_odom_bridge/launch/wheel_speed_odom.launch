@@ -1,0 +1,404 @@
+<launch>
+  <!--
+    wheel_speed_odom.launch 总览
+
+    这份 launch 负责把“轮速协议 + IMU”组织成一条完整的 2D 里程计链路：
+
+    1. wheel_speed_odom_node
+       - 从串口或 TCP 接收轮速协议帧
+       - 解析左右轮速度
+       - 只依赖左右轮速度做原始差速里程计积分
+       - 输出原始 nav_msgs/Odometry
+
+    2. ekf_covariance_override_node
+       - 订阅原始 /imu
+       - 对 IMU 角速度做零偏补偿
+       - 覆盖成更适合 robot_localization 的协方差
+       - 输出 /imu_for_ekf
+
+    3. robot_localization / ekf_localization_node
+       - 同时启动三套不同融合策略的 EKF
+       - 方便在线对比 conservative / balanced / aggressive 三种效果
+
+    说明：
+    - 原始 odom 与 EKF 输出可以并存
+    - 是否启用 EKF、是否发布 TF、IMU 是否做 bias 补偿，都可以在这里统一开关
+    - 当前系统是 2D 场景，重点关心 x / y / yaw、vx / wz
+  -->
+
+  <!-- EKF 总开关；关闭后只保留原始轮速里程计输出。 -->
+  <arg name="enable_ekf" default="true"/>
+
+  <!--
+    原始轮速输入源配置。
+
+    odom_transport:
+    - serial: 从串口设备读取轮速协议帧
+    - tcp:    从指定 IP:port 读取轮速协议帧
+
+    这几个参数只影响“轮速输入从哪里来”，不影响后面的 odom 算法本身。
+  -->
+  <arg name="odom_transport" default="serial"/>
+  <arg name="server_ip" default="192.168.16.10"/>
+  <arg name="server_port" default="5001"/>
+  <arg name="serial_device" default="/dev/odom"/>
+  <arg name="serial_baudrate" default="115200"/>
+
+  <!--
+    话题命名与输出规划。
+
+    raw_odom_topic:
+    - 原始轮速积分得到的 odom 输出话题
+    - 建议固定保留为 /wheel_speed_raw，作为所有 EKF 的共同输入
+
+    ekf_*_topic:
+    - 三套 EKF 的输出话题
+    - 默认让 balanced 作为系统统一 /odom
+    - conservative / aggressive 保留做对比
+
+    imu_topic:
+    - 原始 IMU 输入
+
+    ekf_imu_topic:
+    - 给 EKF 使用的 IMU 话题
+    - 它不是原始 /imu 的简单透传，而是“经过 bias 补偿 + covariance 调整”后的 IMU
+  -->
+  <arg name="raw_odom_topic" default="/wheel_speed_raw"/>
+  <arg name="ekf_conservative_topic" default="/odom_ekf_conservative"/>
+  <arg name="ekf_balanced_topic" default="/odom"/>
+  <arg name="ekf_aggressive_topic" default="/odom_ekf_aggressive"/>
+  <arg name="ekf_balanced_alias_topic" default="/odom_ekf_balanced"/>
+  <arg name="imu_topic" default="/imu"/>
+  <arg name="ekf_imu_topic" default="/imu_for_ekf"/>
+  <arg name="enable_imu_bias_compensation" default="true"/>
+  <arg name="estimate_imu_bias_on_startup" default="true"/>
+  <arg name="imu_bias_estimation_duration_sec" default="5.0"/>
+  <arg name="imu_bias_stationary_threshold_rad_s" default="0.02"/>
+
+  <!--
+    原始 odom 的发布节奏控制。
+
+    publish_mode:
+    - on_frame:   每收到一帧有效轮速数据就发布一次 odom
+    - fixed_rate: 节点内部先更新最新 odom，再按固定频率对外发布
+
+    fixed_rate 模式下：
+    - odom_publish_rate_hz: 固定发布频率
+    - odom_stale_timeout_sec: 太久没有新轮速数据时，停止重复发布旧 odom
+    - odom_max_repeat_publish_count: 同一份最新 odom 最多允许重复发布多少次
+  -->
+  <arg name="odom_publish_mode" default="fixed_rate"/>
+  <arg name="odom_publish_rate_hz" default="50.0"/>
+  <arg name="odom_stale_timeout_sec" default="0.2"/>
+  <arg name="odom_max_repeat_publish_count" default="10"/>
+
+  <!--
+    odom 时间戳来源配置。
+
+    odom_time_source:
+    - wheel_time:    优先使用左右轮各自的采样时间
+    - absolute_time: 使用协议中的全局 absolute_time
+
+    wheel_time_mode:
+    - average: 左右轮时间差取平均，默认最稳妥
+    - left:    只信左轮时间
+    - right:   只信右轮时间
+
+    一般建议先保持默认：
+    - odom_time_source=wheel_time
+    - wheel_time_mode=average
+
+    如果轮时间字段不稳定，再退回 absolute_time。
+  -->
+  <arg name="odom_time_source" default="wheel_time"/>
+  <arg name="wheel_time_mode" default="average"/>
+  <arg name="wheel_time_unit_to_sec" default="0.001"/>
+  <arg name="absolute_time_unit_to_sec" default="0.001"/>
+
+  <!--
+    坐标系与 TF 配置。
+
+    frame_id:
+    - odom 消息的父坐标系，一般保持 odom
+
+    child_frame_id:
+    - odom 消息的子坐标系，一般为机器人底盘参考系 base_footprint
+
+    publish_raw_odom_tf:
+    - 是否让原始轮速 odom 发布 odom -> base_footprint 的 TF
+    - 只有 raw_odom_topic 真的是 /odom 时，代码里才允许发布 TF
+    - 这样可以避免多个 odom 结果同时发同一条 TF
+  -->
+  <arg name="publish_raw_odom_tf" default="true"/>
+  <arg name="frame_id" default="odom"/>
+  <arg name="child_frame_id" default="base_footprint"/>
+
+  <!--
+    原始轮速里程计节点。
+
+    节点职责：
+    1. 从 TCP 或串口接收原始协议帧
+    2. 解析 payload 中的 absolute_time / left_wheel_time / right_wheel_time /
+       left_encoder / right_encoder / wheel_speed_field0 / wheel_speed_field1
+    3. 根据 wheel_speed_field_order 把 data20-27 还原成左右轮速度
+    4. 经过单位换算与左右轮 scale 修正后，得到 m/s 的左右轮速度
+    5. 使用差速模型计算 linear.x 与 angular.z
+    6. 再积分出 x / y / yaw，形成原始 odom
+
+    注意：
+    - 当前 odom 计算“只使用左右轮速度”，不直接用编码器累计值做积分
+    - 编码器与轮时间更多是用于诊断和 CSV 留档
+    - IMU 在这个节点里只做诊断记录，不参与原始轮速 odom 计算
+  -->
+  <node pkg="wheel_speed_odom_bridge" type="wheel_speed_odom_node"
+        name="wheel_speed_odom" output="screen">
+    <param name="transport_type" value="$(arg odom_transport)"/>
+    <param name="server_ip" value="$(arg server_ip)"/>
+    <param name="server_port" value="$(arg server_port)"/>
+    <param name="serial_device" value="$(arg serial_device)"/>
+    <param name="serial_baudrate" value="$(arg serial_baudrate)"/>
+
+    <param name="publish_topic" value="$(arg raw_odom_topic)"/>
+    <param name="frame_id" value="$(arg frame_id)"/>
+    <param name="child_frame_id" value="$(arg child_frame_id)"/>
+    <!--
+      只有 raw_odom_topic 指向 /odom 时才允许 raw odom 发 TF。
+      如果你把 raw odom 改成别的话题，例如 /wheel_speed_raw，
+      这里会自动关闭 TF，避免和其他定位源冲突。
+    -->
+    <param name="publish_odom_tf"
+           value="$(eval (str(arg('publish_raw_odom_tf')).lower() == 'true') and (arg('raw_odom_topic') == '/odom' or arg('raw_odom_topic') == 'odom'))"/>
+    <param name="enable_odom_rx" value="true"/>
+    <param name="enable_odom_publish" value="true"/>
+
+    <param name="publish_mode" value="$(arg odom_publish_mode)"/>
+    <param name="publish_rate_hz" value="$(arg odom_publish_rate_hz)"/>
+    <param name="stale_timeout_sec" value="$(arg odom_stale_timeout_sec)"/>
+    <param name="max_repeat_publish_count" value="$(arg odom_max_repeat_publish_count)"/>
+
+    <param name="reconnect_interval_sec" value="1.0"/>
+    <param name="warn_interval_sec" value="5.0"/>
+    <param name="loop_rate_hz" value="100.0"/>
+
+    <!--
+      IMU 诊断订阅：
+      - 这里只是为了在 CSV 中记录最新 imu_wz
+      - 不会把 IMU 角速度直接并入原始轮速 odom 的积分
+    -->
+    <param name="enable_imu_diagnostic" value="true"/>
+    <param name="imu_topic" value="$(arg imu_topic)"/>
+
+    <!--
+      轮速解释参数：
+      - wheel_speed_field_order: payload 里左右轮速度字段顺序
+      - wheel_speed_unit_to_mps: 把原始轮速单位换成 m/s
+      - left/right_wheel_speed_scale: 对左右轮分别做比例校正
+      - wheel_separation: 左右轮中心距，直接影响角速度计算
+    -->
+    <param name="wheel_speed_field_order" value="left_right"/>
+    <param name="wheel_speed_unit_to_mps" value="0.001"/>
+    <param name="left_wheel_speed_scale" value="0.992"/>
+    <param name="right_wheel_speed_scale" value="0.993"/>
+    <param name="wheel_separation" value="0.7105"/>
+
+    <!--
+      时间基准设置。
+
+      默认：
+        odom_time_source=wheel_time
+        wheel_time_mode=average
+
+      节点内部回退顺序：
+      1. 先按这里选定的 wheel_time 或 absolute_time 计算 dt
+      2. 如果主时间源异常，再回退到另一种协议时间
+      3. 如果两种协议时间都不可靠，该帧只重置时间基准，不参与积分
+    -->
+    <param name="odom_time_source" value="$(arg odom_time_source)"/>
+    <param name="wheel_time_mode" value="$(arg wheel_time_mode)"/>
+    <param name="wheel_time_unit_to_sec" value="$(arg wheel_time_unit_to_sec)"/>
+    <param name="absolute_time_unit_to_sec" value="$(arg absolute_time_unit_to_sec)"/>
+    <!--
+      时间防护：
+      - 只接受落在 [min_valid_odom_dt_sec, max_valid_odom_dt_sec] 的协议 dt
+      - 超出范围时仅重置时间基准，不让该帧参与积分
+    -->
+    <param name="min_valid_odom_dt_sec" value="0.005"/>
+    <param name="max_valid_odom_dt_sec" value="0.06"/>
+
+    <!--
+      原始 odom 协方差。
+
+      当前是典型的 2D 轮式设定：
+      - x / y / yaw 给有限协方差
+      - z / roll / pitch 给极大协方差，表示“不可信 / 不参与”
+      - twist 里主要关心 vx 与 wz
+    -->
+    <rosparam param="odom_pose_covariance_diagonal">[0.05, 0.05, 1000000.0, 1000000.0, 1000000.0, 0.1]</rosparam>
+    <rosparam param="odom_twist_covariance_diagonal">[0.02, 1000000.0, 1000000.0, 1000000.0, 1000000.0, 0.05]</rosparam>
+
+    <!--
+      原始轮速限幅保护。
+      如果某一帧解析出来的线速度或角速度超过这里的阈值，
+      该帧会被直接丢弃，避免坏帧把 odom 拉飞。
+    -->
+    <param name="max_abs_linear_speed" value="2.0"/>
+    <param name="max_abs_angular_speed" value="1.5"/>
+    <!--
+      运动防护：
+      - 在线速度/角速度绝对值限幅之外，再加一层变化率限幅
+      - 可疑帧只跳过，不重置上一次有效运动状态
+    -->
+    <param name="max_abs_linear_accel" value="3.0"/>
+    <param name="max_abs_angular_accel" value="6.0"/>
+
+    <!--
+      诊断 CSV：
+      - 默认写到工作空间根目录 wheel_speed_odom_debug.csv
+      - 用于离线排查轮时间、编码器步进、原始轮速、odom 速度、imu_wz 等
+    -->
+    <param name="enable_diagnostic_log" value="true"/>
+    <param name="diagnostic_log_path" value="wheel_speed_odom_debug.csv"/>
+  </node>
+
+  <!-- EKF 融合相关节点。 -->
+  <group if="$(arg enable_ekf)">
+    <!--
+      先对 IMU 做一次“给 EKF 用的预处理”。
+
+      处理顺序：
+      1. 输入原始 /imu
+      2. 输出 /imu_for_ekf
+      3. 先减去静态 bag 实测零偏，再在启动阶段做一次静止 bias 细调
+      4. 最后为 angular velocity 覆盖成更适合 EKF 的协方差
+
+      这样做的目的：
+      - 原始 IMU 话题保持不动，方便其他节点继续直接使用 /imu
+      - 给 robot_localization 的 IMU 单独做一版更“工程可控”的预处理
+    -->
+    <node pkg="wheel_speed_odom_bridge" type="ekf_covariance_override_node"
+          name="ekf_covariance_override" output="screen">
+      <param name="input_imu_topic" value="$(arg imu_topic)"/>
+      <param name="output_imu_topic" value="$(arg ekf_imu_topic)"/>
+      <param name="override_imu_orientation_covariance" value="false"/>
+      <param name="override_imu_angular_velocity_covariance" value="true"/>
+      <param name="override_imu_linear_acceleration_covariance" value="false"/>
+      <!--
+        IMU bias 补偿总开关。
+        关闭后 /imu_for_ekf 仍然会输出，但不再减去角速度零偏。
+      -->
+      <param name="enable_imu_angular_velocity_bias_compensation"
+             value="$(arg enable_imu_bias_compensation)"/>
+
+      <!--
+        启动静止细调：
+        - true:  启动后的前几秒，如果 IMU 看起来处于静止状态，就重新估计一次 bias
+        - false: 只使用下面配置的固定 bias
+      -->
+      <param name="estimate_imu_angular_velocity_bias_on_startup"
+             value="$(arg estimate_imu_bias_on_startup)"/>
+
+      <!--
+        启动静止细调窗口长度，单位秒。
+        窗口越长，均值更稳；但要求机器人在上电后这段时间内尽量不转动。
+      -->
+      <param name="imu_angular_velocity_bias_estimation_duration_sec"
+             value="$(arg imu_bias_estimation_duration_sec)"/>
+
+      <!--
+        判定“近似静止”的角速度模长阈值，单位 rad/s。
+        只有 |gyro| 足够小的样本，才会被纳入启动 bias 估计。
+      -->
+      <param name="imu_angular_velocity_bias_stationary_threshold_rad_s"
+             value="$(arg imu_bias_stationary_threshold_rad_s)"/>
+
+      <!--
+        启动细调最少需要的静止样本数。
+        达不到这个数量时，节点会保留固定 bias，不会贸然切换到不可靠的新估计。
+      -->
+      <param name="imu_angular_velocity_bias_min_samples" value="200"/>
+
+      <!--
+        robot_localization 当前主要使用 angular_velocity.z，因此这里把 z 轴协方差设成有限值。
+        x / y 轴在当前 2D EKF 里不使用，所以给很大协方差。
+      -->
+      <rosparam param="imu_angular_velocity_covariance_diagonal">[1000000.0, 1000000.0, 0.05]</rosparam>
+      <rosparam param="imu_linear_acceleration_covariance_diagonal">[1000000.0, 1000000.0, 1000000.0]</rosparam>
+
+      <!--
+        固定 bias：
+        - 这是基于静态 IMU bag 统计出来的三轴角速度均值
+        - 节点启动后会先立即使用这组 bias
+        - 如果启用了启动静止细调，后续再用实时静止样本把它替换掉
+      -->
+      <rosparam param="imu_angular_velocity_bias">[0.003318707, -0.007191083, -0.004131934]</rosparam>
+    </node>
+
+    <!--
+      三路 EKF 对比输出，均不额外发布 TF。
+
+      conservative:
+      - 更保守
+      - 更少直接信任轮速 odom 的 pose / yaw
+
+      balanced:
+      - 中间策略
+      - 同时参考 odom 的 vx、wz 与 imu 的 wz
+
+      aggressive:
+      - 更贴近原始轮速轨迹
+      - 会更多直接融合 odom 的 pose / yaw / twist
+
+      三路一起开时，最适合拿 rosbag 或 rqt_plot 对比调参。
+    -->
+    <node pkg="robot_localization" type="ekf_localization_node"
+          name="wheel_speed_odom_ekf_conservative"
+          output="screen" clear_params="true">
+      <!-- 加载 conservative 模式的 2D EKF 参数文件。 -->
+      <rosparam command="load" file="$(find wheel_speed_odom_bridge)/config/ekf_2d.yaml"/>
+      <!-- 把 launch 里的 raw odom 话题覆盖到配置文件里的 odom0。 -->
+      <param name="odom0" value="$(arg raw_odom_topic)"/>
+      <!-- IMU 统一使用预处理后的 /imu_for_ekf。 -->
+      <param name="imu0" value="$(arg ekf_imu_topic)"/>
+      <!-- 只有当该 EKF 结果真的发布到 /odom 时，才允许它发 TF。 -->
+      <param name="publish_tf"
+             value="$(eval arg('ekf_conservative_topic') == '/odom' or arg('ekf_conservative_topic') == 'odom')"/>
+      <remap from="odometry/filtered" to="$(arg ekf_conservative_topic)"/>
+    </node>
+
+    <node pkg="robot_localization" type="ekf_localization_node"
+          name="wheel_speed_odom_ekf_balanced"
+          output="screen" clear_params="true">
+      <!-- 加载 balanced 模式的 2D EKF 参数文件。 -->
+      <rosparam command="load" file="$(find wheel_speed_odom_bridge)/config/ekf_2d_balanced.yaml"/>
+      <param name="odom0" value="$(arg raw_odom_topic)"/>
+      <param name="imu0" value="$(arg ekf_imu_topic)"/>
+      <param name="publish_tf"
+             value="$(eval arg('ekf_balanced_topic') == '/odom' or arg('ekf_balanced_topic') == 'odom')"/>
+      <remap from="odometry/filtered" to="$(arg ekf_balanced_topic)"/>
+    </node>
+
+    <node pkg="robot_localization" type="ekf_localization_node"
+          name="wheel_speed_odom_ekf_aggressive"
+          output="screen" clear_params="true">
+      <!-- 加载 aggressive 模式的 2D EKF 参数文件。 -->
+      <rosparam command="load" file="$(find wheel_speed_odom_bridge)/config/ekf_2d_aggressive.yaml"/>
+      <param name="odom0" value="$(arg raw_odom_topic)"/>
+      <param name="imu0" value="$(arg ekf_imu_topic)"/>
+      <param name="publish_tf"
+             value="$(eval arg('ekf_aggressive_topic') == '/odom' or arg('ekf_aggressive_topic') == 'odom')"/>
+      <remap from="odometry/filtered" to="$(arg ekf_aggressive_topic)"/>
+    </node>
+
+    <!--
+      当前统一 odom 策略：
+      - /wheel_speed_raw: 原始轮速里程计
+      - /odom:          balanced EKF，作为系统统一 odom
+      - /odom_ekf_balanced: /odom 的别名，便于对比和录包
+      - /odom_ekf_conservative / /odom_ekf_aggressive: 继续保留用于对比
+    -->
+    <node pkg="topic_tools" type="relay"
+          name="wheel_speed_odom_balanced_alias_relay"
+          args="$(arg ekf_balanced_topic) $(arg ekf_balanced_alias_topic)"
+          output="screen"/>
+  </group>
+</launch>

@@ -1,0 +1,12 @@
+# Goal: 设定目标停止距离 (单位: 米)
+# 如果填 0.0，则使用节点内部配置的默认值 (例如 0.15m)
+float32 target_dist
+---
+# Result: 执行结果
+bool success
+string message
+---
+# Feedback: 实时状态反馈
+string state
+float32 dist_to_wall
+float32 angle_error

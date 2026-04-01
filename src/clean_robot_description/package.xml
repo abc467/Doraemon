@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>clean_robot_description</name>
+  <version>0.0.1</version>
+  <description>Minimal diff-drive cleaning robot with 2D lidar for Gazebo</description>
+
+  <maintainer email="you@yourcompany.com">you</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>gazebo_ros</depend>
+  <depend>robot_state_publisher</depend>
+
+  <export/>
+</package>

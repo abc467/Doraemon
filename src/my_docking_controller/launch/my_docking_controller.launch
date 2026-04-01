@@ -1,0 +1,56 @@
+<launch>
+    <arg name="use_rviz" default="false" />
+    <arg name="start_dock_tracker" default="true" />
+    <arg name="base_frame" default="base_link" />
+    <arg name="scan_topic" default="/scan" />
+    <arg name="dock_pose_topic" default="/dock_pose" />
+    <arg name="cmd_vel_topic" default="/cmd_vel" />
+
+    <arg name="dock_backwards" default="false" />
+
+    <arg name="target_dist" default="0.71" />
+    <arg name="dock_pose_score_thresh" default="0.00012" />
+    <arg name="pose_stale_timeout_s" default="0.25" />
+    <arg name="pose_lost_timeout_s" default="1.0" />
+
+
+    <group if="$(arg start_dock_tracker)">
+        <node pkg="dock_tracker" type="dock_tracker_node" name="dock_tracker" output="screen">
+            <param name="scan_topic" value="$(arg scan_topic)" />
+            <param name="base_frame" value="$(arg base_frame)" />
+            <param name="dock_pose_topic" value="$(arg dock_pose_topic)" />
+            <param name="icp_fitness_thresh" value="$(arg dock_pose_score_thresh)" />
+        </node>
+    </group>
+
+
+    <node pkg="my_docking_controller" type="docking_tracker_node" name="docking_controller" output="screen">
+
+        <param name="robot_base_frame" value="$(arg base_frame)" />
+        <param name="dock_pose_topic" value="$(arg dock_pose_topic)" />
+        <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)" />
+        <param name="dock_backwards" value="$(arg dock_backwards)" />
+        <param name="docking_distance" value="$(arg target_dist)" />
+        <param name="pose_stale_timeout_s" value="$(arg pose_stale_timeout_s)" />
+        <param name="pose_lost_timeout_s" value="$(arg pose_lost_timeout_s)" />
+
+        <param name="xy_tolerance" value="0.02" />  
+        <param name="yaw_tolerance" value="0.01" /> 
+        <param name="k_phi" value="2.0" />   
+        <param name="k_delta" value="2.0" /> 
+        <param name="beta" value="2.5" />   
+        <param name="lambda" value="2.0" />   
+        
+        <param name="v_linear_min" value="0.02" /> 
+        <param name="v_linear_max" value="0.20" />
+        <param name="v_angular_max" value="0.5" />
+        <param name="slowdown_radius" value="1.2" /> 
+    </node>
+
+
+    <!-- <group if="$(arg use_rviz)">
+        <node pkg="rviz" type="rviz" name="docking_rviz" 
+              args="-d $(find dock_tracker)/rviz/docking.rviz" />
+    </group> -->
+
+</launch>

@@ -1,0 +1,34 @@
+<launch>
+  <arg name="config_root" default="$(find cleanrobot)/config/cartographer"/>
+  <arg name="landmark_param_yaml" default="$(find cleanrobot)/config/cartographer/landmark_719.yaml"/>
+  <arg name="runtime_ns" default="/cartographer/runtime"/>
+  <arg name="map_topic" default="/map"/>
+  <arg name="resolution" default="0.05"/>
+  <arg name="publish_period_sec" default="1.0"/>
+  <arg name="auto_start" default="true"/>
+  <arg name="start_param_space" default="true"/>
+  <arg name="cartographer_node_bin" default=""/>
+  <arg name="occupancy_grid_node_bin" default=""/>
+
+  <node if="$(arg start_param_space)"
+        pkg="param_space"
+        type="param_space_node"
+        name="param_space_node"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0"/>
+
+  <node pkg="cleanrobot" type="cartographer_supervisor_node.py" name="cartographer_supervisor" output="screen">
+    <param name="runtime_ns" value="$(arg runtime_ns)"/>
+    <param name="config_root" value="$(arg config_root)"/>
+    <param name="landmark_param_yaml" value="$(arg landmark_param_yaml)"/>
+    <param name="mode" value="mapping"/>
+    <param name="map_topic" value="$(arg map_topic)"/>
+    <param name="resolution" value="$(arg resolution)"/>
+    <param name="publish_period_sec" value="$(arg publish_period_sec)"/>
+    <param name="auto_start" value="$(arg auto_start)"/>
+    <param name="cartographer_node_bin" value="$(arg cartographer_node_bin)"/>
+    <param name="occupancy_grid_node_bin" value="$(arg occupancy_grid_node_bin)"/>
+    <param name="include_unfrozen_submaps" value="true"/>
+  </node>
+</launch>

@@ -1,0 +1,45 @@
+<launch>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="robot_id" default="local_robot"/>
+  <arg name="default_return_to_dock_on_finish" default="true"/>
+
+  <arg name="clean_task_service_name" default="/database_server/clean_task_service"/>
+  <arg name="clean_task_contract_param_ns" default="/database_server/contracts/clean_task_service"/>
+  <arg name="clean_schedule_service_name" default="/database_server/clean_schedule_service"/>
+  <arg name="clean_schedule_contract_param_ns" default="/database_server/contracts/clean_schedule_service"/>
+
+  <arg name="runtime_ns" default="/cartographer/runtime"/>
+  <arg name="restart_localization_service_name" default="/cartographer/runtime/restart_localization"/>
+  <arg name="restart_localization_contract_param_ns" default="/cartographer/runtime/contracts/restart_localization"/>
+  <arg name="runtime_map_topic" default="/map"/>
+  <arg name="tracked_pose_topic" default="/tracked_pose"/>
+
+  <node pkg="coverage_task_manager" type="task_api_service_node.py" name="task_api_service" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="service_name" value="$(arg clean_task_service_name)"/>
+    <param name="contract_param_ns" value="$(arg clean_task_contract_param_ns)"/>
+    <param name="default_return_to_dock_on_finish" value="$(arg default_return_to_dock_on_finish)"/>
+  </node>
+
+  <node pkg="coverage_task_manager" type="schedule_api_service_node.py" name="schedule_api_service" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="service_name" value="$(arg clean_schedule_service_name)"/>
+    <param name="contract_param_ns" value="$(arg clean_schedule_contract_param_ns)"/>
+  </node>
+
+  <node pkg="coverage_planner" type="localization_lifecycle_manager_node.py" name="localization_lifecycle_manager" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="runtime_ns" value="$(arg runtime_ns)"/>
+    <param name="service_name" value="$(arg restart_localization_service_name)"/>
+    <param name="contract_param_ns" value="$(arg restart_localization_contract_param_ns)"/>
+    <param name="map_topic" value="$(arg runtime_map_topic)"/>
+    <param name="tracked_pose_topic" value="$(arg tracked_pose_topic)"/>
+  </node>
+</launch>

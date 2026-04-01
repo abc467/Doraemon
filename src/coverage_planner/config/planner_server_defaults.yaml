@@ -1,0 +1,34 @@
+frame_id: "map"
+topic_ns: "/f2c"
+
+auto_map_identity_enable: true
+map_topic: "/map"
+map_identity_timeout_s: 2.0
+planner_version: "coverage_planner_v1"
+default_virtual_wall_buffer_m: 0.575
+allow_legacy_unscoped_plan: false
+
+robot:
+  cov_width: 0.50
+  width: 0.50
+  min_turning_radius: 0.30
+  max_diff_curv: 0.20
+
+planner:
+  split_angle_deg: 0.0
+  turn_model: "dubins"
+  viz_step_m: 0.05
+  path_step_m: 0.05
+  turn_step_m: 0.05
+  line_w: 0.05
+  mute_stderr: true
+  wall_margin_m: 0.50
+  turn_margin_m: 1.20
+  edge_corner_radius_m: 0.50
+  edge_corner_pull: 0.10
+  edge_corner_min_pts: 36
+  pre_proj_min: 0.50
+  pre_proj_max: 0.60
+  pre_prefix_max: 1.00
+  e_pre_min: 0.40
+  e_pre_max: 0.50

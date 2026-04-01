@@ -1,0 +1,14 @@
+string map_name
+string wall_id
+string display_name
+bool enabled
+string alignment_version
+string display_frame
+string storage_frame
+string map_id
+string map_version
+PolygonRing display_path
+PolygonRing map_path
+float64 buffer_m
+float64 updated_ts
+string[] warnings

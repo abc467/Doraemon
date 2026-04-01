@@ -1,0 +1,84 @@
+<launch>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="planner_defaults_yaml" default="$(find coverage_planner)/config/planner_server_defaults.yaml"/>
+  <arg name="allow_legacy_unscoped_plan" default="false"/>
+  <arg name="robot_id" default="local_robot"/>
+  <arg name="map_topic" default="/map"/>
+  <arg name="enable_rect_zone_planner" default="true"/>
+  <arg name="clicked_topic" default="/clicked_point"/>
+  <arg name="selection_inset_m" default="0.05"/>
+  <arg name="hole_outset_m" default="0.05"/>
+  <arg name="min_effective_side_m" default="0.10"/>
+  <arg name="default_profile_name" default="cover_standard"/>
+  <arg name="rect_plan_action_name" default="/coverage_planner_server/plan_coverage"/>
+  <arg name="rect_plan_timeout_s" default="120.0"/>
+  <arg name="enable_site_editor_service" default="true"/>
+  <arg name="default_aligned_frame" default="site_map"/>
+  <arg name="rect_min_side_m" default="0.10"/>
+  <arg name="preview_nominal_speed_mps" default="0.35"/>
+  <arg name="default_plan_profile_name" default="$(arg default_profile_name)"/>
+  <arg name="default_sys_profile_name" default="standard"/>
+  <arg name="alignment_service_name" default="/database_server/map_alignment_service"/>
+  <arg name="alignment_points_service_name" default="/database_server/map_alignment_by_points_service"/>
+  <arg name="rect_preview_service_name" default="/database_server/rect_zone_preview_service"/>
+  <arg name="plan_preview_service_name" default="/database_server/coverage_preview_service"/>
+  <arg name="plan_commit_service_name" default="/database_server/coverage_commit_service"/>
+  <arg name="zone_query_service_name" default="/database_server/coverage_zone_service"/>
+  <arg name="zone_plan_path_service_name" default="/database_server/zone_plan_path_service"/>
+  <arg name="no_go_area_service_name" default="/database_server/no_go_area_service"/>
+  <arg name="virtual_wall_service_name" default="/database_server/virtual_wall_service"/>
+  <arg name="profile_catalog_service_name" default="/database_server/profile_catalog_service"/>
+
+  <node pkg="coverage_planner" type="planner_server_node.py" name="coverage_planner_server" output="screen" respawn="true" respawn_delay="2.0">
+    <rosparam command="load" file="$(arg planner_defaults_yaml)"/>
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="allow_legacy_unscoped_plan" value="$(arg allow_legacy_unscoped_plan)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="map_topic" value="$(arg map_topic)"/>
+  </node>
+
+  <group if="$(arg enable_rect_zone_planner)">
+    <node pkg="coverage_planner" type="rect_zone_planner_node.py" name="rect_zone_planner" output="screen" respawn="true" respawn_delay="2.0">
+      <param name="plan_db_path" value="$(arg plan_db_path)"/>
+      <param name="robot_id" value="$(arg robot_id)"/>
+      <param name="map_topic" value="$(arg map_topic)"/>
+      <param name="clicked_topic" value="$(arg clicked_topic)"/>
+      <param name="selection_inset_m" value="$(arg selection_inset_m)"/>
+      <param name="hole_outset_m" value="$(arg hole_outset_m)"/>
+      <param name="min_effective_side_m" value="$(arg min_effective_side_m)"/>
+      <param name="default_profile_name" value="$(arg default_profile_name)"/>
+      <param name="plan_action_name" value="$(arg rect_plan_action_name)"/>
+      <param name="plan_timeout_s" value="$(arg rect_plan_timeout_s)"/>
+    </node>
+  </group>
+
+  <group if="$(arg enable_site_editor_service)">
+    <node pkg="coverage_planner" type="site_editor_service_node.py" name="site_editor_service" output="screen" respawn="true" respawn_delay="2.0">
+      <rosparam command="load" file="$(arg planner_defaults_yaml)"/>
+      <param name="plan_db_path" value="$(arg plan_db_path)"/>
+      <param name="robot_id" value="$(arg robot_id)"/>
+      <param name="default_aligned_frame" value="$(arg default_aligned_frame)"/>
+      <param name="rect_min_side_m" value="$(arg rect_min_side_m)"/>
+      <param name="preview_nominal_speed_mps" value="$(arg preview_nominal_speed_mps)"/>
+      <param name="default_profile_name" value="$(arg default_profile_name)"/>
+      <param name="alignment_service_name" value="$(arg alignment_service_name)"/>
+      <param name="alignment_points_service_name" value="$(arg alignment_points_service_name)"/>
+      <param name="rect_preview_service_name" value="$(arg rect_preview_service_name)"/>
+      <param name="plan_preview_service_name" value="$(arg plan_preview_service_name)"/>
+      <param name="plan_commit_service_name" value="$(arg plan_commit_service_name)"/>
+      <param name="zone_query_service_name" value="$(arg zone_query_service_name)"/>
+      <param name="zone_plan_path_service_name" value="$(arg zone_plan_path_service_name)"/>
+      <param name="no_go_area_service_name" value="$(arg no_go_area_service_name)"/>
+      <param name="virtual_wall_service_name" value="$(arg virtual_wall_service_name)"/>
+    </node>
+  </group>
+
+  <node pkg="coverage_planner" type="profile_catalog_service_node.py" name="profile_catalog_service" output="screen" respawn="true" respawn_delay="2.0">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="service_name" value="$(arg profile_catalog_service_name)"/>
+    <param name="default_plan_profile_name" value="$(arg default_plan_profile_name)"/>
+    <param name="default_sys_profile_name" value="$(arg default_sys_profile_name)"/>
+  </node>
+</launch>

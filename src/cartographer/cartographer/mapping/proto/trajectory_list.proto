@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package cartographer.mapping.proto;
+
+import "cartographer/transform/proto/transform.proto";
+
+message TrajectoryList{
+    message Submap{
+        int32 trajectory_id = 5;
+        int32 submap_index = 10;
+        int32 submap_version = 15;
+        transform.proto.Rigid3d pose = 20;
+    }
+    message Trajectory{
+        map<int32, Submap> submaps = 1;
+    }
+    map<int32, Trajectory> trajectories = 1;
+}

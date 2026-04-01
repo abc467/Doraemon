@@ -1,0 +1,102 @@
+<launch>
+  <!-- Executor 内置 AutoChargeManager：默认关闭，避免与 TaskManager 抢状态机 -->
+  <arg name="auto_charge_enable" default="false"/>
+  <arg name="load_mode_profiles_yaml" default="true"/>
+  <arg name="mode_profiles_yaml" default="$(find coverage_task_manager)/config/mode_profiles.yaml"/>
+  <arg name="load_actuator_profiles_yaml" default="true"/>
+  <arg name="actuator_profiles_yaml" default="$(find coverage_executor)/config/actuator_profiles.yaml"/>
+  <arg name="default_plan_profile_name" default="cover_standard"/>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="strict_map_check" default="true"/>
+  <arg name="strict_resume_map_check" default="true"/>
+
+  <group if="$(arg load_mode_profiles_yaml)">
+    <rosparam command="load" file="$(arg mode_profiles_yaml)" ns="coverage_executor"/>
+  </group>
+
+  <group if="$(arg load_actuator_profiles_yaml)">
+    <rosparam command="load" file="$(arg actuator_profiles_yaml)" ns="coverage_executor"/>
+  </group>
+
+  <node pkg="coverage_executor" type="executor_node.py" name="coverage_executor" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="frame_id" value="map"/>
+    <param name="base_frame" value="base_footprint"/>
+    <param name="default_plan_profile_name" value="$(arg default_plan_profile_name)"/>
+    <param name="default_sys_profile_name" value="standard"/>
+    <param name="default_clean_mode" value="scrub"/>
+
+    <!-- MBF action names: 按你们系统实际 namespace 调整 -->
+    <param name="mbf_move_base_action" value="/move_base_flex/move_base"/>
+    <param name="mbf_exe_path_action" value="/move_base_flex/exe_path"/>
+
+    <!-- 可选：指定 planner/controller/recovery -->
+    <param name="mbf_planner" value="ThetaStarPlanner"/>
+    <param name="mbf_controller" value="MPPI_Standard_Controller"/>
+    <param name="mbf_recovery" value=""/>
+
+    <param name="water_off_distance" value="0.5"/>
+    <param name="vacuum_delay_s" value="1.5"/>
+    <param name="keep_cleaning_on_during_connect" value="false"/>
+
+    <param name="auto_start" value="false"/>
+    <param name="zone_id" value="zone_demo"/>
+
+    <param name="cmd_vel_topic" value="/cmd_vel"/>
+    <param name="hard_stop_s" value="0.6"/>
+    <param name="pause_hold_hz" value="10.0"/>
+
+    <param name="cmd_vel_topic" value="/cmd_vel"/>
+    <param name="vel_water_pump" value="0"/>
+    <param name="vel_water_suction" value="0"/>
+    <param name="height_scrub" value="38"/>
+    <param name="clean_tool_cmd_interval_s" value="0.05"/>
+    <param name="water_tap_cmd_interval_s" value="0.20"/>
+    <param name="mcore_connected_topic" value="/mcore_tcp_bridge/connected"/>
+    <param name="combined_status_topic" value="/combined_status"/>
+    <param name="actuator_reconcile_hz" value="2.0"/>
+    <param name="actuator_active_refresh_s" value="1.0"/>
+    <param name="actuator_transition_retry_window_s" value="1.0"/>
+    <param name="actuator_retry_interval_s" value="0.35"/>
+    <param name="actuator_feedback_retry_timeout_s" value="0.60"/>
+    <param name="actuator_feedback_stale_s" value="2.0"/>
+    <param name="checkpoint_hz" value="1.0"/>
+    <param name="auto_resume_on_start" value="false"/>
+    <param name="strict_map_check" value="$(arg strict_map_check)"/>
+    <param name="strict_resume_map_check" value="$(arg strict_resume_map_check)"/>
+    <param name="resume_backtrack_m" value="0.2"/>
+    <param name="connect_skip_dist" value="0.35"/>
+    <param name="resume_accept_dist" value="1.0"/>
+    <param name="resume_finish_thresh_m" value="0.3"/>
+    <param name="connect_retry_max" value="2"/>
+    <param name="follow_retry_max" value="2"/>
+    <param name="retry_wait_s" value="2.0"/>
+    <param name="follow_retry_reconnect_on_fail" value="true"/>
+    <param name="retry_pause_recovery_on_exhausted" value="true"/>
+    <param name="retry_clear_costmaps" value="true"/>
+    <param name="clear_costmaps_service" value="/move_base_flex/clear_costmaps"/>
+
+    <!-- 自动回充：由上层 launch 传参控制（默认 false） -->
+    <param name="auto_charge_enable" value="$(arg auto_charge_enable)"/>
+
+    <!-- AI spot cleaning for inspection/patrol mode -->
+    <param name="ai_spot_enable" value="false"/>
+    <param name="ai_signal_topic" value="/ai/dirt_detected"/>
+    <param name="ai_signal_use_string" value="false"/>
+    <param name="ai_spot_duration_s" value="120.0"/>
+    <param name="ai_spot_mode" value="scrub"/>
+
+    <!-- actuator interlock / speed-limit interface (optional) -->
+    <param name="odom_topic" value="/odom"/>
+    <param name="interlock_enable" value="true"/>
+    <param name="interlock_max_lin_mps" value="1.0"/>
+    <param name="interlock_max_ang_rps" value="2.0"/>
+    <param name="interlock_mask_cleaning" value="true"/>
+    <param name="interlock_mask_water" value="true"/>
+    <param name="interlock_mask_vacuum" value="false"/>
+    <param name="speed_limit_scale_enable" value="true"/>
+    <param name="speed_limit_scale_when_actuating" value="1.0"/>
+  </node>
+</launch>

@@ -1,0 +1,11 @@
+string profile_name
+string display_name
+string profile_kind
+bool enabled
+bool is_default
+string description
+string version
+string[] tags
+string[] supported_clean_modes
+string[] supported_maps
+string[] warnings

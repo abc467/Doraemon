@@ -1,0 +1,35 @@
+<launch>
+  <!--
+    手柄接收串口参数。
+    这个 launch 只负责“串口收手柄帧 -> 发布 /cmd_vel”，不处理里程计。
+  -->
+  <arg name="serial_device" default="/dev/joy_receiver"/>
+  <arg name="serial_baudrate" default="115200"/>
+
+  <!-- 输出控制话题与速度档位。 -->
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="linear_speed" default="0.4"/>
+  <arg name="angular_speed" default="0.4"/>
+
+  <!-- 调试日志开关。 -->
+  <arg name="enable_rx_log" default="false"/>
+  <arg name="enable_rx_raw_log" default="false"/>
+
+  <node pkg="wheel_speed_odom_bridge" type="receiver_cmd_vel_node"
+        name="receiver_cmd_vel" output="screen">
+    <param name="serial_device" value="$(arg serial_device)"/>
+    <param name="serial_baudrate" value="$(arg serial_baudrate)"/>
+
+    <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
+    <param name="linear_speed" value="$(arg linear_speed)"/>
+    <param name="angular_speed" value="$(arg angular_speed)"/>
+
+    <param name="reconnect_interval_sec" value="1.0"/>
+    <param name="warn_interval_sec" value="5.0"/>
+    <param name="loop_rate_hz" value="100.0"/>
+    <param name="publish_stop_on_disconnect" value="true"/>
+
+    <param name="enable_rx_log" value="$(arg enable_rx_log)"/>
+    <param name="enable_rx_raw_log" value="$(arg enable_rx_raw_log)"/>
+  </node>
+</launch>

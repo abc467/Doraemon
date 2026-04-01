@@ -1,0 +1,243 @@
+<launch>
+  <!-- Task Manager (Task layer) -->
+
+  <!-- Defaults -->
+  <arg name="frame_id" default="map"/>
+  <arg name="zone_id_default" default="zone_demo"/>
+
+  <!-- plan_profile: DB profile key used for plan lookup -->
+  <arg name="default_plan_profile_name" default="cover_standard"/>
+  <arg name="default_sys_profile_name" default="standard"/>
+  <arg name="default_clean_mode" default="scrub"/>
+  <arg name="default_return_to_dock_on_finish" default="true"/>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="robot_id" default="local_robot"/>
+  <!-- legacy only: formal product flow does not auto-activate/relocalize maps -->
+  <arg name="activate_map_service" default="/map_assets/activate"/>
+  <arg name="activate_map_timeout_s" default="10.0"/>
+  <arg name="relocalize_map_service" default="/map_assets/relocalize"/>
+  <arg name="relocalize_map_timeout_s" default="10.0"/>
+  <arg name="require_managed_map_asset" default="true"/>
+  <arg name="require_runtime_localized_before_start" default="false"/>
+  <arg name="require_runtime_map_match" default="false"/>
+  <arg name="task_restore_enable" default="false"/>
+  <arg name="allow_map_activation" default="false"/>
+  <arg name="allow_legacy_zone_start" default="false"/>
+  <arg name="runtime_localization_state_param" default="/cartographer/runtime/localization_state"/>
+  <arg name="runtime_localization_valid_param" default="/cartographer/runtime/localization_valid"/>
+  <arg name="readiness_publish_hz" default="1.0"/>
+  <arg name="runtime_map_topic" default="/map"/>
+  <arg name="combined_status_topic" default="/combined_status"/>
+  <arg name="combined_status_stale_timeout_s" default="5.0"/>
+  <arg name="station_status_topic" default="/station_status"/>
+  <arg name="station_status_stale_timeout_s" default="5.0"/>
+  <arg name="mcore_connected_topic" default="/mcore_tcp_bridge/connected"/>
+  <arg name="station_connected_topic" default="/station_tcp_bridge/connected"/>
+  <arg name="connected_stale_timeout_s" default="5.0"/>
+
+  <!-- auto charge enable (Task 层作为 owner：测试默认关闭) -->
+  <arg name="auto_charge_enable" default="false"/>
+  <arg name="low_soc" default="0.80"/>
+  <arg name="resume_soc" default="0.99"/>
+  <arg name="rearm_soc" default="0.95"/>
+
+  <!-- Real-robot dock supply manager (fine dock + station ops + charging) -->
+  <arg name="dock_supply_enable" default="true"/>
+  <arg name="dock_supply_set_defer_exit_service" default="/dock_supply/set_defer_exit"/>
+  <arg name="dock_supply_exit_service" default="/dock_supply/exit"/>
+  <arg name="restart_localization_service" default="/cartographer/runtime/restart_localization"/>
+  <arg name="restart_localization_timeout_s" default="180.0"/>
+  <arg name="clear_costmaps_service" default="/move_base_flex/clear_costmaps"/>
+  <arg name="clean_task_contract_param_ns" default="/database_server/contracts/clean_task_service"/>
+  <arg name="clean_schedule_contract_param_ns" default="/database_server/contracts/clean_schedule_service"/>
+  <arg name="dock_two_stage_enable" default="true"/>
+  <arg name="dock_stage1_xyyaw" default="[-2.486499,4.733142,1.573416]"/>
+  <arg name="dock_stage2_controller" default="MyPlanner"/>
+  <arg name="dock_retry_limit" default="2"/>
+
+  <!-- 第二预对接点（靠近充电桩，随后进入精准对接） -->
+  <arg name="dock_xyyaw" default="[-2.460072,6.954363,1.575427]"/>
+
+  <!-- Scheduler：打开并加载 schedules -->
+  <arg name="scheduler_enable" default="true"/>
+  <arg name="scheduler_window_s" default="60.0"/>
+  <arg name="scheduler_check_hz" default="1.0"/>
+  <arg name="scheduler_catch_up_s" default="600.0"/>
+  <arg name="scheduler_retry_backoff_s" default="30.0"/>
+  <arg name="scheduler_reload_enable" default="true"/>
+  <arg name="scheduler_reload_period_s" default="5.0"/>
+
+  <arg name="load_schedules_yaml" default="false"/>
+  <arg name="schedules_yaml" default="$(find coverage_task_manager)/config/schedules_monday_0810.yaml"/>
+
+  <!-- 可选：模式/班表 -->
+  <arg name="load_mode_profiles_yaml" default="true"/>
+  <arg name="mode_profiles_yaml" default="$(find coverage_task_manager)/config/mode_profiles.yaml"/>
+
+  <group if="$(arg load_mode_profiles_yaml)">
+    <rosparam command="load" file="$(arg mode_profiles_yaml)" ns="coverage_task_manager"/>
+  </group>
+
+  <group if="$(arg load_schedules_yaml)">
+    <rosparam command="load" file="$(arg schedules_yaml)" ns="coverage_task_manager"/>
+  </group>
+
+  <node pkg="coverage_task_manager" type="task_manager_node.py" name="coverage_task_manager" output="screen">
+    <param name="frame_id" value="$(arg frame_id)"/>
+    <param name="zone_id_default" value="$(arg zone_id_default)"/>
+
+    <param name="default_plan_profile_name" value="$(arg default_plan_profile_name)"/>
+    <param name="default_sys_profile_name" value="$(arg default_sys_profile_name)"/>
+    <param name="default_clean_mode" value="$(arg default_clean_mode)"/>
+    <param name="default_return_to_dock_on_finish" value="$(arg default_return_to_dock_on_finish)"/>
+
+    <!-- Optional policy profiles -->
+    <param name="dock_sys_profile_name" value="eco"/>
+    <param name="inspect_sys_profile_name" value="eco"/>
+
+    <!-- Apply nav profile switching? -->
+    <param name="nav_profile_apply_enable" value="false"/>
+
+    <!-- Persistence -->
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="activate_map_service" value="$(arg activate_map_service)"/>
+    <param name="activate_map_timeout_s" value="$(arg activate_map_timeout_s)"/>
+    <param name="relocalize_map_service" value="$(arg relocalize_map_service)"/>
+    <param name="relocalize_map_timeout_s" value="$(arg relocalize_map_timeout_s)"/>
+    <param name="require_managed_map_asset" value="$(arg require_managed_map_asset)"/>
+    <param name="require_runtime_localized_before_start" value="$(arg require_runtime_localized_before_start)"/>
+    <param name="require_runtime_map_match" value="$(arg require_runtime_map_match)"/>
+    <param name="allow_map_activation" value="$(arg allow_map_activation)"/>
+    <param name="allow_legacy_zone_start" value="$(arg allow_legacy_zone_start)"/>
+    <param name="runtime_localization_state_param" value="$(arg runtime_localization_state_param)"/>
+    <param name="runtime_localization_valid_param" value="$(arg runtime_localization_valid_param)"/>
+    <param name="readiness_publish_hz" value="$(arg readiness_publish_hz)"/>
+    <param name="runtime_map_topic" value="$(arg runtime_map_topic)"/>
+    <param name="combined_status_topic" value="$(arg combined_status_topic)"/>
+    <param name="combined_status_stale_timeout_s" value="$(arg combined_status_stale_timeout_s)"/>
+    <param name="station_status_topic" value="$(arg station_status_topic)"/>
+    <param name="station_status_stale_timeout_s" value="$(arg station_status_stale_timeout_s)"/>
+    <param name="mcore_connected_topic" value="$(arg mcore_connected_topic)"/>
+    <param name="station_connected_topic" value="$(arg station_connected_topic)"/>
+    <param name="connected_stale_timeout_s" value="$(arg connected_stale_timeout_s)"/>
+    <param name="task_persist_enable" value="true"/>
+    <param name="task_restore_enable" value="$(arg task_restore_enable)"/>
+    <param name="task_state_max_age_s" value="604800"/>
+
+    <!-- executor interface -->
+    <param name="executor_cmd_topic" value="/coverage_executor/cmd"/>
+    <param name="executor_state_topic" value="/coverage_executor/state"/>
+
+    <!-- battery -->
+    <param name="battery_topic" value="/battery_state"/>
+    <param name="battery_stale_timeout_s" value="60.0"/>
+
+    <!-- auto charge sequence -->
+    <param name="auto_charge_enable" value="$(arg auto_charge_enable)"/>
+
+    <!-- dock supply manager integration -->
+    <param name="dock_supply_enable" value="$(arg dock_supply_enable)"/>
+    <param name="dock_supply_start_service" value="/dock_supply/start"/>
+    <param name="dock_supply_cancel_service" value="/dock_supply/cancel"/>
+    <param name="dock_supply_state_topic" value="/dock_supply/state"/>
+    <param name="dock_supply_set_defer_exit_service" value="$(arg dock_supply_set_defer_exit_service)"/>
+    <param name="dock_supply_exit_service" value="$(arg dock_supply_exit_service)"/>
+    <param name="restart_localization_service" value="$(arg restart_localization_service)"/>
+    <param name="restart_localization_timeout_s" value="$(arg restart_localization_timeout_s)"/>
+    <param name="clear_costmaps_service" value="$(arg clear_costmaps_service)"/>
+    <param name="dock_two_stage_enable" value="$(arg dock_two_stage_enable)"/>
+    <param name="dock_stage1_xyyaw" value="$(arg dock_stage1_xyyaw)"/>
+    <param name="dock_stage2_controller" value="$(arg dock_stage2_controller)"/>
+    <param name="dock_retry_limit" value="$(arg dock_retry_limit)"/>
+    <param name="trigger_when_idle" value="false"/>
+    <param name="low_soc" value="$(arg low_soc)"/>
+    <param name="resume_soc" value="$(arg resume_soc)"/>
+    <param name="rearm_soc" value="$(arg rearm_soc)"/>
+
+    <param name="dock_xyyaw" value="$(arg dock_xyyaw)"/>
+    <param name="undock_forward_m" value="0.6"/>
+    <param name="dock_timeout_s" value="600.0"/>
+    <param name="wait_executor_paused_s" value="20.0"/>
+    <param name="charge_timeout_s" value="14400.0"/>
+    <param name="charge_battery_stale_timeout_s" value="300.0"/>
+
+    <!-- docking navigation (MBF move_base) -->
+    <param name="mbf_move_base_action" value="/move_base_flex/move_base"/>
+    <param name="mbf_exe_path_action" value="/move_base_flex/exe_path"/>
+    <param name="mbf_planner" value=""/>
+    <param name="mbf_controller" value=""/>
+    <param name="mbf_recovery" value=""/>
+
+    <!-- health monitor / watchdog -->
+    <param name="health_enable" value="true"/>
+    <param name="health_check_hz" value="1.0"/>
+    <param name="base_frame" value="base_footprint"/>
+    <param name="exec_progress_timeout_s" value="5.0"/>
+    <param name="tf_timeout_s" value="0.1"/>
+    <param name="tf_max_age_s" value="0.6"/>
+    <param name="progress_stall_timeout_s" value="300.0"/>
+    <param name="progress_stall_min_delta" value="0.0001"/>
+    <param name="auto_pause_on_health_error" value="false"/>
+    <param name="auto_pause_cmd" value="pause"/>
+    <param name="health_auto_recover_enable" value="true"/>
+    <param name="health_auto_recover_max" value="5"/>
+    <param name="health_auto_resume_delay_s" value="3.0"/>
+    <rosparam param="health_auto_recover_codes">['ROBOT_NO_MOTION_STALL', 'EXEC_PROGRESS_STALL']</rosparam>
+
+    <!-- localization quality health (optional) -->
+    <param name="loc_enable" value="false"/>
+    <param name="loc_require" value="false"/>
+    <param name="loc_topic" value=""/>
+    <param name="loc_stale_s" value="1.0"/>
+    <param name="loc_cov_xy_max" value="0.25"/>
+    <param name="loc_cov_yaw_max" value="0.30"/>
+    <param name="loc_jump_xy_m" value="1.0"/>
+    <param name="loc_jump_yaw_rad" value="1.0"/>
+
+    <!-- no-motion stall (TF displacement) -->
+    <param name="pose_stall_enable" value="false"/>
+    <param name="pose_stall_timeout_s" value="60.0"/>
+    <param name="pose_stall_min_move_m" value="0.02"/>
+    <param name="pose_stall_min_yaw_rad" value="0.08"/>
+
+    <!-- scheduler -->
+    <param name="scheduler_enable" value="$(arg scheduler_enable)"/>
+    <param name="scheduler_window_s" value="$(arg scheduler_window_s)"/>
+    <param name="scheduler_check_hz" value="$(arg scheduler_check_hz)"/>
+    <param name="scheduler_catch_up_s" value="$(arg scheduler_catch_up_s)"/>
+    <param name="scheduler_retry_backoff_s" value="$(arg scheduler_retry_backoff_s)"/>
+    <param name="scheduler_reload_enable" value="$(arg scheduler_reload_enable)"/>
+    <param name="scheduler_reload_period_s" value="$(arg scheduler_reload_period_s)"/>
+    <param name="load_schedules_yaml" value="$(arg load_schedules_yaml)"/>
+    <param name="sched_debug_snapshot_period_s" value="2.0"/>
+  </node>
+
+  <node pkg="coverage_task_manager" type="task_api_service_node.py" name="task_api_service" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="service_name" value="/database_server/clean_task_service"/>
+    <param name="contract_param_ns" value="$(arg clean_task_contract_param_ns)"/>
+    <param name="default_return_to_dock_on_finish" value="$(arg default_return_to_dock_on_finish)"/>
+  </node>
+
+  <node pkg="coverage_task_manager" type="schedule_api_service_node.py" name="schedule_api_service" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="service_name" value="/database_server/clean_schedule_service"/>
+    <param name="contract_param_ns" value="$(arg clean_schedule_contract_param_ns)"/>
+  </node>
+
+  <node pkg="coverage_task_manager" type="exe_task_service_node.py" name="exe_task_service" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="cmd_topic" value="/coverage_task_manager/cmd"/>
+    <param name="service_name" value="/exe_task_server"/>
+  </node>
+
+</launch>

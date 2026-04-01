@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package cartographer.mapping.proto;
+
+message Descriptor{
+    message DoubleArray{
+        repeated double values = 1;
+    }
+    repeated DoubleArray histogram = 1;
+    repeated DoubleArray variance = 2;
+    repeated DoubleArray hit = 3;
+    repeated DoubleArray miss = 4;
+}
+
+message InterestPoint{
+    message Point2D{
+        double x = 1;
+        double y = 2;
+    }
+
+    message OrientedPoint2D{
+        Point2D position = 1;
+        double theta = 2;
+    }
+    OrientedPoint2D position = 1;
+    repeated Point2D support_points = 2;
+    double scale = 3;
+    uint32 scaleLevel = 4;
+    Descriptor desc = 5;
+}

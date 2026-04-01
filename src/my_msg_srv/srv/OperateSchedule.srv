@@ -1,0 +1,20 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+int8 ENABLE_KEEP = 0
+int8 ENABLE_DISABLE = 1
+int8 ENABLE_ENABLE = 2
+
+uint8 operation # get; add; modify; Delete(soft-disable); getAll
+string schedule_id
+int32 task_id # getAll 过滤或 add/modify 的 task_id 兜底来源
+CleanSchedule schedule
+int8 enabled_state # 0: 保持不变 1: 禁用 2: 启用
+---
+
+bool success
+string message
+CleanSchedule schedule
+CleanSchedule[] schedules # getAll 时返回班表列表
