@@ -1,3 +1,19 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Orbbec 3D Technology, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *******************************************************************************/
+
 #pragma once
 #include "libobsensor/ObSensor.hpp"
 #include "constants.h"
@@ -5,7 +21,6 @@
 #include "json.hpp"
 #include <functional>
 #include <boost/optional.hpp>
-#include <glog/logging.h>
 #include <eigen3/Eigen/Dense>
 #include "orbbec_camera/DeviceInfo.h"
 #include "orbbec_camera/Extrinsics.h"
@@ -44,5 +59,15 @@ const std::vector<stream_index_pair> HID_STREAMS = {GYRO, ACCEL};
 const std::map<std::string, OBDepthPrecisionLevel> DEPTH_PRECISION_STR2ENUM = {
     {"1mm", OB_PRECISION_1MM},    {"0.8mm", OB_PRECISION_0MM8}, {"0.4mm", OB_PRECISION_0MM4},
     {"0.2mm", OB_PRECISION_0MM2}, {"0.1mm", OB_PRECISION_0MM1},
+};
+
+const std::map<OBStreamType, OBFrameType> STREAM_TYPE_TO_FRAME_TYPE = {
+    {OB_STREAM_COLOR, OB_FRAME_COLOR},
+    {OB_STREAM_DEPTH, OB_FRAME_DEPTH},
+    {OB_STREAM_IR, OB_FRAME_IR},
+    {OB_STREAM_IR_LEFT, OB_FRAME_IR_LEFT},
+    {OB_STREAM_IR_RIGHT, OB_FRAME_IR_RIGHT},
+    {OB_STREAM_GYRO, OB_FRAME_GYRO},
+    {OB_STREAM_ACCEL, OB_FRAME_ACCEL},
 };
 }  // namespace orbbec_camera

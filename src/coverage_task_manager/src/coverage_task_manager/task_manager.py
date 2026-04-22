@@ -10,28 +10,46 @@ import uuid
 import json
 import traceback
 from datetime import datetime
-from dataclasses import dataclass, asdict, is_dataclass
+from dataclasses import dataclass, asdict, field, is_dataclass
 from typing import Optional, Tuple, Dict, List
 
 import rospy
 import rosnode
+import rosservice
 from std_msgs.msg import String, Bool
 from std_srvs.srv import Trigger, Empty, SetBool
 
+from cleanrobot_app_msgs.msg import (
+    OdometryState,
+    SlamState,
+    SystemReadiness as SystemReadinessMsg,
+    SubsystemReadiness,
+)
+from cleanrobot_app_msgs.srv import (
+    ExeTask as AppExeTask,
+    ExeTaskRequest as AppExeTaskRequest,
+    ExeTaskResponse as AppExeTaskResponse,
+    GetSlamJob as AppGetSlamJob,
+    GetSystemReadiness as AppGetSystemReadiness,
+    GetSystemReadinessResponse as AppGetSystemReadinessResponse,
+    RestartLocalization as AppRestartLocalization,
+    SubmitSlamCommand as AppSubmitSlamCommand,
+)
 from diagnostic_updater import Updater
 from diagnostic_msgs.msg import DiagnosticStatus
-from my_msg_srv.msg import CombinedStatus, StationStatus, SystemReadiness as SystemReadinessMsg, SubsystemReadiness
-from my_msg_srv.srv import (
-    ActivateMapAsset,
-    RelocalizeMapAsset,
-    RestartLocalization,
-    GetSystemReadiness,
-    GetSystemReadinessResponse,
-)
+from robot_platform_msgs.msg import CombinedStatus, StationStatus
 
 from coverage_msgs.msg import TaskState as TaskStateMsg
 from coverage_msgs.msg import RunProgress as RunProgressMsg
 from sensor_msgs.msg import BatteryState
+from coverage_planner.manual_assist_pose import (
+    DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS,
+    consume_manual_assist_pose_override,
+    inspect_manual_assist_pose_override,
+    manual_assist_pose_summary,
+    record_manual_assist_pose_override_status,
+)
+from coverage_planner.map_asset_status import map_asset_verification_error
 from coverage_planner.plan_store.store import PlanStore
 from coverage_planner.ops_store.store import JobRecord, OperationsStore
 
@@ -42,9 +60,28 @@ from .scheduler import Scheduler, ScheduleJob
 from .mode_profiles import ModeProfileCatalog
 from .nav_profile_applier import NavProfileApplier
 from .mission_store import MissionStore
+from coverage_planner.canonical_contract_types import (
+    APP_GET_SLAM_JOB_SERVICE_TYPE,
+    APP_RESTART_LOCALIZATION_SERVICE_TYPE,
+    APP_SUBMIT_SLAM_COMMAND_SERVICE_TYPE,
+)
 
 from .health_monitor import HealthMonitor, HealthResult
-from .map_identity import ensure_map_identity, get_runtime_map_scope
+from .map_identity import ensure_map_identity, get_runtime_map_revision_id, get_runtime_map_scope
+from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
+from coverage_planner.runtime_gate_messages import (
+    manual_assist_metadata,
+    no_current_active_map_selected_message,
+    odometry_not_ready_message,
+    runtime_localization_relocalize_required_before_task_message,
+    runtime_localization_not_ready_message,
+    runtime_map_identity_unavailable_message,
+    runtime_map_mismatch_reason,
+    runtime_map_switch_required_before_task_message,
+    selected_map_does_not_match_requested_map_message,
+)
+from coverage_planner.service_mode import publish_contract_param
+from coverage_planner.slam_workflow_semantics import localization_is_ready, localization_needs_manual_assist
 
 try:
     from zoneinfo import ZoneInfo
@@ -177,11 +214,48 @@ class BoolSnapshot:
     ts: float = 0.0
 
 
+@dataclass
+class OdometrySnapshot:
+    msg: Optional[OdometryState] = None
+    ts: float = 0.0
+
+
+@dataclass
+class SlamStateSnapshot:
+    msg: Optional[SlamState] = None
+    ts: float = 0.0
+
+
+@dataclass
+class ReadinessGateResult:
+    blockers: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+    checks: List[SubsystemReadiness] = field(default_factory=list)
+
+
+@dataclass
+class SlamRuntimeGateResult(ReadinessGateResult):
+    active_revision_id: str = ""
+    active_map_name: str = ""
+    active_map_id: str = ""
+    active_map_md5: str = ""
+    runtime_revision_id: str = ""
+    runtime_map_name: str = ""
+    runtime_map_id: str = ""
+    runtime_map_md5: str = ""
+    manual_assist_required: bool = False
+    manual_assist_map_name: str = ""
+    manual_assist_map_revision_id: str = ""
+    manual_assist_retry_action: str = ""
+    manual_assist_guidance: str = ""
+
+
 class TaskManager:
     """Task layer orchestrator.
 
     Responsibilities (commercial-grade split):
-      - Provide a single place to accept operator/dev commands (String cmd).
+      - Own the formal task execution contract (`/coverage_task_manager/app/exe_task_server`).
+      - Keep a separate String cmd surface only for internal/dev/debug commands.
       - Monitor battery and, when needed, suspend mission -> dock -> wait charge -> undock -> resume.
       - Forward mission controls to coverage_executor.
       - Scheduler for recurring jobs (WALL-TIME reliable even if /use_sim_time is active).
@@ -190,7 +264,7 @@ class TaskManager:
     def __init__(
         self,
         *,
-        db_path: str = "",
+        ops_db_path: str = "",
         plan_db_path: str = "",
         robot_id: str = "local_robot",
         task_persist_enable: bool = True,
@@ -198,8 +272,7 @@ class TaskManager:
         task_state_max_age_s: float = 7 * 24 * 3600,
         frame_id: str = "map",
         zone_id_default: str = "zone_demo",
-        default_plan_profile_name: Optional[str] = None,
-        default_profile_name: str = "cover_standard",  # legacy alias for plan profile
+        default_plan_profile_name: str = "cover_standard",
         default_sys_profile_name: str = "standard",
         default_clean_mode: str = "",
         default_return_to_dock_on_finish: bool = False,
@@ -218,6 +291,8 @@ class TaskManager:
         sys_profile_switch_wait_s: float = 20.0,
 
         cmd_topic: str = "~cmd",
+        app_exe_task_service_name: str = "/coverage_task_manager/app/exe_task_server",
+        app_exe_task_contract_param_ns: str = "/coverage_task_manager/contracts/app/exe_task_server",
         battery_topic: str = "/battery_state",
         battery_stale_timeout_s: float = 5.0,
 
@@ -292,23 +367,27 @@ class TaskManager:
         dock_supply_state_topic: str = "/dock_supply/state",
         dock_supply_set_defer_exit_service: str = "/dock_supply/set_defer_exit",
         dock_supply_exit_service: str = "/dock_supply/exit",
-        restart_localization_service: str = "/cartographer/runtime/restart_localization",
+        app_restart_localization_service: str = "/cartographer/runtime/app/restart_localization",
+        app_slam_submit_command_service: str = "/clean_robot_server/app/submit_slam_command",
+        app_slam_get_job_service: str = "/clean_robot_server/app/get_slam_job",
         restart_localization_timeout_s: float = 180.0,
         clear_costmaps_service: str = "/move_base_flex/clear_costmaps",
-        activate_map_service: str = "/map_assets/activate",
-        activate_map_timeout_s: float = 10.0,
-        relocalize_map_service: str = "/map_assets/relocalize",
-        relocalize_map_timeout_s: float = 10.0,
+        manual_assist_pose_param_ns: str = DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS,
         require_managed_map_asset: bool = False,
         require_runtime_localized_before_start: bool = False,
         require_runtime_map_match: bool = False,
-        allow_map_activation: bool = False,
-        allow_legacy_zone_start: bool = False,
         runtime_localization_state_param: str = "/cartographer/runtime/localization_state",
         runtime_localization_valid_param: str = "/cartographer/runtime/localization_valid",
+        require_odometry_healthy_before_start: bool = True,
+        odometry_state_topic: str = "/clean_robot_server/odometry_state",
+        odometry_state_stale_timeout_s: float = 5.0,
+        slam_state_topic: str = "/clean_robot_server/slam_state",
+        slam_state_stale_timeout_s: float = 5.0,
 
         # System readiness aggregation
         readiness_publish_hz: float = 1.0,
+        app_readiness_service_name: str = "/coverage_task_manager/app/get_system_readiness",
+        app_readiness_contract_param_ns: str = "/coverage_task_manager/contracts/app/get_system_readiness",
         runtime_map_topic: str = "/map",
         combined_status_topic: str = "/combined_status",
         combined_status_stale_timeout_s: float = 5.0,
@@ -324,8 +403,7 @@ class TaskManager:
         self._active_zone: str = self.zone_id_default
 
         # Task intent params:
-        plan_default = default_plan_profile_name if (default_plan_profile_name is not None) else default_profile_name
-        self._task_plan_profile_name: str = str(plan_default or "").strip()
+        self._task_plan_profile_name: str = str(default_plan_profile_name or "cover_standard").strip() or "cover_standard"
         self._default_sys_profile_name: str = str(default_sys_profile_name or "standard").strip() or "standard"
         self._task_sys_profile_name: str = self._default_sys_profile_name
         self._task_clean_mode: str = str(default_clean_mode or "").strip()
@@ -333,6 +411,7 @@ class TaskManager:
         self._task_return_to_dock_on_finish: bool = self._default_return_to_dock_on_finish
         self._task_repeat_after_full_charge: bool = False
         self._task_map_name: str = ""
+        self._task_map_revision_id: str = ""
         self._plan_db_path = os.path.expanduser(str(plan_db_path or "").strip())
         self._plan_store: Optional[PlanStore] = None
         self._ops_store: Optional[OperationsStore] = None
@@ -342,19 +421,9 @@ class TaskManager:
             except Exception as e:
                 rospy.logerr("[TASK] map asset DB disabled: plan_db_path=%s err=%s", self._plan_db_path, str(e))
                 self._plan_store = None
-        self._activate_map_service = str(activate_map_service or "/map_assets/activate").strip() or "/map_assets/activate"
-        self._activate_map_timeout_s = max(1.0, float(activate_map_timeout_s))
-        self._activate_map_cli = None
-        self._relocalize_map_service = (
-            str(relocalize_map_service or "/map_assets/relocalize").strip() or "/map_assets/relocalize"
-        )
-        self._relocalize_map_timeout_s = max(1.0, float(relocalize_map_timeout_s))
-        self._relocalize_map_cli = None
         self._require_managed_map_asset = bool(require_managed_map_asset)
         self._require_runtime_localized_before_start = bool(require_runtime_localized_before_start)
         self._require_runtime_map_match = bool(require_runtime_map_match)
-        self._allow_map_activation = bool(allow_map_activation)
-        self.allow_legacy_zone_start = bool(allow_legacy_zone_start)
         self._runtime_localization_state_param = (
             str(runtime_localization_state_param or "/cartographer/runtime/localization_state").strip()
             or "/cartographer/runtime/localization_state"
@@ -363,8 +432,34 @@ class TaskManager:
             str(runtime_localization_valid_param or "/cartographer/runtime/localization_valid").strip()
             or "/cartographer/runtime/localization_valid"
         )
+        self._require_odometry_healthy_before_start = bool(require_odometry_healthy_before_start)
+        self._odometry_state_topic = (
+            str(odometry_state_topic or "/clean_robot_server/odometry_state").strip()
+            or "/clean_robot_server/odometry_state"
+        )
+        self._odometry_state_stale_timeout_s = max(0.5, float(odometry_state_stale_timeout_s))
+        self._slam_state_topic = (
+            str(slam_state_topic or "/clean_robot_server/slam_state").strip()
+            or "/clean_robot_server/slam_state"
+        )
+        self._slam_state_stale_timeout_s = max(0.5, float(slam_state_stale_timeout_s))
+        self._manual_assist_pose_param_ns = (
+            str(manual_assist_pose_param_ns or DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS).strip()
+            or DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS
+        )
         self._runtime_map_topic = str(runtime_map_topic or "/map").strip() or "/map"
         self._readiness_publish_hz = max(0.2, float(readiness_publish_hz))
+        self._app_readiness_service_name = (
+            str(app_readiness_service_name or "/coverage_task_manager/app/get_system_readiness").strip()
+            or "/coverage_task_manager/app/get_system_readiness"
+        )
+        self._app_readiness_contract_param_ns = (
+            str(
+                app_readiness_contract_param_ns
+                or "/coverage_task_manager/contracts/app/get_system_readiness"
+            ).strip()
+            or "/coverage_task_manager/contracts/app/get_system_readiness"
+        )
         self._combined_status_topic = str(combined_status_topic or "/combined_status").strip() or "/combined_status"
         self._combined_status_stale_timeout_s = max(0.5, float(combined_status_stale_timeout_s))
         self._station_status_topic = str(station_status_topic or "/station_status").strip() or "/station_status"
@@ -407,6 +502,16 @@ class TaskManager:
         self.executor_cmd_topic = str(executor_cmd_topic)
         self.executor_state_topic = str(executor_state_topic)
         self.executor_progress_topic = str(executor_progress_topic)
+        self._app_exe_task_service_name = (
+            str(app_exe_task_service_name or "/coverage_task_manager/app/exe_task_server").strip()
+            or "/coverage_task_manager/app/exe_task_server"
+        )
+        self._app_exe_task_contract_param_ns = (
+            str(app_exe_task_contract_param_ns or "/coverage_task_manager/contracts/app/exe_task_server").strip()
+            or "/coverage_task_manager/contracts/app/exe_task_server"
+        )
+        self._app_readiness_contract_report = self._prepare_readiness_contract_report()
+        self._app_exe_task_contract_report = self._prepare_exe_task_contract_report()
 
         self.battery_topic = str(battery_topic)
         self.battery_stale_timeout_s = float(battery_stale_timeout_s)
@@ -441,7 +546,14 @@ class TaskManager:
         self._station_status = MsgSnapshot()
         self._mcore_connected = BoolSnapshot()
         self._station_connected = BoolSnapshot()
+        self._odometry_state = OdometrySnapshot()
+        self._slam_state = SlamStateSnapshot()
         self._executor_state = ""
+        # Initialize health fault fields before subscribers come online, otherwise
+        # early executor callbacks can hit _snapshot() before these attributes exist.
+        self._health_fault_active: bool = False
+        self._health_error_code: str = ""
+        self._health_error_msg: str = ""
 
         self._armed = True
 
@@ -511,7 +623,9 @@ class TaskManager:
         self._dock_supply_state_topic = str(dock_supply_state_topic)
         self._dock_supply_set_defer_exit_service = str(dock_supply_set_defer_exit_service)
         self._dock_supply_exit_service = str(dock_supply_exit_service)
-        self._restart_localization_service = str(restart_localization_service)
+        self._app_restart_localization_service = str(app_restart_localization_service)
+        self._app_slam_submit_command_service = str(app_slam_submit_command_service)
+        self._app_slam_get_job_service = str(app_slam_get_job_service)
         self._restart_localization_timeout_s = max(1.0, float(restart_localization_timeout_s))
         self._clear_costmaps_service = str(clear_costmaps_service)
 
@@ -520,6 +634,11 @@ class TaskManager:
         self._dock_supply_set_defer_exit_cli = None
         self._dock_supply_exit_cli = None
         self._restart_localization_cli = None
+        self._slam_submit_command_cli = None
+        self._slam_get_job_cli = None
+        self._restart_localization_cli_service_name = ""
+        self._slam_submit_command_cli_service_name = ""
+        self._slam_get_job_cli_service_name = ""
         self._clear_costmaps_cli = None
         if self._dock_supply_enable:
             try:
@@ -540,15 +659,9 @@ class TaskManager:
                 rospy.logerr("[TASK] dock_supply init failed, disabled. err=%s", str(e))
                 self._dock_supply_enable = False
 
-        try:
-            self._restart_localization_cli = rospy.ServiceProxy(self._restart_localization_service, RestartLocalization)
-        except Exception as e:
-            rospy.logwarn(
-                "[TASK] restart localization service proxy init failed: service=%s err=%s",
-                self._restart_localization_service,
-                str(e),
-            )
-            self._restart_localization_cli = None
+        self._ensure_restart_localization_cli()
+        self._ensure_slam_submit_command_cli()
+        self._ensure_slam_get_job_cli()
 
         if self._clear_costmaps_service:
             try:
@@ -561,13 +674,6 @@ class TaskManager:
                 )
                 self._clear_costmaps_cli = None
 
-        if self._allow_map_activation:
-            try:
-                self._activate_map_cli = rospy.ServiceProxy(self._activate_map_service, ActivateMapAsset)
-            except Exception as e:
-                rospy.logwarn("[TASK] legacy map activation service proxy init failed: service=%s err=%s", self._activate_map_service, str(e))
-                self._activate_map_cli = None
-
         # sys_profile switching policy
         self._sys_profile_switch_policy = str(sys_profile_switch_policy or "defer").strip().lower()
         if self._sys_profile_switch_policy not in ("defer", "suspend_resume"):
@@ -577,37 +683,41 @@ class TaskManager:
         self._pending_sys_profile_name: Optional[str] = None
 
         # init persistence store
-        if not db_path:
-            db_path = "~/.ros/coverage/coverage.db"
-        db_path = os.path.expanduser(str(db_path))
+        if not ops_db_path:
+            ops_db_path = "~/.ros/coverage/coverage.db"
+        ops_db_path = os.path.expanduser(str(ops_db_path))
         try:
-            self._store = TaskStateStore(str(db_path), robot_id=self._robot_id) if self._persist_enable else None
+            self._store = TaskStateStore(str(ops_db_path), robot_id=self._robot_id) if self._persist_enable else None
         except Exception as e:
-            rospy.logerr("[TASK] task persistence disabled: cannot open db_path=%s err=%s", str(db_path), str(e))
+            rospy.logerr("[TASK] task persistence disabled: cannot open ops_db_path=%s err=%s", str(ops_db_path), str(e))
             self._store = None
             self._persist_enable = False
 
         try:
-            self._ops_store = OperationsStore(str(db_path))
+            self._ops_store = OperationsStore(str(ops_db_path))
         except Exception as e:
-            rospy.logerr("[TASK] operations store disabled: cannot open db_path=%s err=%s", str(db_path), str(e))
+            rospy.logerr("[TASK] operations store disabled: cannot open ops_db_path=%s err=%s", str(ops_db_path), str(e))
             self._ops_store = None
 
         # Mission history store
         self._mission_store: Optional[MissionStore] = None
         if self._persist_enable:
             try:
-                self._mission_store = MissionStore(str(db_path))
+                self._mission_store = MissionStore(str(ops_db_path))
             except Exception as e:
-                rospy.logerr("[TASK] mission_store disabled: db_path=%s err=%s", str(db_path), str(e))
+                rospy.logerr("[TASK] mission_store disabled: ops_db_path=%s err=%s", str(ops_db_path), str(e))
                 self._mission_store = None
 
         # Schedule run store
         if self.scheduler_enable:
             try:
-                self._sched_store = ScheduleRunStore(str(db_path))
+                self._sched_store = ScheduleRunStore(str(ops_db_path))
             except Exception as e:
-                rospy.logerr("[TASK] scheduler disabled: cannot open schedule store db_path=%s err=%s", str(db_path), str(e))
+                rospy.logerr(
+                    "[TASK] scheduler disabled: cannot open schedule store ops_db_path=%s err=%s",
+                    str(ops_db_path),
+                    str(e),
+                )
                 self.scheduler_enable = False
                 self._sched_store = None
 
@@ -626,8 +736,23 @@ class TaskManager:
         rospy.Subscriber(self._station_status_topic, StationStatus, self._on_station_status, queue_size=10)
         rospy.Subscriber(self._mcore_connected_topic, Bool, self._on_mcore_connected, queue_size=10)
         rospy.Subscriber(self._station_connected_topic, Bool, self._on_station_connected, queue_size=10)
+        if self._odometry_state_topic:
+            rospy.Subscriber(self._odometry_state_topic, OdometryState, self._on_odometry_state, queue_size=10)
+        if self._slam_state_topic:
+            rospy.Subscriber(self._slam_state_topic, SlamState, self._on_slam_state, queue_size=10)
 
-        self._readiness_srv = rospy.Service("~get_system_readiness", GetSystemReadiness, self._on_get_system_readiness)
+        self._app_readiness_srv = rospy.Service(
+            self._app_readiness_service_name,
+            AppGetSystemReadiness,
+            self._on_get_system_readiness_app,
+        )
+        self._app_exe_task_srv = rospy.Service(
+            self._app_exe_task_service_name,
+            AppExeTask,
+            self._on_exe_task_app,
+        )
+        publish_contract_param(rospy, self._app_readiness_contract_param_ns, self._app_readiness_contract_report, enabled=True)
+        publish_contract_param(rospy, self._app_exe_task_contract_param_ns, self._app_exe_task_contract_report, enabled=True)
 
         self._task_state_timer = rospy.Timer(rospy.Duration(0.5), self._on_task_state_timer)
         self._readiness_timer = rospy.Timer(rospy.Duration(1.0 / self._readiness_publish_hz), self._on_readiness_timer)
@@ -676,9 +801,6 @@ class TaskManager:
         self._health_last: HealthResult = HealthResult()
         self._health_prev_level: str = "OK"
         self._health_prev_code: str = ""
-        self._health_fault_active: bool = False
-        self._health_error_code: str = ""
-        self._health_error_msg: str = ""
 
         self._diag_updater: Optional[Updater] = None
         self._health_timer: Optional[rospy.Timer] = None
@@ -728,9 +850,11 @@ class TaskManager:
         t.start()
 
         rospy.loginfo(
-            "[TASK] ready. cmd=%s -> executor_cmd=%s battery=%s auto_charge=%s low=%.2f resume=%.2f rearm=%.2f dock=(%.2f,%.2f,%.2f)",
+            "[TASK] ready. cmd=%s -> executor_cmd=%s app_exe_task=%s app_contract=%s battery=%s auto_charge=%s low=%.2f resume=%.2f rearm=%.2f dock=(%.2f,%.2f,%.2f)",
             rospy.resolve_name(cmd_topic),
             self.executor_cmd_topic,
+            self._app_exe_task_service_name,
+            self._app_exe_task_contract_param_ns or "-",
             self.battery_topic,
             str(self.auto_charge_enable),
             self.low_soc,
@@ -759,16 +883,21 @@ class TaskManager:
         s = str(msg.data or "")
         rid = ""
         need_mark_paused_recovery = False
+        executor_state_changed = False
 
         with self._lock:
             prev = str(self._executor_state or "")
             self._executor_state = s
+            executor_state_changed = (s != prev)
 
             if s == "PAUSED_RECOVERY" and prev != "PAUSED_RECOVERY":
                 self._mission_state = "PAUSED"
                 self._phase = "IDLE"
                 rid = str(self._active_run_id or "")
                 need_mark_paused_recovery = True
+
+        if executor_state_changed:
+            self._persist_if_changed()
 
         if need_mark_paused_recovery:
             self._mission_update_state(rid, "PAUSED", reason="exec_paused_recovery")
@@ -806,6 +935,30 @@ class TaskManager:
             self._station_connected.value = bool(msg.data)
             self._station_connected.ts = time.time()
 
+    def _on_odometry_state(self, msg: OdometryState):
+        with self._lock:
+            self._odometry_state.msg = msg
+            self._odometry_state.ts = time.time()
+
+    def _on_slam_state(self, msg: SlamState):
+        with self._lock:
+            self._slam_state.msg = msg
+            self._slam_state.ts = time.time()
+
+    def _get_fresh_slam_state(self, *, now: Optional[float] = None) -> Optional[SlamState]:
+        ts = 0.0
+        msg = None
+        with self._lock:
+            if hasattr(self, "_slam_state"):
+                ts = float(getattr(self._slam_state, "ts", 0.0) or 0.0)
+                msg = getattr(self._slam_state, "msg", None)
+        if msg is None or ts <= 0.0:
+            return None
+        current = float(time.time() if now is None else now)
+        if (current - ts) > float(self._slam_state_stale_timeout_s):
+            return None
+        return msg
+
     def _on_cmd(self, msg: String):
         cmd = (msg.data or "").strip()
         if not cmd:
@@ -821,6 +974,7 @@ class TaskManager:
 
     def _runtime_map_snapshot(self, *, refresh: bool = False) -> Dict[str, object]:
         name = ""
+        revision_id = ""
         map_id = ""
         map_md5 = ""
         ok = False
@@ -828,6 +982,10 @@ class TaskManager:
             name, _scope = get_runtime_map_scope()
         except Exception:
             name = ""
+        try:
+            revision_id = get_runtime_map_revision_id("/cartographer/runtime")
+        except Exception:
+            revision_id = ""
         try:
             map_id, map_md5, ok = ensure_map_identity(
                 map_topic=str(self._runtime_map_topic),
@@ -838,7 +996,15 @@ class TaskManager:
             )
         except Exception:
             map_id, map_md5, ok = "", "", False
+        if (not name) and revision_id and self._plan_store is not None:
+            try:
+                revision = self._plan_store.resolve_map_revision(revision_id=revision_id) or {}
+            except Exception:
+                revision = {}
+            if revision:
+                name = str(revision.get("map_name") or "").strip()
         return {
+            "revision_id": str(revision_id or "").strip(),
             "map_name": str(name or "").strip(),
             "map_id": str(map_id or "").strip(),
             "map_md5": str(map_md5 or "").strip(),
@@ -868,121 +1034,329 @@ class TaskManager:
         m.summary = str(summary or "")
         return m
 
-    def _build_system_readiness(self, *, task_id: int = 0, refresh_map_identity: bool = False) -> SystemReadinessMsg:
-        now = time.time()
-        with self._lock:
-            mission_state = str(self._mission_state or "IDLE")
-            phase = str(self._phase or "IDLE")
-            public_state = str(self._public_state or "IDLE")
-            executor_state = str(self._executor_state or "")
-            dock_supply_state = str(self._dock_supply_state or "IDLE")
-            dock_supply_ts = float(getattr(self, "_dock_supply_state_ts", 0.0) or 0.0)
-            batt_soc = self._battery.soc
-            batt_ts = float(self._battery.ts or 0.0)
-            combined_ts = float(self._combined_status.ts or 0.0)
-            station_ts = float(self._station_status.ts or 0.0)
-            mcore_connected = self._mcore_connected.value
-            mcore_connected_ts = float(self._mcore_connected.ts or 0.0)
-            station_connected = self._station_connected.value
-            station_connected_ts = float(self._station_connected.ts or 0.0)
-            health_fault_active = bool(self._health_fault_active)
-            health_error_code = str(self._health_error_code or "")
-            health_error_msg = str(self._health_error_msg or "")
+    @staticmethod
+    def _append_unique_readiness_text(items: List[str], text: str):
+        normalized = str(text or "").strip()
+        if normalized and normalized not in items:
+            items.append(normalized)
 
-        readiness = SystemReadinessMsg()
-        readiness.task_id = int(task_id or 0)
-        readiness.mission_state = mission_state
-        readiness.phase = phase
-        readiness.public_state = public_state
-        readiness.executor_state = executor_state
-        readiness.dock_supply_state = dock_supply_state
-        readiness.battery_soc = float(batt_soc if batt_soc is not None else 0.0)
-        readiness.battery_valid = bool(batt_ts > 0.0 and (now - batt_ts) <= float(self.battery_stale_timeout_s))
-        readiness.stamp = rospy.Time.now()
+    def _merge_readiness_gate_result(
+        self,
+        *,
+        blockers: List[str],
+        warnings: List[str],
+        checks: List[SubsystemReadiness],
+        result: ReadinessGateResult,
+    ):
+        for item in list(getattr(result, "blockers", []) or []):
+            self._append_unique_readiness_text(blockers, item)
+        for item in list(getattr(result, "warnings", []) or []):
+            self._append_unique_readiness_text(warnings, item)
+        checks.extend(list(getattr(result, "checks", []) or []))
 
-        blockers: List[str] = []
-        warnings: List[str] = []
-        checks: List[SubsystemReadiness] = []
+    def _build_slam_runtime_gate(
+        self,
+        *,
+        now: float,
+        refresh_map_identity: bool,
+        odometry_state: Optional[OdometryState],
+        odometry_state_ts: float,
+        slam_state: Optional[SlamState],
+        slam_state_ts: float,
+    ) -> SlamRuntimeGateResult:
+        result = SlamRuntimeGateResult()
+        local_slam_blockers: List[str] = []
+
+        slam_age = (now - slam_state_ts) if slam_state_ts > 0.0 else -1.0
+        slam_fresh = slam_state_ts > 0.0 and slam_age <= self._slam_state_stale_timeout_s
+        slam_task_ready = bool(getattr(slam_state, "task_ready", False)) if slam_state is not None else False
+        slam_runtime_authoritative = bool(slam_state is not None and slam_fresh)
+        slam_blocking_reason = ""
+        if slam_state is not None:
+            slam_blocking_reason = str(getattr(slam_state, "blocking_reason", "") or "").strip()
+            if not slam_blocking_reason:
+                for item in list(getattr(slam_state, "blocking_reasons", []) or []):
+                    slam_blocking_reason = str(item or "").strip()
+                    if slam_blocking_reason:
+                        break
 
         selected_asset = self._get_selected_active_map() or {}
-        active_map_name = str(selected_asset.get("map_name") or "").strip()
-        active_map_id = str(selected_asset.get("map_id") or "").strip()
-        active_map_md5 = str(selected_asset.get("map_md5") or "").strip()
-        readiness.active_map_name = active_map_name
-        readiness.active_map_id = active_map_id
-        readiness.active_map_md5 = active_map_md5
+        result.active_revision_id = str(selected_asset.get("revision_id") or "").strip()
+        result.active_map_name = str(selected_asset.get("map_name") or "").strip()
+        result.active_map_id = str(selected_asset.get("map_id") or "").strip()
+        result.active_map_md5 = str(selected_asset.get("map_md5") or "").strip()
 
         runtime_map = self._runtime_map_snapshot(refresh=bool(refresh_map_identity))
-        runtime_map_name = str(runtime_map.get("map_name") or "")
-        runtime_map_id = str(runtime_map.get("map_id") or "")
-        runtime_map_md5 = str(runtime_map.get("map_md5") or "")
-        readiness.runtime_map_name = runtime_map_name
-        readiness.runtime_map_id = runtime_map_id
-        readiness.runtime_map_md5 = runtime_map_md5
+        result.runtime_revision_id = str(runtime_map.get("revision_id") or "")
+        result.runtime_map_name = str(runtime_map.get("map_name") or "")
+        result.runtime_map_id = str(runtime_map.get("map_id") or "")
+        result.runtime_map_md5 = str(runtime_map.get("map_md5") or "")
 
-        if not active_map_name:
-            blockers.append("no current active map selected")
-            checks.append(self._make_readiness_check(
+        if not result.active_map_name:
+            self._append_unique_readiness_text(local_slam_blockers, no_current_active_map_selected_message())
+            result.checks.append(self._make_readiness_check(
                 key="active_map",
-                level="ERROR",
+                level="WARN" if slam_runtime_authoritative else "ERROR",
                 ok=False,
                 fresh=False,
                 missing=True,
-                summary="no current active map selected",
+                summary=no_current_active_map_selected_message(),
             ))
         else:
-            checks.append(self._make_readiness_check(
+            result.checks.append(self._make_readiness_check(
                 key="active_map",
                 level="OK",
                 ok=True,
-                summary="selected map=%s" % active_map_name,
+                summary="selected map=%s" % result.active_map_name,
             ))
 
-        runtime_missing = not (runtime_map_name or runtime_map_id or runtime_map_md5)
-        map_mismatch = False
+        runtime_missing = not (
+            result.runtime_revision_id
+            or result.runtime_map_name
+            or result.runtime_map_id
+            or result.runtime_map_md5
+        )
         if runtime_missing:
-            blockers.append("runtime /map identity unavailable")
-            checks.append(self._make_readiness_check(
+            self._append_unique_readiness_text(local_slam_blockers, runtime_map_identity_unavailable_message())
+            result.checks.append(self._make_readiness_check(
                 key="runtime_map",
-                level="ERROR",
+                level="WARN" if slam_runtime_authoritative else "ERROR",
                 ok=False,
                 fresh=False,
                 missing=True,
-                summary="runtime /map identity unavailable",
+                summary=runtime_map_identity_unavailable_message(),
             ))
         else:
-            mismatch_reason = ""
-            if active_map_name and runtime_map_name and runtime_map_name != active_map_name:
-                map_mismatch = True
-                mismatch_reason = "runtime map_name %s != active map %s" % (runtime_map_name, active_map_name)
-            elif active_map_id and runtime_map_id and runtime_map_id != active_map_id:
-                map_mismatch = True
-                mismatch_reason = "runtime map_id %s != active map_id %s" % (runtime_map_id, active_map_id)
-            elif active_map_md5 and runtime_map_md5 and runtime_map_md5 != active_map_md5:
-                map_mismatch = True
-                mismatch_reason = "runtime map_md5 %s != active map_md5 %s" % (runtime_map_md5, active_map_md5)
-            if map_mismatch:
-                blockers.append(mismatch_reason)
-                checks.append(self._make_readiness_check(
+            mismatch_reason = runtime_map_mismatch_reason(
+                active_revision_id=result.active_revision_id,
+                active_map_name=result.active_map_name,
+                active_map_id=result.active_map_id,
+                active_map_md5=result.active_map_md5,
+                runtime_revision_id=result.runtime_revision_id,
+                runtime_map_name=result.runtime_map_name,
+                runtime_map_id=result.runtime_map_id,
+                runtime_map_md5=result.runtime_map_md5,
+            )
+            if mismatch_reason:
+                self._append_unique_readiness_text(local_slam_blockers, mismatch_reason)
+                result.checks.append(self._make_readiness_check(
                     key="runtime_map",
-                    level="ERROR",
+                    level="WARN" if slam_runtime_authoritative else "ERROR",
                     ok=False,
                     fresh=True,
                     summary=mismatch_reason,
                 ))
             else:
-                summary = "runtime map=%s" % (runtime_map_name or runtime_map_id or runtime_map_md5)
-                checks.append(self._make_readiness_check(
+                result.checks.append(self._make_readiness_check(
                     key="runtime_map",
                     level="OK",
                     ok=True,
-                    summary=summary,
+                    summary="runtime map=%s" % (result.runtime_map_name or result.runtime_map_id or result.runtime_map_md5),
                 ))
+
+        odometry_age = (now - odometry_state_ts) if odometry_state_ts > 0.0 else -1.0
+        odometry_fresh = odometry_state_ts > 0.0 and odometry_age <= self._odometry_state_stale_timeout_s
+        odometry_valid = bool(
+            odometry_fresh
+            and odometry_state is not None
+            and bool(getattr(odometry_state, "odom_valid", False))
+        )
+        odometry_error_code = (
+            str(getattr(odometry_state, "error_code", "") or "").strip()
+            if odometry_state is not None
+            else ""
+        )
+        odometry_message = (
+            str(getattr(odometry_state, "message", "") or "").strip()
+            if odometry_state is not None
+            else ""
+        )
+        if odometry_state is None or odometry_state_ts <= 0.0:
+            odometry_summary = "odometry state unavailable"
+        elif not odometry_fresh:
+            odometry_summary = "state stale age=%.1fs" % odometry_age
+        else:
+            odometry_summary = "mode=%s stream=%s valid=%s code=%s msg=%s" % (
+                str(getattr(odometry_state, "validation_mode", "") or "-"),
+                str(bool(getattr(odometry_state, "odom_stream_ready", False))).lower(),
+                str(bool(odometry_valid)).lower(),
+                odometry_error_code or "-",
+                odometry_message or "ok",
+            )
+            odometry_source = str(getattr(odometry_state, "odom_source", "") or "").strip()
+            if odometry_source and odometry_source != "odom_stream":
+                odometry_summary += " source=%s" % odometry_source
+        if self._require_odometry_healthy_before_start and (not slam_runtime_authoritative):
+            if odometry_state is None or odometry_state_ts <= 0.0:
+                self._append_unique_readiness_text(local_slam_blockers, "odometry health state unavailable")
+            elif not odometry_fresh:
+                self._append_unique_readiness_text(local_slam_blockers, "odometry health stale age=%.1fs" % odometry_age)
+            elif not odometry_valid:
+                self._append_unique_readiness_text(
+                    local_slam_blockers,
+                    odometry_not_ready_message(odometry_error_code, odometry_message),
+                )
+        else:
+            if odometry_state is None or odometry_state_ts <= 0.0:
+                result.warnings.append("odometry health state unavailable")
+            elif not odometry_fresh:
+                result.warnings.append("odometry health stale")
+            elif not odometry_valid:
+                result.warnings.append(odometry_not_ready_message(odometry_error_code, odometry_message))
+        if odometry_state is not None and odometry_fresh and not odometry_valid:
+            for item in list(getattr(odometry_state, "warnings", []) or []):
+                text = str(item or "").strip()
+                if text:
+                    result.warnings.append("odometry: %s" % text)
+        result.checks.append(self._make_readiness_check(
+            key="odometry",
+            level=(
+                "OK"
+                if odometry_valid
+                else ("WARN" if slam_runtime_authoritative else ("ERROR" if self._require_odometry_healthy_before_start else "WARN"))
+            ),
+            ok=bool(odometry_valid),
+            fresh=bool(odometry_fresh),
+            stale=bool(odometry_state_ts > 0.0 and not odometry_fresh),
+            missing=bool(odometry_state is None or odometry_state_ts <= 0.0),
+            age_s=float(odometry_age) if odometry_state_ts > 0.0 else -1.0,
+            summary=odometry_summary,
+        ))
+
+        localization_state = str(rospy.get_param(self._runtime_localization_state_param, "") or "").strip().lower()
+        localization_valid = bool(rospy.get_param(self._runtime_localization_valid_param, False))
+        if slam_runtime_authoritative:
+            localization_state = str(getattr(slam_state, "localization_state", "") or localization_state).strip().lower()
+            localization_valid = bool(getattr(slam_state, "localization_valid", localization_valid))
+        manual_assist_required = bool(
+            (
+                bool(getattr(slam_state, "manual_assist_required", False))
+                if slam_runtime_authoritative and slam_state is not None
+                else False
+            )
+            or localization_needs_manual_assist(localization_state)
+        )
+        manual_assist_info = manual_assist_metadata(
+            required=manual_assist_required,
+            map_name=(
+                str(getattr(slam_state, "manual_assist_map_name", "") or "").strip()
+                if slam_runtime_authoritative and slam_state is not None
+                else ""
+            ) or result.active_map_name,
+            map_revision_id=(
+                str(getattr(slam_state, "manual_assist_map_revision_id", "") or "").strip()
+                if slam_runtime_authoritative and slam_state is not None
+                else ""
+            ) or result.active_revision_id,
+            retry_action=(
+                str(getattr(slam_state, "manual_assist_retry_action", "") or "").strip()
+                if slam_runtime_authoritative and slam_state is not None
+                else ""
+            ),
+            default_action="prepare_for_task",
+        )
+        result.manual_assist_required = bool(manual_assist_required)
+        result.manual_assist_map_name = str(manual_assist_info.get("map_name") or "")
+        result.manual_assist_map_revision_id = str(manual_assist_info.get("map_revision_id") or "")
+        result.manual_assist_retry_action = str(manual_assist_info.get("retry_action") or "")
+        result.manual_assist_guidance = str(manual_assist_info.get("guidance") or "")
+        localization_ok = localization_is_ready(localization_state, localization_valid)
+        if not localization_ok:
+            self._append_unique_readiness_text(
+                local_slam_blockers,
+                runtime_localization_not_ready_message(
+                    localization_state,
+                    localization_valid,
+                    map_name=result.manual_assist_map_name,
+                    map_revision_id=result.manual_assist_map_revision_id,
+                    retry_action=result.manual_assist_retry_action or "prepare_for_task",
+                ),
+            )
+        result.checks.append(self._make_readiness_check(
+            key="localization",
+            level="OK" if localization_ok else ("WARN" if slam_runtime_authoritative else "ERROR"),
+            ok=bool(localization_ok),
+            fresh=bool(localization_valid),
+            missing=bool(not localization_state),
+            summary="state=%s valid=%s" % (localization_state or "-", str(bool(localization_valid)).lower()),
+        ))
+
+        if slam_state is None or slam_state_ts <= 0.0:
+            result.warnings.append("slam state unavailable")
+            for item in local_slam_blockers:
+                self._append_unique_readiness_text(result.blockers, item)
+            result.checks.append(self._make_readiness_check(
+                key="slam_runtime",
+                level="WARN",
+                ok=False,
+                fresh=False,
+                missing=True,
+                summary="slam state unavailable",
+            ))
+        elif not slam_fresh:
+            result.warnings.append("slam state stale")
+            for item in local_slam_blockers:
+                self._append_unique_readiness_text(result.blockers, item)
+            result.checks.append(self._make_readiness_check(
+                key="slam_runtime",
+                level="WARN",
+                ok=False,
+                fresh=False,
+                stale=True,
+                age_s=float(slam_age),
+                summary="slam state stale age=%.1fs" % slam_age,
+            ))
+        else:
+            if not slam_task_ready:
+                self._append_unique_readiness_text(
+                    result.blockers,
+                    slam_blocking_reason or (local_slam_blockers[0] if local_slam_blockers else "") or "slam runtime not ready",
+                )
+            result.checks.append(self._make_readiness_check(
+                key="slam_runtime",
+                level="OK" if slam_task_ready else "ERROR",
+                ok=bool(slam_task_ready),
+                fresh=True,
+                summary="workflow=%s phase=%s task_ready=%s busy=%s manual_assist=%s" % (
+                    str(getattr(slam_state, "workflow_state", "") or "-"),
+                    str(getattr(slam_state, "workflow_phase", "") or "-"),
+                    str(bool(slam_task_ready)).lower(),
+                    str(bool(getattr(slam_state, "busy", False))).lower(),
+                    str(bool(getattr(slam_state, "manual_assist_required", False))).lower(),
+                ),
+            ))
+
+        return result
+
+    def _build_platform_gate(
+        self,
+        *,
+        now: float,
+        mission_state: str,
+        phase: str,
+        public_state: str,
+        executor_state: str,
+        dock_supply_state: str,
+        dock_supply_ts: float,
+        batt_soc: Optional[float],
+        batt_ts: float,
+        battery_valid: bool,
+        combined_ts: float,
+        station_ts: float,
+        mcore_connected,
+        mcore_connected_ts: float,
+        station_connected,
+        station_connected_ts: float,
+        health_fault_active: bool,
+        health_error_code: str,
+        health_error_msg: str,
+    ) -> ReadinessGateResult:
+        result = ReadinessGateResult()
 
         mbf_ok = self._node_online("/move_base_flex")
         if not mbf_ok:
-            blockers.append("move_base_flex is offline")
-        checks.append(self._make_readiness_check(
+            result.blockers.append("move_base_flex is offline")
+        result.checks.append(self._make_readiness_check(
             key="move_base_flex",
             level="OK" if mbf_ok else "ERROR",
             ok=mbf_ok,
@@ -994,8 +1368,8 @@ class TaskManager:
         mcore_node_ok = self._node_online("/mcore_tcp_bridge")
         mcore_fresh = mcore_connected_ts > 0.0 and (now - mcore_connected_ts) <= self._connected_stale_timeout_s
         if (not mcore_node_ok) or (mcore_connected is not True) or (not mcore_fresh):
-            blockers.append("mcore bridge not ready")
-        checks.append(self._make_readiness_check(
+            result.blockers.append("mcore bridge not ready")
+        result.checks.append(self._make_readiness_check(
             key="mcore_bridge",
             level="OK" if (mcore_node_ok and mcore_connected is True and mcore_fresh) else "ERROR",
             ok=bool(mcore_node_ok and mcore_connected is True and mcore_fresh),
@@ -1015,8 +1389,8 @@ class TaskManager:
         ))
 
         if mission_state != "IDLE":
-            blockers.append("task manager busy: mission=%s phase=%s public=%s" % (mission_state, phase, public_state))
-        checks.append(self._make_readiness_check(
+            result.blockers.append("task manager busy: mission=%s phase=%s public=%s" % (mission_state, phase, public_state))
+        result.checks.append(self._make_readiness_check(
             key="task_manager",
             level="OK" if mission_state == "IDLE" else "ERROR",
             ok=bool(mission_state == "IDLE"),
@@ -1025,8 +1399,8 @@ class TaskManager:
 
         exec_idle = str(executor_state or "").strip().upper() in ("", "IDLE")
         if not exec_idle:
-            blockers.append("executor not idle: %s" % (executor_state or "UNKNOWN"))
-        checks.append(self._make_readiness_check(
+            result.blockers.append("executor not idle: %s" % (executor_state or "UNKNOWN"))
+        result.checks.append(self._make_readiness_check(
             key="executor",
             level="OK" if exec_idle else "ERROR",
             ok=bool(exec_idle),
@@ -1034,10 +1408,10 @@ class TaskManager:
         ))
 
         if health_fault_active:
-            blockers.append("health fault active: %s %s" % (health_error_code or "ERROR", health_error_msg or ""))
+            result.blockers.append("health fault active: %s %s" % (health_error_code or "ERROR", health_error_msg or ""))
         elif health_error_code:
-            warnings.append("health warning latched: %s %s" % (health_error_code, health_error_msg or ""))
-        checks.append(self._make_readiness_check(
+            result.warnings.append("health warning latched: %s %s" % (health_error_code, health_error_msg or ""))
+        result.checks.append(self._make_readiness_check(
             key="health",
             level="ERROR" if health_fault_active else ("WARN" if health_error_code else "OK"),
             ok=bool(not health_fault_active),
@@ -1050,22 +1424,22 @@ class TaskManager:
 
         batt_age = (now - batt_ts) if batt_ts > 0.0 else -1.0
         if batt_ts <= 0.0:
-            warnings.append("battery_state missing")
+            result.warnings.append("battery_state missing")
             batt_level = "WARN"
             batt_summary = "battery_state missing"
-        elif not readiness.battery_valid:
-            warnings.append("battery_state stale")
+        elif not battery_valid:
+            result.warnings.append("battery_state stale")
             batt_level = "WARN"
             batt_summary = "battery_state stale age=%.1fs" % batt_age
         else:
             batt_level = "OK"
-            batt_summary = "soc=%.3f" % float(readiness.battery_soc)
-        checks.append(self._make_readiness_check(
+            batt_summary = "soc=%.3f" % float(batt_soc if batt_soc is not None else 0.0)
+        result.checks.append(self._make_readiness_check(
             key="battery",
             level=batt_level,
-            ok=bool(readiness.battery_valid),
-            fresh=bool(readiness.battery_valid),
-            stale=bool(batt_ts > 0.0 and not readiness.battery_valid),
+            ok=bool(battery_valid),
+            fresh=bool(battery_valid),
+            stale=bool(batt_ts > 0.0 and not battery_valid),
             missing=bool(batt_ts <= 0.0),
             age_s=float(batt_age) if batt_ts > 0.0 else -1.0,
             summary=batt_summary,
@@ -1074,10 +1448,10 @@ class TaskManager:
         combined_age = (now - combined_ts) if combined_ts > 0.0 else -1.0
         combined_fresh = combined_ts > 0.0 and combined_age <= self._combined_status_stale_timeout_s
         if combined_ts <= 0.0:
-            warnings.append("combined_status missing")
+            result.warnings.append("combined_status missing")
         elif not combined_fresh:
-            warnings.append("combined_status stale")
-        checks.append(self._make_readiness_check(
+            result.warnings.append("combined_status stale")
+        result.checks.append(self._make_readiness_check(
             key="combined_status",
             level="OK" if combined_fresh else "WARN",
             ok=bool(combined_fresh),
@@ -1085,18 +1459,14 @@ class TaskManager:
             stale=bool(combined_ts > 0.0 and not combined_fresh),
             missing=bool(combined_ts <= 0.0),
             age_s=float(combined_age) if combined_ts > 0.0 else -1.0,
-            summary=(
-                "fresh"
-                if combined_fresh
-                else ("missing" if combined_ts <= 0.0 else "stale age=%.1fs" % combined_age)
-            ),
+            summary=("fresh" if combined_fresh else ("missing" if combined_ts <= 0.0 else "stale age=%.1fs" % combined_age)),
         ))
 
         if self._dock_supply_enable:
             dock_busy = dock_supply_state not in ("", "IDLE", "DONE", "FAILED", "CANCELED") and (not dock_supply_state.startswith("FAILED"))
             if dock_busy:
-                blockers.append("dock supply busy: %s" % dock_supply_state)
-            checks.append(self._make_readiness_check(
+                result.blockers.append("dock supply busy: %s" % dock_supply_state)
+            result.checks.append(self._make_readiness_check(
                 key="dock_supply",
                 level="ERROR" if dock_busy else "OK",
                 ok=bool(not dock_busy),
@@ -1111,12 +1481,12 @@ class TaskManager:
         station_age = (now - station_ts) if station_ts > 0.0 else -1.0
         station_status_fresh = station_ts > 0.0 and station_age <= self._station_status_stale_timeout_s
         if not station_node_ok:
-            warnings.append("station bridge offline")
+            result.warnings.append("station bridge offline")
         elif station_connected is False and station_conn_fresh:
-            warnings.append("station bridge disconnected")
+            result.warnings.append("station bridge disconnected")
         elif not station_status_fresh:
-            warnings.append("station_status stale or missing")
-        checks.append(self._make_readiness_check(
+            result.warnings.append("station_status stale or missing")
+        result.checks.append(self._make_readiness_check(
             key="station_status",
             level="OK" if (station_node_ok and station_connected is True and station_status_fresh) else "WARN",
             ok=bool(station_node_ok and station_connected is True and station_status_fresh),
@@ -1134,56 +1504,204 @@ class TaskManager:
                 )
             ),
         ))
+        return result
 
-        if int(task_id or 0) > 0:
-            job = self._resolve_job_record(str(int(task_id)))
-            if job is None:
-                blockers.append("task not found: %s" % int(task_id))
-                checks.append(self._make_readiness_check(
-                    key="task_config",
-                    level="ERROR",
-                    ok=False,
-                    missing=True,
-                    summary="task not found: %s" % int(task_id),
-                ))
-            else:
-                readiness.task_name = str(getattr(job, "job_name", "") or "")
-                readiness.task_map_name = str(job.map_name or "")
-                readiness.task_zone_id = str(job.zone_id or "")
-                readiness.task_plan_profile = str(job.plan_profile_name or "")
-                task_msgs = []
-                if not bool(job.enabled):
-                    task_msgs.append("task is disabled")
-                if active_map_name and readiness.task_map_name and readiness.task_map_name != active_map_name:
-                    task_msgs.append("selected current map does not match task map")
-                ok, msg = self._ensure_zone_plan_ready_for_job(
-                    map_name=readiness.task_map_name,
-                    zone_id=readiness.task_zone_id or self.zone_id_default,
-                    plan_profile_name=readiness.task_plan_profile,
+    def _build_task_config_gate(
+        self,
+        *,
+        task_id: int,
+        active_revision_id: str,
+        active_map_name: str,
+        readiness: SystemReadinessMsg,
+    ) -> ReadinessGateResult:
+        result = ReadinessGateResult()
+        if int(task_id or 0) <= 0:
+            return result
+
+        job = self._resolve_job_record(str(int(task_id)))
+        if job is None:
+            result.blockers.append("task not found: %s" % int(task_id))
+            result.checks.append(self._make_readiness_check(
+                key="task_config",
+                level="ERROR",
+                ok=False,
+                missing=True,
+                summary="task not found: %s" % int(task_id),
+            ))
+            return result
+
+        readiness.task_name = str(getattr(job, "job_name", "") or "")
+        readiness.task_map_name = str(job.map_name or "")
+        readiness.task_map_revision_id = str(getattr(job, "map_revision_id", "") or "")
+        readiness.task_zone_id = str(job.zone_id or "")
+        readiness.task_plan_profile = str(job.plan_profile_name or "")
+        task_map_revision_id = str(readiness.task_map_revision_id or "")
+        task_msgs = []
+        if not bool(job.enabled):
+            task_msgs.append("task is disabled")
+        if task_map_revision_id and not active_revision_id:
+            task_msgs.append(
+                selected_map_does_not_match_requested_map_message(
+                    active_map_name or readiness.task_map_name,
+                    readiness.task_map_name,
+                    selected_revision_id=active_revision_id,
+                    requested_revision_id=task_map_revision_id,
                 )
-                if not ok:
-                    task_msgs.append(str(msg or "task zone/plan not ready"))
-                if task_msgs:
-                    blockers.extend(task_msgs)
-                    checks.append(self._make_readiness_check(
-                        key="task_config",
-                        level="ERROR",
-                        ok=False,
-                        summary="; ".join(task_msgs),
-                    ))
-                else:
-                    task_name = str(getattr(job, "job_name", "") or "")
-                    readiness.task_name = task_name
-                    checks.append(self._make_readiness_check(
-                        key="task_config",
-                        level="OK",
-                        ok=True,
-                        summary="task=%s zone=%s profile=%s" % (
-                            task_name or str(int(task_id)),
-                            readiness.task_zone_id or "-",
-                            readiness.task_plan_profile or "-",
-                        ),
-                    ))
+            )
+        elif active_revision_id and task_map_revision_id and task_map_revision_id != active_revision_id:
+            task_msgs.append(
+                selected_map_does_not_match_requested_map_message(
+                    active_map_name or readiness.task_map_name,
+                    readiness.task_map_name,
+                    selected_revision_id=active_revision_id,
+                    requested_revision_id=task_map_revision_id,
+                )
+            )
+        elif active_map_name and readiness.task_map_name and readiness.task_map_name != active_map_name:
+            task_msgs.append(
+                selected_map_does_not_match_requested_map_message(
+                    active_map_name,
+                    readiness.task_map_name,
+                )
+            )
+        ok, msg = self._ensure_zone_plan_ready_for_job(
+            map_name=readiness.task_map_name,
+            map_revision_id=task_map_revision_id,
+            zone_id=readiness.task_zone_id or self.zone_id_default,
+            plan_profile_name=readiness.task_plan_profile,
+        )
+        if not ok:
+            task_msgs.append(str(msg or "task zone/plan not ready"))
+        if task_msgs:
+            result.blockers.extend(task_msgs)
+            result.checks.append(self._make_readiness_check(
+                key="task_config",
+                level="ERROR",
+                ok=False,
+                summary="; ".join(task_msgs),
+            ))
+        else:
+            task_name = str(getattr(job, "job_name", "") or "")
+            readiness.task_name = task_name
+            result.checks.append(self._make_readiness_check(
+                key="task_config",
+                level="OK",
+                ok=True,
+                summary="task=%s zone=%s plan_profile=%s" % (
+                    task_name or str(int(task_id)),
+                    readiness.task_zone_id or "-",
+                    readiness.task_plan_profile or "-",
+                ),
+            ))
+        return result
+
+    def _build_system_readiness(self, *, task_id: int = 0, refresh_map_identity: bool = False) -> SystemReadinessMsg:
+        now = time.time()
+        with self._lock:
+            mission_state = str(self._mission_state or "IDLE")
+            phase = str(self._phase or "IDLE")
+            public_state = str(self._public_state or "IDLE")
+            executor_state = str(self._executor_state or "")
+            dock_supply_state = str(self._dock_supply_state or "IDLE")
+            dock_supply_ts = float(getattr(self, "_dock_supply_state_ts", 0.0) or 0.0)
+            batt_soc = self._battery.soc
+            batt_ts = float(self._battery.ts or 0.0)
+            combined_ts = float(self._combined_status.ts or 0.0)
+            station_ts = float(self._station_status.ts or 0.0)
+            mcore_connected = self._mcore_connected.value
+            mcore_connected_ts = float(self._mcore_connected.ts or 0.0)
+            station_connected = self._station_connected.value
+            station_connected_ts = float(self._station_connected.ts or 0.0)
+            odometry_state = self._odometry_state.msg
+            odometry_state_ts = float(self._odometry_state.ts or 0.0)
+            slam_state = self._slam_state.msg
+            slam_state_ts = float(self._slam_state.ts or 0.0)
+            health_fault_active = bool(self._health_fault_active)
+            health_error_code = str(self._health_error_code or "")
+            health_error_msg = str(self._health_error_msg or "")
+
+        readiness = SystemReadinessMsg()
+        readiness.task_id = int(task_id or 0)
+        readiness.mission_state = mission_state
+        readiness.phase = phase
+        readiness.public_state = public_state
+        readiness.executor_state = executor_state
+        readiness.dock_supply_state = dock_supply_state
+        readiness.battery_soc = float(batt_soc if batt_soc is not None else 0.0)
+        readiness.battery_valid = bool(batt_ts > 0.0 and (now - batt_ts) <= float(self.battery_stale_timeout_s))
+        readiness.stamp = rospy.Time.now()
+
+        blockers: List[str] = []
+        warnings: List[str] = []
+        checks: List[SubsystemReadiness] = []
+        slam_gate = self._build_slam_runtime_gate(
+            now=now,
+            refresh_map_identity=bool(refresh_map_identity),
+            odometry_state=odometry_state,
+            odometry_state_ts=odometry_state_ts,
+            slam_state=slam_state,
+            slam_state_ts=slam_state_ts,
+        )
+        readiness.active_map_name = slam_gate.active_map_name
+        readiness.active_map_revision_id = slam_gate.active_revision_id
+        readiness.active_map_id = slam_gate.active_map_id
+        readiness.active_map_md5 = slam_gate.active_map_md5
+        readiness.runtime_map_name = slam_gate.runtime_map_name
+        readiness.runtime_map_revision_id = slam_gate.runtime_revision_id
+        readiness.runtime_map_id = slam_gate.runtime_map_id
+        readiness.runtime_map_md5 = slam_gate.runtime_map_md5
+        readiness.manual_assist_required = bool(slam_gate.manual_assist_required)
+        readiness.manual_assist_map_name = slam_gate.manual_assist_map_name
+        readiness.manual_assist_map_revision_id = slam_gate.manual_assist_map_revision_id
+        readiness.manual_assist_retry_action = slam_gate.manual_assist_retry_action
+        readiness.manual_assist_guidance = slam_gate.manual_assist_guidance
+        self._merge_readiness_gate_result(
+            blockers=blockers,
+            warnings=warnings,
+            checks=checks,
+            result=slam_gate,
+        )
+
+        platform_gate = self._build_platform_gate(
+            now=now,
+            mission_state=mission_state,
+            phase=phase,
+            public_state=public_state,
+            executor_state=executor_state,
+            dock_supply_state=dock_supply_state,
+            dock_supply_ts=dock_supply_ts,
+            batt_soc=batt_soc,
+            batt_ts=batt_ts,
+            battery_valid=readiness.battery_valid,
+            combined_ts=combined_ts,
+            station_ts=station_ts,
+            mcore_connected=mcore_connected,
+            mcore_connected_ts=mcore_connected_ts,
+            station_connected=station_connected,
+            station_connected_ts=station_connected_ts,
+            health_fault_active=health_fault_active,
+            health_error_code=health_error_code,
+            health_error_msg=health_error_msg,
+        )
+        self._merge_readiness_gate_result(
+            blockers=blockers,
+            warnings=warnings,
+            checks=checks,
+            result=platform_gate,
+        )
+
+        task_gate = self._build_task_config_gate(
+            task_id=int(task_id or 0),
+            active_revision_id=slam_gate.active_revision_id,
+            active_map_name=slam_gate.active_map_name,
+            readiness=readiness,
+        )
+        self._merge_readiness_gate_result(
+            blockers=blockers,
+            warnings=warnings,
+            checks=checks,
+            result=task_gate,
+        )
 
         readiness.blocking_reasons = [str(x) for x in blockers]
         readiness.warnings = [str(x) for x in warnings]
@@ -1192,31 +1710,195 @@ class TaskManager:
         readiness.can_start_task = bool(len(blockers) == 0)
         return readiness
 
-    def _on_get_system_readiness(self, req: GetSystemReadiness):
+    def _on_get_system_readiness_app(self, req: AppGetSystemReadiness):
         try:
             readiness = self._build_system_readiness(
                 task_id=int(getattr(req, "task_id", 0) or 0),
                 refresh_map_identity=bool(getattr(req, "refresh_map_identity", False)),
             )
-            resp = GetSystemReadinessResponse()
-            resp.success = True
-            resp.readiness = readiness
-            resp.message = "ready" if readiness.can_start_task else (
-                readiness.blocking_reasons[0] if readiness.blocking_reasons else "not ready"
+            return AppGetSystemReadinessResponse(
+                success=True,
+                message="ready" if readiness.can_start_task else (
+                    readiness.blocking_reasons[0] if readiness.blocking_reasons else "not ready"
+                ),
+                readiness=readiness,
             )
-            return resp
         except Exception as e:
-            resp = GetSystemReadinessResponse()
-            resp.success = False
-            resp.message = str(e)
-            resp.readiness = SystemReadinessMsg()
-            return resp
+            return AppGetSystemReadinessResponse(
+                success=False,
+                message=str(e),
+                readiness=SystemReadinessMsg(),
+            )
 
     def _on_readiness_timer(self, _evt):
         try:
             self._readiness_pub.publish(self._build_system_readiness(task_id=0, refresh_map_identity=False))
         except Exception:
             pass
+
+    def _prepare_readiness_contract_report(self):
+        validate_ros_contract(
+            "SystemReadiness",
+            SystemReadinessMsg,
+            required_fields=[
+                "overall_ready",
+                "can_start_task",
+                "task_id",
+                "task_name",
+                "task_map_name",
+                "task_map_revision_id",
+                "task_zone_id",
+                "task_plan_profile",
+                "active_map_name",
+                "active_map_revision_id",
+                "active_map_id",
+                "active_map_md5",
+                "runtime_map_name",
+                "runtime_map_revision_id",
+                "runtime_map_id",
+                "runtime_map_md5",
+                "mission_state",
+                "phase",
+                "public_state",
+                "executor_state",
+                "dock_supply_state",
+                "battery_soc",
+                "battery_valid",
+                "blocking_reasons",
+                "warnings",
+                "checks",
+                "stamp",
+            ],
+        )
+        validate_ros_contract(
+            "SubsystemReadiness",
+            SubsystemReadiness,
+            required_fields=["key", "level", "ok", "fresh", "stale", "missing", "age_s", "summary"],
+        )
+        validate_ros_contract(
+            "AppGetSystemReadinessRequest",
+            AppGetSystemReadiness._request_class,
+            required_fields=["task_id", "refresh_map_identity"],
+        )
+        validate_ros_contract(
+            "AppGetSystemReadinessResponse",
+            AppGetSystemReadinessResponse,
+            required_fields=["success", "message", "readiness"],
+        )
+        return build_contract_report(
+            service_name=self._app_readiness_service_name,
+            contract_name="get_system_readiness_app",
+            service_cls=AppGetSystemReadiness,
+            request_cls=AppGetSystemReadiness._request_class,
+            response_cls=AppGetSystemReadinessResponse,
+            dependencies={"readiness": SystemReadinessMsg},
+            features=["task_start_gate", "readiness_aggregation", "cleanrobot_app_msgs_parallel"],
+        )
+
+    def _prepare_exe_task_contract_report(self):
+        validate_ros_contract(
+            "AppExeTaskRequest",
+            AppExeTaskRequest,
+            required_fields=["command", "task_id"],
+            required_constants=["START", "PAUSE", "CONTINUE", "STOP", "RETURN"],
+        )
+        return build_contract_report(
+            service_name=self._app_exe_task_service_name,
+            contract_name="exe_task_server_app",
+            service_cls=AppExeTask,
+            request_cls=AppExeTaskRequest,
+            response_cls=AppExeTaskResponse,
+            dependencies={},
+            features=[
+                "task_execution_control",
+                "start_requires_task_id",
+                "readiness_double_gate",
+                "cleanrobot_app_msgs_parallel",
+            ],
+        )
+
+    def _exe_task_resp(self, success: bool, message: str, *, response_cls=AppExeTaskResponse):
+        return response_cls(success=bool(success), message=str(message or ""))
+
+    def _exe_task_runtime_summary(self) -> str:
+        return "mission=%s phase=%s public=%s run=%s job=%s" % (
+            str(self._mission_state or "IDLE"),
+            str(self._phase or "IDLE"),
+            str(self._public_state or "IDLE"),
+            str(self._active_run_id or "-"),
+            str(self._active_job_id or "-"),
+        )
+
+    def _ensure_exe_task_allowed(self, command: int) -> Tuple[bool, str]:
+        mission = str(self._mission_state or "IDLE").upper()
+        phase = str(self._phase or "IDLE").upper()
+        active_run = str(self._active_run_id or "").strip()
+        summary = self._exe_task_runtime_summary()
+
+        if command == int(AppExeTaskRequest.START):
+            if (mission not in ("IDLE", "ESTOP")) or (phase != "IDLE") or active_run:
+                return False, "task manager busy: %s" % summary
+            return True, ""
+        if command == int(AppExeTaskRequest.PAUSE):
+            if mission != "RUNNING":
+                return False, "pause requires running mission: %s" % summary
+            return True, ""
+        if command == int(AppExeTaskRequest.CONTINUE):
+            if mission != "PAUSED":
+                return False, "continue requires paused mission: %s" % summary
+            return True, ""
+        if command == int(AppExeTaskRequest.STOP):
+            if mission not in ("RUNNING", "PAUSED"):
+                return False, "stop requires running or paused mission: %s" % summary
+            return True, ""
+        if command == int(AppExeTaskRequest.RETURN):
+            if phase != "IDLE":
+                return False, "return requires idle phase: %s" % summary
+            if mission not in ("IDLE", "PAUSED"):
+                return False, "return requires paused or idle mission: %s" % summary
+            return True, ""
+        return False, "unsupported command=%s" % int(command)
+
+    def _on_exe_task_common(self, req, *, response_cls):
+        command = int(getattr(req, "command", -1))
+        allowed, message = self._ensure_exe_task_allowed(command)
+        if not allowed:
+            return self._exe_task_resp(False, message, response_cls=response_cls)
+
+        if command == int(AppExeTaskRequest.START):
+            task_id = int(getattr(req, "task_id", 0) or 0)
+            if task_id <= 0:
+                return self._exe_task_resp(False, "task_id is required for START", response_cls=response_cls)
+            readiness = self._build_system_readiness(task_id=task_id, refresh_map_identity=True)
+            if not bool(readiness.can_start_task):
+                blockers = list(getattr(readiness, "blocking_reasons", []) or [])
+                detail = str(blockers[0] if blockers else "system not ready").strip()
+                return self._exe_task_resp(False, "system not ready: %s" % detail, response_cls=response_cls)
+            ok, msg = self._start_task_by_id(str(task_id), source="SERVICE")
+            if not ok:
+                return self._exe_task_resp(False, msg, response_cls=response_cls)
+            return self._exe_task_resp(True, "accepted: start_task %d" % task_id, response_cls=response_cls)
+
+        if command == int(AppExeTaskRequest.PAUSE):
+            ok, msg = self._pause_current_task()
+            return self._exe_task_resp(ok, ("accepted: pause" if ok else msg), response_cls=response_cls)
+
+        if command == int(AppExeTaskRequest.CONTINUE):
+            ok, msg = self._resume_current_task()
+            return self._exe_task_resp(ok, ("accepted: resume" if ok else msg), response_cls=response_cls)
+
+        if command == int(AppExeTaskRequest.STOP):
+            ok, msg = self._stop_current_task()
+            return self._exe_task_resp(ok, ("accepted: stop" if ok else msg), response_cls=response_cls)
+
+        if command == int(AppExeTaskRequest.RETURN):
+            ok, msg = self._start_manual_return()
+            return self._exe_task_resp(ok, ("accepted: dock" if ok else msg), response_cls=response_cls)
+
+        return self._exe_task_resp(False, "unsupported command=%s" % command, response_cls=response_cls)
+
+    def _on_exe_task_app(self, req: AppExeTask):
+        return self._on_exe_task_common(req, response_cls=AppExeTaskResponse)
 
     # ------------------- public -------------------
     def spin(self):
@@ -1377,9 +2059,8 @@ class TaskManager:
 
         self._emit(f"HEALTH_AUTO_RESUME:run={rid} attempt={attempt}/{max_n} code={code}")
         self._publish_state("RUNNING")
-        self._push_task_intent_to_executor()
         self._mission_update_state(rid, "RUNNING", reason=f"health_auto_resume:{code}")
-        self._send_exec_cmd(f"resume run={rid}")
+        self._resume_executor_with_current_intent(run_id=rid, context="health_auto_resume")
 
     def _pause_by_health(self, code: str, msg: str):
         with self._lock:
@@ -1506,7 +2187,14 @@ class TaskManager:
             il_reason = ""
             if prog is not None and (now - prog_ts) <= 2.0:
                 try:
-                    if (not run_id) or (str(prog.run_id) == run_id):
+                    prog_run_id = str(getattr(prog, "run_id", "") or "")
+                    runtime_idle = (
+                        (not run_id)
+                        and mission_state == "IDLE"
+                        and phase == "IDLE"
+                        and public_state == "IDLE"
+                    )
+                    if ((run_id and prog_run_id == run_id) or ((not runtime_idle) and ((not prog_run_id) or prog_run_id == run_id))):
                         p01 = float(prog.progress_0_1)
                         ppct = float(prog.progress_pct)
                         exec_state = str(prog.state) or exec_state
@@ -1590,6 +2278,52 @@ class TaskManager:
             except Exception:
                 pass
 
+    def _send_exec_resume_cmd(
+        self,
+        *,
+        run_id: str = "",
+        context: str = "resume",
+        fault_public_state: str = "",
+    ) -> bool:
+        rid = str(run_id or self._active_run_id or "").strip()
+        if rid:
+            self._send_exec_cmd(f"resume run_id={rid}")
+            return True
+
+        reason = "missing active_run_id during %s" % str(context or "resume")
+        self._emit("RESUME_CONTEXT_MISSING:%s" % str(context or "resume"))
+        rospy.logerr("[TASK] %s", reason)
+        if fault_public_state:
+            self._enter_blocking_fault(fault_public_state, reason)
+        return False
+
+    def _resume_executor_with_current_intent(
+        self,
+        *,
+        run_id: str = "",
+        context: str = "resume",
+        fault_public_state: str = "",
+    ) -> bool:
+        self._push_task_intent_to_executor()
+        return self._send_exec_resume_cmd(
+            run_id=run_id,
+            context=context,
+            fault_public_state=fault_public_state,
+        )
+
+    def _send_exec_start_cmd(self, *, zone_id: str = "", run_id: str = "") -> bool:
+        zone = str(zone_id or self._active_zone or "").strip()
+        if not zone:
+            self._emit("START_CONTEXT_MISSING:zone_id")
+            rospy.logerr("[TASK] missing zone_id during start dispatch")
+            return False
+        rid = str(run_id or self._active_run_id or "").strip()
+        cmd = f"start zone_id={zone}"
+        if rid:
+            cmd += f" run_id={rid}"
+        self._send_exec_cmd(cmd)
+        return True
+
     def _new_run_id(self) -> str:
         return uuid.uuid4().hex
 
@@ -1628,7 +2362,9 @@ class TaskManager:
                     refresh=True,
                 )
                 runtime_map_name, _runtime_scope_name = get_runtime_map_scope()
+                runtime_map_revision_id = get_runtime_map_revision_id("/cartographer/runtime")
                 task_map_name = str(self._task_map_name or runtime_map_name or "").strip()
+                task_map_revision_id = str(self._task_map_revision_id or runtime_map_revision_id or "").strip()
                 if not run_trigger_source:
                     if str(self._active_schedule_id or "").strip():
                         run_trigger_source = f"SCHEDULE:{self._active_schedule_id}"
@@ -1640,6 +2376,7 @@ class TaskManager:
                     run_id=run_id,
                     job_id=str(job_id or ""),
                     map_name=task_map_name,
+                    map_revision_id=task_map_revision_id,
                     zone_id=str(zone_id or ""),
                     plan_profile_name=str(self._task_plan_profile_name or ""),
                     sys_profile_name=str(sys_profile_name or ""),
@@ -1696,6 +2433,7 @@ class TaskManager:
             active_run_id=str(self._active_run_id),
             active_run_loop_index=int(self._active_run_loop_index),
             task_map_name=str(self._task_map_name),
+            task_map_revision_id=str(self._task_map_revision_id),
             plan_profile_name=str(self._task_plan_profile_name),
             sys_profile_name=str(self._task_sys_profile_name),
             clean_mode=str(self._task_clean_mode),
@@ -1730,6 +2468,7 @@ class TaskManager:
                 and st.active_run_id == lp.active_run_id
                 and st.active_run_loop_index == lp.active_run_loop_index
                 and st.task_map_name == lp.task_map_name
+                and st.task_map_revision_id == lp.task_map_revision_id
                 and st.plan_profile_name == lp.plan_profile_name
                 and st.sys_profile_name == lp.sys_profile_name
                 and st.clean_mode == lp.clean_mode
@@ -1743,6 +2482,7 @@ class TaskManager:
                 and st.active_schedule_id == lp.active_schedule_id
                 and st.job_loops_total == lp.job_loops_total
                 and st.job_loops_done == lp.job_loops_done
+                and st.executor_state == lp.executor_state
             ):
                 return
         try:
@@ -1780,8 +2520,9 @@ class TaskManager:
         if st.active_zone:
             self._active_zone = str(st.active_zone)
         self._task_map_name = str(getattr(st, "task_map_name", "") or "")
+        self._task_map_revision_id = str(getattr(st, "task_map_revision_id", "") or "")
 
-        plan_prof = getattr(st, "plan_profile_name", "") or getattr(st, "profile_name", "")
+        plan_prof = getattr(st, "plan_profile_name", "")
         if plan_prof:
             self._task_plan_profile_name = str(plan_prof)
 
@@ -1895,30 +2636,31 @@ class TaskManager:
                 self.nav.send_goal(pose)
         elif self._phase == "AUTO_RELOCALIZING":
             self._emit("RESTORE:RELOCALIZING")
-            self._publish_state("AUTO_RELOCALIZING")
+            self._set_phase_and_publish("AUTO_RELOCALIZING")
         elif self._phase == "AUTO_REDISPATCHING":
             self._emit("RESTORE:REDISPATCHING")
-            self._publish_state("AUTO_REDISPATCHING")
+            self._set_phase_and_publish("AUTO_REDISPATCHING")
         elif self._phase == "FAULT":
             self._emit("RESTORE:FAULT")
             self._publish_state(self._public_state or "FAULT")
         elif self._phase == "AUTO_RESUMING":
             self._emit("RESTORE:RESUME")
-            _asset, ok, msg = self._prepare_map_for_run(
+            ok, msg = self._prepare_runtime_for_execution(
                 run_id=self._active_run_id,
                 require_localized=True,
+                log_action="restore_resume",
+                log_context_key="run",
+                log_context_value=self._active_run_id,
+                default_error="relocalize required",
             )
             if not ok:
-                self._phase = "IDLE"
-                self._mission_state = "PAUSED"
-                self._publish_state("WAIT_RELOCALIZE")
-                self._emit("RESTORE:RESUME_BLOCKED:%s" % str(msg or "relocalize required"))
+                self._block_restore_auto_resume(str(msg or "relocalize required"))
                 return
-            self._push_task_intent_to_executor()
-            if self._active_run_id:
-                self._send_exec_cmd(f"resume run={self._active_run_id}")
-            else:
-                self._send_exec_cmd(f"resume {self._active_zone}")
+            self._resume_executor_with_current_intent(
+                run_id=self._active_run_id,
+                context="restore_auto_resume",
+                fault_public_state="ERROR_RESTORE_RESUME_CONTEXT",
+            )
 
     def _battery_ok(self) -> Tuple[Optional[float], bool]:
         with self._lock:
@@ -2040,6 +2782,115 @@ class TaskManager:
             return False
         return str(self._dock_supply_state or "").strip().upper() in ["READY_TO_EXIT", "EXIT_BACKING", "DONE"]
 
+    @staticmethod
+    def _supply_reason(suffix: str) -> str:
+        suffix_name = str(suffix or "").strip().lower()
+        if not suffix_name:
+            return "supply_error"
+        return f"supply_{suffix_name}"
+
+    def _emit_supply_command_failure(self, action: str, detail: str):
+        action_name = str(action or "").strip().upper() or "UNKNOWN"
+        detail_s = str(detail or "").strip()
+        self._emit(f"SUPPLY_{action_name}_FAILED:{detail_s}")
+
+    def _emit_dock_goal_event(self, *, manual: bool, x: float, y: float, yaw: float):
+        self._emit(f"DOCK_GOAL:manual={manual} goal=({x:.2f},{y:.2f},{yaw:.2f})")
+
+    def _emit_dock_stage1_goal_event(
+        self,
+        *,
+        manual: bool,
+        x: float,
+        y: float,
+        yaw: float,
+        retry_attempt: int = 0,
+        retry_total: int = 0,
+    ):
+        if retry_attempt > 0 and retry_total > 0:
+            self._emit(
+                "DOCK_GOAL_STAGE1_RETRY:attempt=%d/%d manual=%s goal=(%.2f,%.2f,%.2f)"
+                % (int(retry_attempt), int(retry_total), str(bool(manual)), x, y, yaw)
+            )
+            return
+        self._emit(f"DOCK_GOAL_STAGE1:manual={manual} goal=({x:.2f},{y:.2f},{yaw:.2f})")
+
+    def _emit_dock_stage2_goal_event(self, x: float, y: float, yaw: float, controller: str):
+        controller_name = str(controller or "<default>")
+        self._emit(
+            "DOCK_GOAL_STAGE2:goal=(%.2f,%.2f,%.2f) controller=%s"
+            % (x, y, yaw, controller_name)
+        )
+
+    def _emit_dock_retry_goal_event(self, x: float, y: float, yaw: float, *, retry_attempt: int, retry_total: int):
+        self._emit(
+            "DOCK_GOAL_RETRY:attempt=%d/%d goal=(%.2f,%.2f,%.2f)"
+            % (int(retry_attempt), int(retry_total), x, y, yaw)
+        )
+
+    def _emit_undock_goal_event(self, x: float, y: float, yaw: float):
+        self._emit(f"UNDOCK_GOAL:goal=({x:.2f},{y:.2f},{yaw:.2f})")
+
+    def _emit_undock_exit_requested(self):
+        self._emit("UNDOCK_EXIT_REQUESTED")
+
+    def _emit_dock_succeeded(self):
+        self._emit("DOCK_SUCCEEDED")
+
+    def _emit_dock_stage1_succeeded(self):
+        self._emit("DOCK_STAGE1_SUCCEEDED")
+
+    def _emit_battery_low_event(self, soc: float):
+        self._emit(f"BATTERY_LOW:soc={float(soc):.3f}")
+
+    def _emit_battery_rearmed_event(self, soc: float):
+        self._emit(f"BATTERY_REARMED:soc={float(soc):.3f}")
+
+    def _emit_supply_ready_to_exit_event(self, *, repeat_enabled: bool):
+        self._emit(
+            f"SUPPLY_STATE_READY_TO_EXIT:{self._repeat_cycle_context()} "
+            f"repeat_enabled={int(bool(repeat_enabled))}"
+        )
+
+    def _emit_auto_recovery_armed(self, phase: str):
+        self._emit(
+            f"AUTO_RECOVERY_ARMED:phase={str(phase or '').strip() or '-'} {self._repeat_cycle_context()}"
+        )
+
+    def _emit_supply_terminal_event(self, state: str):
+        state_name = str(state or "").strip().upper()
+        if state_name == "DONE":
+            self._emit("SUPPLY_SUCCEEDED")
+            return
+        if state_name == "CANCELED":
+            self._emit("SUPPLY_CANCELED")
+            return
+        self._emit(f"SUPPLY_FAILED:state={state_name or 'FAILED'}")
+
+    def _emit_undock_succeeded(self):
+        self._emit("UNDOCK_SUCCEEDED")
+
+    def _emit_undock_terminal_event(self, state: str):
+        state_name = str(state or "").strip().upper()
+        if state_name == "CANCELED":
+            self._emit("UNDOCK_CANCELED")
+            return
+        self._emit(f"UNDOCK_FAILED:state={state_name or 'FAILED'}")
+
+    def _emit_auto_resume_confirmed(self, exec_state: str):
+        self._emit(
+            f"AUTO_RESUME_CONFIRMED:exec_state={str(exec_state or '').strip() or '-'}"
+        )
+
+    def _emit_undock_nav_failed(self, nav_state: str):
+        self._emit(f"UNDOCK_FAILED:nav_state={str(nav_state or '').strip() or '-'}")
+
+    def _emit_dock_nav_failed(self, *, stage: str, nav_state: str):
+        self._emit(
+            "DOCK_FAILED:stage=%s nav_state=%s"
+            % (str(stage or "").strip() or "-", str(nav_state or "").strip() or "-")
+        )
+
     def _dock_supply_set_defer_exit(self, enabled: bool) -> bool:
         if not self._dock_supply_enable or self._dock_supply_set_defer_exit_cli is None:
             return False
@@ -2050,10 +2901,10 @@ class TaskManager:
             if ok:
                 self._emit("SUPPLY_DEFER_EXIT:%d" % int(bool(enabled)))
             else:
-                self._emit("SUPPLY_DEFER_EXIT_FAILED:%s" % str(getattr(resp, "message", "") or ""))
+                self._emit_supply_command_failure("DEFER_EXIT", str(getattr(resp, "message", "") or ""))
             return ok
         except Exception as e:
-            self._emit("SUPPLY_DEFER_EXIT_EX:%s" % str(e))
+            self._emit_supply_command_failure("DEFER_EXIT", str(e))
             return False
 
     def _dock_supply_request_exit(self) -> bool:
@@ -2067,10 +2918,10 @@ class TaskManager:
                 self._dock_supply_exit_inflight = True
                 self._emit("SUPPLY_EXIT_START")
             else:
-                self._emit("SUPPLY_EXIT_FAILED:%s" % str(getattr(resp, "message", "") or ""))
+                self._emit_supply_command_failure("EXIT", str(getattr(resp, "message", "") or ""))
             return ok
         except Exception as e:
-            self._emit("SUPPLY_EXIT_EX:%s" % str(e))
+            self._emit_supply_command_failure("EXIT", str(e))
             return False
 
     def _clear_costmaps(self) -> Tuple[bool, str]:
@@ -2084,45 +2935,403 @@ class TaskManager:
         except Exception as e:
             return False, str(e)
 
+    @staticmethod
+    def _service_available(service_name: str, expected_type: str = "") -> bool:
+        name = str(service_name or "").strip()
+        if not name:
+            return False
+        try:
+            runtime_type = str(rosservice.get_service_type(name) or "").strip()
+        except Exception:
+            return False
+        if not runtime_type:
+            return False
+        expected = str(expected_type or "").strip()
+        return (not expected) or (runtime_type == expected)
+
+    def _ensure_named_service_proxy(
+        self,
+        *,
+        cli_attr: str,
+        cli_service_name_attr: str,
+        label: str,
+        app_service_name: str,
+        app_service_cls,
+        app_service_type: str,
+    ):
+        current_cli = getattr(self, cli_attr, None)
+        current_service_name = str(getattr(self, cli_service_name_attr, "") or "").strip()
+        if current_cli is not None and not current_service_name:
+            return current_cli, str(app_service_name or "").strip(), "existing"
+        service_name = str(app_service_name or "").strip()
+        service_cls = app_service_cls
+        transport = "app"
+        if current_cli is not None and current_service_name:
+            if current_service_name == service_name:
+                return current_cli, current_service_name, transport
+        elif current_cli is not None:
+            return current_cli, service_name, transport
+        try:
+            cli = rospy.ServiceProxy(service_name, service_cls)
+            setattr(self, cli_attr, cli)
+            setattr(self, cli_service_name_attr, service_name)
+            rospy.loginfo(
+                "[TASK] %s proxy ready transport=%s service=%s",
+                str(label or "service"),
+                transport,
+                service_name or "-",
+            )
+            return cli, service_name, transport
+        except Exception as e:
+            rospy.logwarn(
+                "[TASK] %s proxy init failed transport=%s service=%s err=%s",
+                str(label or "service"),
+                transport,
+                service_name or "-",
+                str(e),
+            )
+            setattr(self, cli_attr, None)
+            setattr(self, cli_service_name_attr, "")
+            return None, service_name, transport
+
+    def _ensure_restart_localization_cli(self):
+        return self._ensure_named_service_proxy(
+            cli_attr="_restart_localization_cli",
+            cli_service_name_attr="_restart_localization_cli_service_name",
+            label="restart_localization",
+            app_service_name=str(
+                getattr(self, "_app_restart_localization_service", "/cartographer/runtime/app/restart_localization")
+                or "/cartographer/runtime/app/restart_localization"
+            ),
+            app_service_cls=AppRestartLocalization,
+            app_service_type=APP_RESTART_LOCALIZATION_SERVICE_TYPE,
+        )
+
+    def _ensure_slam_submit_command_cli(self):
+        return self._ensure_named_service_proxy(
+            cli_attr="_slam_submit_command_cli",
+            cli_service_name_attr="_slam_submit_command_cli_service_name",
+            label="slam_submit_command",
+            app_service_name=str(
+                getattr(self, "_app_slam_submit_command_service", "/clean_robot_server/app/submit_slam_command")
+                or "/clean_robot_server/app/submit_slam_command"
+            ),
+            app_service_cls=AppSubmitSlamCommand,
+            app_service_type=APP_SUBMIT_SLAM_COMMAND_SERVICE_TYPE,
+        )
+
+    def _ensure_slam_get_job_cli(self):
+        return self._ensure_named_service_proxy(
+            cli_attr="_slam_get_job_cli",
+            cli_service_name_attr="_slam_get_job_cli_service_name",
+            label="slam_get_job",
+            app_service_name=str(
+                getattr(self, "_app_slam_get_job_service", "/clean_robot_server/app/get_slam_job")
+                or "/clean_robot_server/app/get_slam_job"
+            ),
+            app_service_cls=AppGetSlamJob,
+            app_service_type=APP_GET_SLAM_JOB_SERVICE_TYPE,
+        )
+
     def _restart_localization_for_task(self) -> Tuple[bool, str]:
         robot_id = str(self._robot_id or "local_robot")
         requested_map = str(self._task_map_name or "")
-        if self._restart_localization_cli is None:
+        requested_map_revision_id = str(self._task_map_revision_id or "").strip()
+        manual_assist_pose_info = inspect_manual_assist_pose_override(
+            str(getattr(self, "_manual_assist_pose_param_ns", DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS) or ""),
+            requested_map_name=requested_map,
+            requested_revision_id=requested_map_revision_id,
+        )
+        manual_assist_pose = dict(manual_assist_pose_info.get("override") or {}) or None
+        manual_assist_pose_status = str(manual_assist_pose_info.get("status") or "").strip()
+        if manual_assist_pose_status in ("scope_mismatch", "missing_scope", "invalid_pose", "invalid_payload"):
+            manual_assist_message = str(
+                manual_assist_pose_info.get("message")
+                or "manual assist pose override invalid"
+            ).strip()
+            manual_assist_ref = {
+                "param_ns": str(
+                    manual_assist_pose_info.get("param_ns")
+                    or getattr(self, "_manual_assist_pose_param_ns", DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS)
+                    or DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS
+                ).strip() or DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS,
+            }
+            record_manual_assist_pose_override_status(
+                manual_assist_ref,
+                status="prepare_for_task_pose_%s" % manual_assist_pose_status,
+                map_name=requested_map,
+                map_revision_id=requested_map_revision_id,
+                message=manual_assist_message,
+                localization_state="manual_assist_required",
+                used=False,
+            )
+            rospy.logwarn(
+                "[TASK] prepare_for_task rejected invalid manual assist pose robot=%s requested_map=%s requested_revision=%s reason=%s %s",
+                robot_id,
+                requested_map or "-",
+                requested_map_revision_id or "-",
+                manual_assist_message,
+                self._repeat_cycle_context(),
+            )
+            return False, manual_assist_message
+        if manual_assist_pose:
+            rospy.loginfo(
+                "[TASK] prepare_for_task using %s %s",
+                manual_assist_pose_summary(manual_assist_pose),
+                self._repeat_cycle_context(),
+            )
+        submit_cli, submit_service_name, _submit_transport = self._ensure_slam_submit_command_cli()
+        get_job_cli, get_job_service_name, _get_job_transport = self._ensure_slam_get_job_cli()
+        if submit_cli is not None and get_job_cli is not None:
             try:
-                self._restart_localization_cli = rospy.ServiceProxy(
-                    self._restart_localization_service, RestartLocalization
+                rospy.loginfo(
+                    "[TASK] prepare_for_task submit request service=%s robot=%s requested_map=%s requested_revision=%s timeout=%.1fs %s",
+                    submit_service_name,
+                    robot_id,
+                    requested_map or "-",
+                    requested_map_revision_id or "-",
+                    float(self._restart_localization_timeout_s),
+                    self._repeat_cycle_context(),
+                )
+                rospy.wait_for_service(
+                    submit_service_name,
+                    timeout=min(5.0, float(self._restart_localization_timeout_s)),
+                )
+                submit_resp = submit_cli(
+                    operation=int(AppSubmitSlamCommand._request_class.prepare_for_task),
+                    robot_id=robot_id,
+                    map_name=requested_map,
+                    map_revision_id=requested_map_revision_id,
+                    set_active=False,
+                    description="task manager prepare_for_task",
+                    frame_id=str((manual_assist_pose or {}).get("frame_id") or "map"),
+                    has_initial_pose=bool(manual_assist_pose),
+                    initial_pose_x=float((manual_assist_pose or {}).get("initial_pose_x") or 0.0),
+                    initial_pose_y=float((manual_assist_pose or {}).get("initial_pose_y") or 0.0),
+                    initial_pose_yaw=float((manual_assist_pose or {}).get("initial_pose_yaw") or 0.0),
+                    save_map_name="",
+                    include_unfinished_submaps=True,
+                    set_active_on_save=False,
+                    switch_to_localization_after_save=False,
+                    relocalize_after_switch=False,
+                )
+                if bool(getattr(submit_resp, "accepted", False)):
+                    job_id = str(getattr(submit_resp, "job_id", "") or "").strip()
+                    if manual_assist_pose:
+                        if bool((manual_assist_pose or {}).get("consume_once", True)):
+                            consume_manual_assist_pose_override(
+                                manual_assist_pose,
+                                status="submitted_prepare_for_task",
+                                map_name=requested_map,
+                                map_revision_id=requested_map_revision_id,
+                                job_id=job_id,
+                                used=False,
+                            )
+                        else:
+                            record_manual_assist_pose_override_status(
+                                manual_assist_pose,
+                                status="submitted_prepare_for_task",
+                                map_name=requested_map,
+                                map_revision_id=requested_map_revision_id,
+                                job_id=job_id,
+                                used=False,
+                            )
+                    if not job_id:
+                        if manual_assist_pose:
+                            record_manual_assist_pose_override_status(
+                                manual_assist_pose,
+                                status="prepare_for_task_missing_job_id",
+                                map_name=requested_map,
+                                map_revision_id=requested_map_revision_id,
+                                message="slam prepare_for_task accepted without job_id",
+                                used=False,
+                            )
+                        return False, "slam prepare_for_task accepted without job_id"
+                    deadline = time.time() + float(self._restart_localization_timeout_s)
+                    last_message = "waiting slam job=%s" % job_id
+                    while (time.time() < deadline) and (not rospy.is_shutdown()):
+                        rospy.wait_for_service(
+                            get_job_service_name,
+                            timeout=min(5.0, max(1.0, deadline - time.time())),
+                        )
+                        job_resp = get_job_cli(job_id=job_id, robot_id=robot_id)
+                        if not bool(getattr(job_resp, "found", False)):
+                            last_message = str(getattr(job_resp, "message", "") or "slam job not found")
+                            rospy.sleep(0.2)
+                            continue
+                        job = getattr(job_resp, "job", None)
+                        if job is None:
+                            last_message = str(getattr(job_resp, "message", "") or "slam job unavailable")
+                            rospy.sleep(0.2)
+                            continue
+                        last_message = str(
+                            getattr(job, "message", "")
+                            or getattr(job, "progress_text", "")
+                            or getattr(job_resp, "message", "")
+                            or "slam prepare_for_task running"
+                        )
+                        if bool(getattr(job, "done", False)):
+                            final_state = str(getattr(job, "localization_state", "") or "").strip()
+                            if bool(getattr(job, "success", False)):
+                                response_map = str(
+                                    getattr(job, "resolved_map_name", "")
+                                    or getattr(job, "requested_map_name", "")
+                                    or requested_map
+                                    or ""
+                                )
+                                response_revision_id = str(
+                                    getattr(job, "resolved_map_revision_id", "")
+                                    or getattr(job, "requested_map_revision_id", "")
+                                    or requested_map_revision_id
+                                    or ""
+                                ).strip()
+                                self._task_map_name = response_map
+                                if response_revision_id:
+                                    self._task_map_revision_id = response_revision_id
+                                else:
+                                    selected_asset = self._get_selected_active_map() or {}
+                                    if str(selected_asset.get("map_name") or "").strip() == response_map:
+                                        self._task_map_revision_id = str(
+                                            selected_asset.get("revision_id") or ""
+                                        ).strip()
+                                if manual_assist_pose:
+                                    already_ready = "already ready" in str(last_message or "").strip().lower()
+                                    record_manual_assist_pose_override_status(
+                                        manual_assist_pose,
+                                        status="prepare_for_task_already_ready" if already_ready else "prepare_for_task_succeeded",
+                                        map_name=response_map,
+                                        map_revision_id=response_revision_id or requested_map_revision_id,
+                                        message=last_message,
+                                        localization_state=final_state or "localized",
+                                        job_id=job_id,
+                                        used=(not already_ready),
+                                    )
+                                return True, last_message or "localized"
+                            if bool(getattr(job, "manual_assist_required", False)) or localization_needs_manual_assist(
+                                str(getattr(job, "localization_state", "") or "")
+                            ):
+                                if manual_assist_pose:
+                                    record_manual_assist_pose_override_status(
+                                        manual_assist_pose,
+                                        status="prepare_for_task_manual_assist_required",
+                                        map_name=requested_map,
+                                        map_revision_id=requested_map_revision_id,
+                                        message=last_message,
+                                        localization_state=final_state or "manual_assist_required",
+                                        job_id=job_id,
+                                        used=True,
+                                    )
+                                return False, runtime_localization_not_ready_message(
+                                    str(getattr(job, "localization_state", "") or "manual_assist_required"),
+                                    False,
+                                    map_name=requested_map,
+                                    map_revision_id=requested_map_revision_id,
+                                    retry_action="prepare_for_task",
+                                )
+                            if manual_assist_pose:
+                                record_manual_assist_pose_override_status(
+                                    manual_assist_pose,
+                                    status="prepare_for_task_failed",
+                                    map_name=requested_map,
+                                    map_revision_id=requested_map_revision_id,
+                                    message=last_message,
+                                    localization_state=final_state or "not_localized",
+                                    job_id=job_id,
+                                    used=True,
+                                )
+                            return False, last_message or str(getattr(job_resp, "message", "") or "localize failed")
+                        rospy.sleep(0.2)
+                    if manual_assist_pose:
+                        record_manual_assist_pose_override_status(
+                            manual_assist_pose,
+                            status="prepare_for_task_timeout",
+                            map_name=requested_map,
+                            map_revision_id=requested_map_revision_id,
+                            message=last_message,
+                            localization_state="not_localized",
+                            job_id=job_id,
+                            used=True,
+                        )
+                    return False, "slam prepare_for_task timeout after %.1fs: %s" % (
+                        float(self._restart_localization_timeout_s),
+                        last_message,
+                    )
+                if manual_assist_pose:
+                    record_manual_assist_pose_override_status(
+                        manual_assist_pose,
+                        status="prepare_for_task_submit_rejected",
+                        map_name=requested_map,
+                        map_revision_id=requested_map_revision_id,
+                        message=str(
+                            getattr(submit_resp, "message", "") or getattr(submit_resp, "error_code", "") or ""
+                        ),
+                        used=False,
+                    )
+                rospy.logwarn(
+                    "[TASK] prepare_for_task submit rejected service=%s robot=%s requested_map=%s err=%s %s",
+                    submit_service_name,
+                    robot_id,
+                    requested_map or "-",
+                    str(getattr(submit_resp, "message", "") or getattr(submit_resp, "error_code", "") or ""),
+                    self._repeat_cycle_context(),
                 )
             except Exception as e:
-                rospy.logerr(
-                    "[TASK] restart_localization proxy init failed service=%s %s err=%s",
-                    self._restart_localization_service,
+                if manual_assist_pose:
+                    record_manual_assist_pose_override_status(
+                        manual_assist_pose,
+                        status="prepare_for_task_fallback_restart_localization",
+                        map_name=requested_map,
+                        map_revision_id=requested_map_revision_id,
+                        message=str(e),
+                        used=False,
+                    )
+                rospy.logwarn(
+                    "[TASK] prepare_for_task submit flow failed; falling back to restart_localization submit=%s get_job=%s %s err=%s",
+                    submit_service_name,
+                    get_job_service_name,
                     self._repeat_cycle_context(),
                     str(e),
                 )
-                return False, str(e)
+                if manual_assist_pose:
+                    rospy.logwarn(
+                        "[TASK] prepare_for_task fallback will rely on shared manual assist pose via shared manual-assist path: %s %s",
+                        manual_assist_pose_summary(manual_assist_pose),
+                        self._repeat_cycle_context(),
+                    )
+        restart_cli, restart_service_name, _restart_transport = self._ensure_restart_localization_cli()
+        if restart_cli is None:
+            rospy.logerr(
+                "[TASK] restart_localization proxy init failed service=%s %s",
+                restart_service_name or "-",
+                self._repeat_cycle_context(),
+            )
+            return False, "restart_localization service unavailable"
         try:
             rospy.loginfo(
-                "[TASK] restart_localization request service=%s robot=%s requested_map=%s timeout=%.1fs %s",
-                self._restart_localization_service,
+                "[TASK] restart_localization request service=%s robot=%s requested_map=%s requested_revision=%s timeout=%.1fs %s",
+                restart_service_name,
                 robot_id,
                 requested_map or "-",
+                requested_map_revision_id or "-",
                 float(self._restart_localization_timeout_s),
                 self._repeat_cycle_context(),
             )
             rospy.wait_for_service(
-                self._restart_localization_service,
+                restart_service_name,
                 timeout=min(5.0, float(self._restart_localization_timeout_s)),
             )
-            resp = self._restart_localization_cli(
+            resp = restart_cli(
                 robot_id=robot_id,
                 map_name=requested_map,
+                map_revision_id=requested_map_revision_id,
             )
         except Exception as e:
             rospy.logerr(
-                "[TASK] restart_localization call failed service=%s robot=%s requested_map=%s %s err=%s",
-                self._restart_localization_service,
+                "[TASK] restart_localization call failed service=%s robot=%s requested_map=%s requested_revision=%s %s err=%s",
+                restart_service_name,
                 robot_id,
                 requested_map or "-",
+                requested_map_revision_id or "-",
                 self._repeat_cycle_context(),
                 str(e),
             )
@@ -2136,8 +3345,24 @@ class TaskManager:
             self._repeat_cycle_context(),
         )
         if not bool(getattr(resp, "success", False)):
+            state = str(getattr(resp, "localization_state", "") or "").strip().lower()
+            if localization_needs_manual_assist(state):
+                return False, runtime_localization_not_ready_message(
+                    state,
+                    False,
+                    map_name=requested_map,
+                    map_revision_id=requested_map_revision_id,
+                    retry_action="prepare_for_task",
+                )
             return False, str(getattr(resp, "message", "") or "restart localization failed")
         self._task_map_name = str(getattr(resp, "map_name", "") or self._task_map_name or "")
+        response_revision_id = str(getattr(resp, "map_revision_id", "") or requested_map_revision_id or "").strip()
+        if response_revision_id:
+            self._task_map_revision_id = response_revision_id
+        else:
+            selected_asset = self._get_selected_active_map() or {}
+            if str(selected_asset.get("map_name") or "").strip() == self._task_map_name:
+                self._task_map_revision_id = str(selected_asset.get("revision_id") or "").strip()
         return True, str(getattr(resp, "message", "") or "localized")
 
     def _enter_blocking_fault(self, public_state: str, reason: str):
@@ -2202,9 +3427,13 @@ class TaskManager:
             self._dock_nav_started_ts = time.time()
             self._publish_state(self._dock_public_state(manual))
             x, y, yaw = self.dock_stage1_xyyaw
-            self._emit(
-                "DOCK_STAGE1_RETRY:%d/%d goal=(%.2f,%.2f,%.2f)"
-                % (self._dock_retry_count, self.dock_retry_limit, x, y, yaw)
+            self._emit_dock_stage1_goal_event(
+                manual=manual,
+                x=x,
+                y=y,
+                yaw=yaw,
+                retry_attempt=self._dock_retry_count,
+                retry_total=self.dock_retry_limit,
             )
             self.nav.send_goal(self._dock_stage1_pose())
         else:
@@ -2212,9 +3441,12 @@ class TaskManager:
             self._dock_nav_started_ts = time.time()
             self._publish_state(self._dock_public_state(manual))
             x, y, yaw = self.dock_xyyaw
-            self._emit(
-                "DOCK_RETRY_GOAL:%d/%d goal=(%.2f,%.2f,%.2f)"
-                % (self._dock_retry_count, self.dock_retry_limit, x, y, yaw)
+            self._emit_dock_retry_goal_event(
+                x,
+                y,
+                yaw,
+                retry_attempt=self._dock_retry_count,
+                retry_total=self.dock_retry_limit,
             )
             self.nav.send_goal(self._dock_pose())
         return True
@@ -2224,25 +3456,30 @@ class TaskManager:
         self._dock_nav_started_ts = time.time()
         self._publish_state(self._dock_public_state(manual))
         x, y, yaw = self.dock_xyyaw
-        self._emit(
-            "DOCK_STAGE2:goal=(%.2f,%.2f,%.2f) controller=%s"
-            % (x, y, yaw, self.dock_stage2_controller or "<default>")
-        )
+        self._emit_dock_stage2_goal_event(x, y, yaw, self.dock_stage2_controller)
         self._dock_stage2_nav.send_goal(self._dock_pose())
 
     def _begin_supply_or_charge_after_dock(self, *, manual: bool, soc: Optional[float], fresh: bool):
-        self._emit("DOCK_OK")
+        self._emit_dock_succeeded()
         if not manual:
             if self._dock_supply_enable:
                 if not self._dock_supply_set_defer_exit(True):
-                    self._enter_charge_fault("ERROR_SUPPLY_START", reason="dock_supply_set_defer_exit_failed", manual=False)
+                    self._enter_charge_fault(
+                        "ERROR_SUPPLY_START",
+                        reason=self._supply_reason("defer_exit_failed"),
+                        manual=False,
+                    )
                     return
                 if self._dock_supply_start():
                     self._clear_charge_monitor()
                     self._phase = self._dock_supply_owner_phase(manual=False)
                     self._publish_state(self._dock_supply_public_state(manual=False))
                 else:
-                    self._enter_charge_fault("ERROR_SUPPLY_START", reason="dock_supply_start_failed", manual=False)
+                    self._enter_charge_fault(
+                        "ERROR_SUPPLY_START",
+                        reason=self._supply_reason("start_failed"),
+                        manual=False,
+                    )
             else:
                 self._phase = "AUTO_CHARGING"
                 self._begin_charge_monitor(soc=soc, fresh=fresh)
@@ -2252,7 +3489,7 @@ class TaskManager:
                 if not self._dock_supply_set_defer_exit(True):
                     self._enter_charge_fault(
                         "ERROR_SUPPLY_START",
-                        reason="manual_dock_supply_set_defer_exit_failed",
+                        reason=self._supply_reason("defer_exit_failed"),
                         manual=(not self._active_run_id),
                     )
                     return
@@ -2261,7 +3498,11 @@ class TaskManager:
                     self._phase = self._dock_supply_owner_phase(manual=True)
                     self._publish_state(self._dock_supply_public_state(manual=True))
                 else:
-                    self._enter_charge_fault("ERROR_SUPPLY_START", reason="manual_dock_supply_start_failed", manual=(not self._active_run_id))
+                    self._enter_charge_fault(
+                        "ERROR_SUPPLY_START",
+                        reason=self._supply_reason("start_failed"),
+                        manual=(not self._active_run_id),
+                    )
             else:
                 self._phase = "MANUAL_CHARGING"
                 self._begin_charge_monitor(soc=soc, fresh=fresh)
@@ -2359,6 +3600,7 @@ class TaskManager:
         self._task_repeat_after_full_charge = bool(repeat_after_full_charge)
         self._task_return_to_dock_on_finish = bool(return_to_dock_on_finish or repeat_after_full_charge)
         self._task_map_name = map_name
+        self._task_map_revision_id = str(getattr(job, "map_revision_id", "") or "")
 
         self._active_schedule_id = str(schedule_id or "").strip()
         self._active_job_id = job_id
@@ -2367,22 +3609,25 @@ class TaskManager:
 
         ok, msg = self._ensure_zone_plan_ready_for_job(
             map_name=self._task_map_name,
+            map_revision_id=self._task_map_revision_id,
             zone_id=self._active_zone,
             plan_profile_name=self._task_plan_profile_name,
         )
         if not ok:
             return False, str(msg or "task zone/plan not ready")
 
-        asset, ok, msg = self._prepare_map_for_run(
+        ok, msg = self._prepare_runtime_for_execution(
             explicit_map_name=self._task_map_name,
             require_localized=True,
+            log_action="start_job",
+            log_context_key="job",
+            log_context_value=self._active_job_id,
+            default_error="map prepare failed",
         )
         if not ok:
             return False, str(msg or "map prepare failed")
-        del asset
 
-        self._phase = "IDLE"
-        self._mission_state = "RUNNING"
+        self._enter_running_dispatch_state()
         self._emit(
             f"JOB_START:id={self._active_job_id} zone={self._active_zone} map={self._task_map_name or '-'} "
             f"loops={self._job_loops_total} plan={self._task_plan_profile_name} "
@@ -2391,8 +3636,6 @@ class TaskManager:
             f"repeat_after_charge={int(self._task_repeat_after_full_charge)} "
             f"source={source} schedule={self._active_schedule_id or '-'}"
         )
-        self._publish_state("RUNNING")
-        self._push_task_intent_to_executor()
         self._mission_create_run(
             job_id=self._active_job_id,
             zone_id=self._active_zone,
@@ -2407,24 +3650,344 @@ class TaskManager:
                 )
             ),
         )
-        self._send_exec_cmd(f"start {self._active_zone} run={self._active_run_id}")
+        if not self._send_exec_start_cmd(zone_id=self._active_zone, run_id=self._active_run_id):
+            return False, "zone_id is required for start"
         return True, ""
 
-    def _start_task_by_id(self, job_id: str, *, source: str = "TASK") -> Tuple[bool, str]:
-        jid = str(job_id or "").strip()
-        if not jid:
+    def _start_task_by_id(self, task_id: str, *, source: str = "TASK") -> Tuple[bool, str]:
+        tid = str(task_id or "").strip()
+        if not tid:
             return False, "task_id is required"
-        job = self._resolve_job_record(jid)
+        job = self._resolve_job_record(tid)
         if job is None:
             return False, "task not found"
         ok, msg = self._start_job_record(job, source=source, schedule_id="", trigger_source="TASK")
         if not ok:
-            self._reset_job_runner()
-            self._phase = "IDLE"
-            self._mission_state = "IDLE"
-            self._publish_state("IDLE")
-            rospy.logerr("[TASK] start_task rejected: task=%s err=%s", jid, msg)
+            self._enter_idle_state(reset_job_runner=True)
+            rospy.logerr("[TASK] task start rejected: task=%s err=%s", tid, msg)
         return ok, msg
+
+    def _pause_current_task(self) -> Tuple[bool, str]:
+        self._send_exec_cmd("pause")
+        self._mission_update_state(self._active_run_id, "PAUSED")
+        self._mission_state = "PAUSED"
+        self._publish_state("PAUSED")
+        return True, ""
+
+    def _enter_idle_state(self, *, reset_job_runner: bool = False):
+        if reset_job_runner:
+            self._reset_job_runner()
+        self._phase = "IDLE"
+        self._mission_state = "IDLE"
+        self._publish_state("IDLE")
+
+    def _set_phase_and_publish(self, phase: str, *, public_state: str = ""):
+        phase_name = str(phase or "").strip()
+        public_name = str(public_state or phase_name).strip() or phase_name
+        self._phase = phase_name
+        self._publish_state(public_name)
+
+    def _return_manual_sequence_to_idle(self):
+        self._phase = "IDLE"
+        self._publish_state(self._manual_sequence_idle_public_state())
+
+    def _enter_running_dispatch_state(self):
+        self._phase = "IDLE"
+        self._mission_state = "RUNNING"
+        self._publish_state("RUNNING")
+        self._push_task_intent_to_executor()
+
+    def _start_auto_resuming(self, *, context: str, missing_reason: str) -> bool:
+        if not self._active_run_id:
+            self._enter_blocking_fault(
+                "ERROR_AUTO_RESUME_CONTEXT",
+                str(missing_reason or "missing active_run_id during auto resume"),
+            )
+            return False
+        self._set_phase_and_publish("AUTO_RESUMING")
+        self._resume_executor_with_current_intent(
+            run_id=self._active_run_id,
+            context=str(context or "auto_resume"),
+            fault_public_state="ERROR_AUTO_RESUME_CONTEXT",
+        )
+        return True
+
+    def _arm_auto_relocalizing(self):
+        self._emit_auto_recovery_armed("AUTO_RELOCALIZING")
+        rospy.loginfo("[TASK] auto relocalizing armed %s", self._repeat_cycle_context())
+        self._set_phase_and_publish("AUTO_RELOCALIZING")
+
+    def _arm_auto_redispatching(self):
+        self._emit_auto_recovery_armed("AUTO_REDISPATCHING")
+        rospy.loginfo("[TASK] auto redispatching armed %s", self._repeat_cycle_context())
+        self._set_phase_and_publish("AUTO_REDISPATCHING")
+
+    def _handle_auto_supply_done(self):
+        if self._repeat_after_charge_enabled():
+            self._enter_blocking_fault(
+                "ERROR_RELOCALIZE_REQUIRED",
+                "dock supply exited before relocalization",
+            )
+            return
+        self._start_auto_resuming(
+            context="auto_supply_resume",
+            missing_reason="missing active_run_id during auto supply resume",
+        )
+
+    def _handle_undock_success(self):
+        self._emit_undock_succeeded()
+        self._undock_nav_started_ts = 0.0
+        if self._phase != "AUTO_UNDOCKING":
+            self._return_manual_sequence_to_idle()
+            return
+        if self._active_run_id:
+            self._start_auto_resuming(
+                context="auto_undock_resume",
+                missing_reason="missing active_run_id during auto undock resume",
+            )
+            return
+        if self._repeat_after_charge_enabled():
+            self._arm_auto_redispatching()
+            return
+        self._enter_blocking_fault(
+            "ERROR_AUTO_RESUME_CONTEXT",
+            "missing active_run_id during auto undock resume",
+        )
+
+    def _complete_auto_resuming_if_executor_running(self) -> bool:
+        st = self._get_exec_state()
+        if not (st.startswith("CONNECT") or st.startswith("FOLLOW")):
+            return False
+        self._emit_auto_resume_confirmed(st)
+        self._set_phase_and_publish("IDLE", public_state="RUNNING")
+        return True
+
+    def _handle_dock_supply_phase(self) -> bool:
+        if not self._is_dock_supply_owner_phase():
+            return False
+        st = str(self._dock_supply_state or "").upper()
+        manual = (self._phase == "MANUAL_SUPPLY")
+        if self._is_recoverable_dock_supply_failure(st):
+            if self._retry_dock_from_stage1(manual=manual, reason=st.lower()):
+                return True
+            self._emit_supply_terminal_event(st)
+            self._enter_charge_fault(
+                "ERROR_DOCK",
+                reason=self._supply_reason(f"state_{st.lower()}"),
+                manual=(not self._active_run_id),
+            )
+            return False
+        if st == "READY_TO_EXIT":
+            repeat_enabled = self._repeat_after_charge_enabled()
+            self._emit_supply_ready_to_exit_event(repeat_enabled=repeat_enabled)
+            rospy.loginfo(
+                "[TASK] dock supply ready_to_exit repeat_enabled=%s %s",
+                str(bool(repeat_enabled)).lower(),
+                self._repeat_cycle_context(),
+            )
+            if self._phase == "AUTO_SUPPLY":
+                if repeat_enabled:
+                    self._arm_auto_relocalizing()
+                elif not self._transition_to_undocking(manual=False):
+                    self._enter_charge_fault(
+                        "ERROR_UNDOCK_PREP",
+                        reason=self._supply_reason("exit_start_failed"),
+                        manual=False,
+                    )
+            else:
+                self._reset_dock_retry_state()
+                self._return_manual_sequence_to_idle()
+            return False
+        if st == "DONE":
+            self._emit_supply_terminal_event(st)
+            if self._phase == "AUTO_SUPPLY":
+                self._handle_auto_supply_done()
+            else:
+                self._reset_dock_retry_state()
+                self._return_manual_sequence_to_idle()
+            return False
+        if st.startswith("FAILED") or st == "CANCELED":
+            self._emit_supply_terminal_event(st)
+            self._enter_charge_fault(
+                "ERROR_SUPPLY_FAILED" if st.startswith("FAILED") else f"ERROR_SUPPLY_{st}",
+                reason=self._supply_reason(f"state_{st.lower()}"),
+                manual=(not self._active_run_id),
+            )
+        return False
+
+    def _handle_task_side_charge_phase(self, *, soc: Optional[float], fresh: bool):
+        if not self._is_task_side_charge_phase():
+            return
+        now = time.time()
+        if fresh and soc is not None:
+            if self._charge_last_soc is None or float(soc) > float(self._charge_last_soc) + 1e-3:
+                self._charge_last_soc = float(soc)
+                self._charge_last_fresh_ts = now
+            elif self._charge_last_fresh_ts <= 0.0:
+                self._charge_last_fresh_ts = now
+
+        if self.charge_timeout_s > 1e-3 and self._charge_started_ts > 0.0 and (now - self._charge_started_ts) >= self.charge_timeout_s:
+            self._enter_charge_fault(
+                "ERROR_CHARGE_TIMEOUT",
+                reason="charge_timeout",
+                manual=(not self._active_run_id),
+            )
+            return
+        if (not fresh) and self.charge_battery_stale_timeout_s > 1e-3 and self._charge_started_ts > 0.0 and (
+            now - (self._charge_last_fresh_ts if self._charge_last_fresh_ts > 0.0 else self._charge_started_ts)
+        ) >= self.charge_battery_stale_timeout_s:
+            self._enter_charge_fault(
+                "ERROR_CHARGE_BATTERY_STALE",
+                reason="battery_stale_during_charge",
+                manual=(not self._active_run_id),
+            )
+            return
+        if fresh and _soc_reached_threshold(soc, self.resume_soc):
+            self._emit(f"CHARGED:soc={soc:.3f}")
+            if self._phase == "AUTO_CHARGING":
+                self._transition_to_undocking(manual=False)
+            else:
+                self._clear_charge_monitor()
+                self._return_manual_sequence_to_idle()
+
+    def _handle_undocking_phase(self):
+        if self._phase not in ["AUTO_UNDOCKING", "MANUAL_UNDOCKING"]:
+            return
+        if self._dock_sequence_timed_out(self._undock_nav_started_ts):
+            if self._dock_supply_managed_undocking():
+                self._dock_supply_cancel()
+            else:
+                self.nav.cancel_all()
+            self._enter_charge_fault(
+                "ERROR_UNDOCK_TIMEOUT",
+                reason="undock_timeout",
+                manual=(not self._active_run_id),
+            )
+        if self._dock_supply_managed_undocking():
+            st = str(self._dock_supply_state or "").upper()
+            if st == "READY_TO_EXIT" and (not self._dock_supply_exit_inflight):
+                if not self._dock_supply_request_exit():
+                    self._enter_charge_fault(
+                        "ERROR_UNDOCK_PREP",
+                        reason=self._supply_reason("exit_restart_failed"),
+                        manual=(not self._active_run_id),
+                    )
+            elif st == "DONE":
+                self._dock_supply_exit_inflight = False
+                self._handle_undock_success()
+            elif st.startswith("FAILED") or st == "CANCELED":
+                self._emit_undock_terminal_event(st)
+                self._enter_charge_fault(
+                    "ERROR_UNDOCK",
+                    reason=self._supply_reason(f"state_{st.lower()}"),
+                    manual=(not self._active_run_id),
+                )
+            return
+        if self.nav.done():
+            if self.nav.succeeded():
+                self._handle_undock_success()
+            else:
+                self._emit_undock_nav_failed(self.nav.get_state())
+                self._enter_charge_fault(
+                    "ERROR_UNDOCK",
+                    reason=f"undock_nav_failed:{self.nav.get_state()}",
+                    manual=(not self._active_run_id),
+                )
+
+    def _handle_auto_repeat_recovery_phase(self):
+        if self._phase == "AUTO_RELOCALIZING":
+            self._emit(f"AUTO_RELOCALIZING_START:{self._repeat_cycle_context()}")
+            rospy.loginfo("[TASK] auto relocalizing start %s", self._repeat_cycle_context())
+            ok, msg = self._restart_localization_for_task()
+            if not ok:
+                self._emit(f"AUTO_RELOCALIZING_FAILED:{msg}")
+                rospy.logerr("[TASK] auto relocalizing failed %s err=%s", self._repeat_cycle_context(), str(msg))
+                self._enter_blocking_fault("ERROR_RELOCALIZE_FAILED", msg)
+                return
+            self._emit(f"AUTO_RELOCALIZING_OK:{self._repeat_cycle_context()} message={msg}")
+            rospy.loginfo("[TASK] auto relocalizing ok %s message=%s", self._repeat_cycle_context(), str(msg))
+            ok, clear_msg = self._clear_costmaps()
+            if not ok:
+                self._emit(f"AUTO_RELOCALIZING_CLEAR_COSTMAPS_FAILED:{clear_msg}")
+                self._enter_blocking_fault("ERROR_CLEAR_COSTMAPS", clear_msg)
+            elif not self._transition_to_undocking(manual=False):
+                self._emit("AUTO_RELOCALIZING_UNDOCK_PREP_FAILED")
+                self._enter_blocking_fault(
+                    "ERROR_UNDOCK_PREP",
+                    self._supply_reason("exit_start_failed_after_relocalize"),
+                )
+            else:
+                self._emit(f"AUTO_RELOCALIZING_TO_UNDOCK:{self._repeat_cycle_context()}")
+                rospy.loginfo("[TASK] auto relocalizing -> undock %s", self._repeat_cycle_context())
+            return
+        if self._phase == "AUTO_REDISPATCHING":
+            rospy.loginfo("[TASK] auto redispatching start %s", self._repeat_cycle_context())
+            ok, msg = self._redispatch_current_task_template()
+            if not ok:
+                self._enter_blocking_fault("ERROR_REDISPATCH", msg)
+            return
+        if self._phase == "AUTO_RESUMING":
+            self._complete_auto_resuming_if_executor_running()
+
+    def _resume_current_task(self, *, run_id: str = "", map_name: str = "") -> Tuple[bool, str]:
+        run_tok = str(run_id or "").strip()
+        if run_tok:
+            self._active_run_id = run_tok
+
+        if not str(self._active_run_id or "").strip():
+            return False, "run_id is required for resume"
+
+        if self._active_run_id and (not self._active_job_id):
+            self._active_schedule_id = ""
+            self._rehydrate_job_context_from_run(self._active_run_id)
+
+        ok, msg = self._prepare_runtime_for_execution(
+            explicit_map_name=str(map_name or "").strip(),
+            run_id=self._active_run_id,
+            require_localized=True,
+            log_action="resume",
+            log_context_key="run",
+            log_context_value=self._active_run_id,
+            default_error="resume map prepare failed",
+        )
+        if not ok:
+            return False, str(msg or "resume map prepare failed")
+
+        self._enter_running_dispatch_state()
+        self._mission_update_state(self._active_run_id, "RUNNING", reason="manual_resume")
+        if not self._resume_executor_with_current_intent(run_id=self._active_run_id, context="manual_resume"):
+            return False, "run_id is required for resume"
+        return True, ""
+
+    def _stop_current_task(self) -> Tuple[bool, str]:
+        if self._dock_supply_enable and (
+            self._is_dock_supply_owner_phase()
+            or self._dock_supply_managed_undocking()
+            or str(self._dock_supply_state or "").upper() == "READY_TO_EXIT"
+        ):
+            self._dock_supply_cancel()
+        self.nav.cancel_all()
+        self._send_exec_cmd("cancel")
+        self._mission_update_state(self._active_run_id, "CANCELED")
+        self._clear_charge_monitor()
+        self._reset_dock_retry_state()
+        self._dock_nav_started_ts = 0.0
+        self._undock_nav_started_ts = 0.0
+
+        if self._active_schedule_id:
+            self._sched_store_mark_done(self._active_schedule_id, "CANCELED")
+        self._clear_health_auto_recover(reset_count=True)
+        self._enter_idle_state(reset_job_runner=True)
+        return True, ""
+
+    def _start_manual_return(self) -> Tuple[bool, str]:
+        if self._phase != "IDLE":
+            return False, "return requires idle phase"
+        self._emit("MANUAL_DOCK")
+        started = self._start_dock_sequence(manual=True)
+        if not started:
+            return False, "dock sequence start failed"
+        return True, ""
 
     def _parse_int(self, s: str, default: Optional[int] = None) -> Optional[int]:
         try:
@@ -2451,91 +4014,97 @@ class TaskManager:
             return False
         return default
 
-    def _get_current_active_map(self) -> Optional[Dict[str, object]]:
-        if self._plan_store is None:
-            return None
-        try:
-            return self._plan_store.get_active_map(robot_id=self._robot_id)
-        except Exception:
-            return None
-
     def _resolve_task_map_asset(
         self,
         *,
         explicit_map_name: str = "",
         run_id: str = "",
-        fallback_to_active: bool = True,
     ) -> Optional[Dict[str, object]]:
-        map_name = str(explicit_map_name or "").strip()
+        explicit_map_name = str(explicit_map_name or "").strip()
+        map_name = explicit_map_name
+        map_revision_id = ""
+        task_scope_map_name = str(getattr(self, "_task_map_name", "") or "").strip()
+        task_scope_revision_id = str(getattr(self, "_task_map_revision_id", "") or "").strip()
 
         if (not map_name) and run_id and self._mission_store is not None:
             try:
                 run = self._mission_store.get_run(str(run_id or "").strip())
                 if run is not None:
                     map_name = str(run.map_name or "").strip()
+                    map_revision_id = str(getattr(run, "map_revision_id", "") or "").strip()
                     if run.zone_id:
                         self._active_zone = str(run.zone_id)
             except Exception:
                 pass
 
         if not map_name:
-            map_name = str(self._task_map_name or "").strip()
+            map_name = task_scope_map_name
+        if (not map_revision_id) and task_scope_revision_id:
+            if (not explicit_map_name) or (task_scope_map_name and task_scope_map_name == map_name):
+                map_revision_id = task_scope_revision_id
 
         if self._plan_store is None:
             return None
 
         asset = None
         try:
-            if map_name:
+            if map_revision_id:
+                asset = self._plan_store.resolve_map_revision(
+                    revision_id=map_revision_id,
+                    robot_id=self._robot_id,
+                )
+                resolved_map_name = str((asset or {}).get("map_name") or "").strip()
+                if map_name and resolved_map_name and resolved_map_name != map_name:
+                    raise ValueError("task map revision does not match task map name")
+            if (asset is None) and map_name:
                 asset = self._plan_store.resolve_map_asset(
                     map_name=map_name,
                     robot_id=self._robot_id,
                 )
-            elif fallback_to_active:
+                active_asset = self._plan_store.get_active_map(robot_id=self._robot_id) or {}
+                asset_error = map_asset_verification_error(asset or {}, label="map asset") if asset else ""
+                active_matches_name = str(active_asset.get("map_name") or "").strip() == str(map_name or "").strip()
+                active_error = (
+                    map_asset_verification_error(active_asset, label="map asset")
+                    if active_asset and active_matches_name
+                    else "map asset not found"
+                )
+                if asset_error and active_matches_name and (not active_error):
+                    asset = active_asset
+            elif asset is None:
                 asset = self._plan_store.get_active_map(robot_id=self._robot_id)
+        except ValueError:
+            raise
         except Exception:
             asset = None
 
         if asset:
+            asset_error = map_asset_verification_error(asset, label="map asset")
+            if asset_error:
+                raise ValueError(asset_error)
             self._task_map_name = str(asset.get("map_name") or "")
+            self._task_map_revision_id = str(asset.get("revision_id") or map_revision_id or "")
         return asset
 
     def _get_selected_active_map(self) -> Optional[Dict[str, object]]:
-        if self._plan_store is None:
+        plan_store = getattr(self, "_plan_store", None)
+        if plan_store is None:
             return None
         try:
-            return self._plan_store.get_active_map(robot_id=self._robot_id)
+            return plan_store.get_active_map(robot_id=self._robot_id)
         except Exception:
             return None
 
-    def _set_selected_map(self, asset: Optional[Dict[str, object]]) -> Tuple[bool, str]:
-        if not asset:
-            return False, "map asset not found"
-        if self._plan_store is None:
-            return False, "plan store unavailable"
-        map_name = str(asset.get("map_name") or "").strip()
-        if not map_name:
-            return False, "map_name is required"
-        try:
-            self._plan_store.set_active_map(
-                map_name=map_name,
-                robot_id=self._robot_id,
-            )
-            rospy.set_param("/map_name", map_name)
-        except Exception as e:
-            return False, str(e)
-        self._task_map_name = map_name
-        self._persist_now()
-        return True, "selected"
-
     def _wait_for_runtime_map(self, asset: Dict[str, object], timeout_s: Optional[float] = None) -> bool:
+        target_revision_id = str((asset or {}).get("revision_id") or "").strip()
         target_name = str((asset or {}).get("map_name") or "").strip()
         target_id = str((asset or {}).get("map_id") or "").strip()
         target_md5 = str((asset or {}).get("map_md5") or "").strip()
-        wait_s = max(0.5, float(timeout_s if timeout_s is not None else self._activate_map_timeout_s))
+        wait_s = max(0.5, float(timeout_s if timeout_s is not None else 10.0))
 
         def _matches() -> bool:
             cur_name, cur_version = get_runtime_map_scope()
+            cur_revision_id = get_runtime_map_revision_id("/cartographer/runtime")
             cur_id, cur_md5, _ok = ensure_map_identity(
                 map_topic="/map",
                 timeout_s=1.0,
@@ -2543,6 +4112,10 @@ class TaskManager:
                 set_private_params=False,
                 refresh=True,
             )
+            cur_revision_id = str(cur_revision_id or "").strip()
+            if target_revision_id:
+                if cur_revision_id:
+                    return cur_revision_id == target_revision_id
             if target_name and str(cur_name or "").strip() != target_name:
                 return False
             if target_id and str(cur_id or "").strip() != target_id:
@@ -2553,18 +4126,40 @@ class TaskManager:
 
         return self._wait(wait_s, _matches, sleep_s=0.1)
 
-    def _activate_map_asset(self, asset: Optional[Dict[str, object]], *, timeout_s: Optional[float] = None) -> Tuple[bool, str]:
+    def _validate_runtime_map_asset(self, asset: Optional[Dict[str, object]], *, timeout_s: Optional[float] = None) -> Tuple[bool, str]:
         if not asset:
             return False, "map asset not resolved"
         if not bool(asset.get("enabled", True)):
             return False, "map asset is disabled"
 
+        asset_revision_id = str(asset.get("revision_id") or "").strip()
+        asset_map_name = str(asset.get("map_name") or "").strip()
+        slam_state = self._get_fresh_slam_state()
+        slam_active_map_name = str(getattr(slam_state, "active_map_name", "") or "").strip() if slam_state is not None else ""
+        slam_runtime_match = bool(getattr(slam_state, "runtime_map_match", False)) if slam_state is not None else False
+        selected_asset = self._get_selected_active_map() or {}
+        selected_revision_id = str(selected_asset.get("revision_id") or "").strip()
+        slam_can_authoritatively_validate_map = bool(
+            slam_state is not None
+            and asset_map_name
+            and slam_active_map_name
+            and slam_active_map_name == asset_map_name
+            and ((not asset_revision_id) or (selected_revision_id == asset_revision_id))
+        )
+
+        if slam_can_authoritatively_validate_map and slam_runtime_match:
+            self._task_map_name = asset_map_name
+            self._task_map_revision_id = asset_revision_id
+            return True, "runtime_map_match"
+
         if self._wait_for_runtime_map(asset, timeout_s=0.2):
-            self._task_map_name = str(asset.get("map_name") or "")
-            return True, "already active"
+            self._task_map_name = asset_map_name
+            self._task_map_revision_id = asset_revision_id
+            return True, "runtime_map_match"
 
         if not self._require_runtime_map_match:
-            self._task_map_name = str(asset.get("map_name") or "")
+            self._task_map_name = asset_map_name
+            self._task_map_revision_id = asset_revision_id
             rospy.logwarn_throttle(
                 30.0,
                 "[TASK] runtime map consistency gate disabled; continue with selected map asset=%s",
@@ -2572,35 +4167,28 @@ class TaskManager:
             )
             return True, "runtime_map_match_skipped"
 
-        if not self._allow_map_activation:
-            return (
-                False,
-                "runtime map does not match selected map; load %s.pbstream in external Cartographer UI, relocalize, then set current map"
-                % (str(asset.get("map_name") or "").strip() or "target"),
-            )
-
-        if self._activate_map_cli is None:
-            return False, "map activation service unavailable"
-        try:
-            rospy.logwarn_throttle(
-                30.0,
-                "[TASK] legacy map activation helper invoked; formal flow should switch maps from external Cartographer UI first",
-            )
-            rospy.wait_for_service(self._activate_map_service, timeout=1.0)
-            resp = self._activate_map_cli(
-                robot_id=str(self._robot_id or "local_robot"),
-                map_name=str(asset.get("map_name") or ""),
-            )
-        except Exception as e:
-            return False, str(e)
-
-        if not getattr(resp, "success", False):
-            return False, str(getattr(resp, "message", "") or "activate map failed")
-        if not self._wait_for_runtime_map(asset, timeout_s=timeout_s):
-            return False, "runtime map did not converge to requested asset"
-
-        self._task_map_name = str(asset.get("map_name") or "")
-        return True, "activated"
+        if slam_can_authoritatively_validate_map:
+            runtime_map = {
+                "revision_id": "",
+                "map_name": str(getattr(slam_state, "runtime_map_name", "") or "").strip(),
+                "map_id": str(getattr(slam_state, "runtime_map_id", "") or "").strip(),
+                "map_md5": str(getattr(slam_state, "runtime_map_md5", "") or "").strip(),
+            }
+        else:
+            runtime_map = self._runtime_map_snapshot(refresh=True)
+        return (
+            False,
+            runtime_map_switch_required_before_task_message(
+                selected_revision_id=str(asset.get("revision_id") or ""),
+                selected_map_name=asset_map_name,
+                selected_map_id=str(asset.get("map_id") or ""),
+                selected_map_md5=str(asset.get("map_md5") or ""),
+                runtime_revision_id=str(runtime_map.get("revision_id") or ""),
+                runtime_map_name=str(runtime_map.get("map_name") or ""),
+                runtime_map_id=str(runtime_map.get("map_id") or ""),
+                runtime_map_md5=str(runtime_map.get("map_md5") or ""),
+            ),
+        )
 
     def _runtime_localization_status(self) -> Tuple[str, bool]:
         try:
@@ -2614,48 +4202,72 @@ class TaskManager:
         return state, valid
 
     def _ensure_runtime_localized(self) -> Tuple[bool, str]:
-        state, valid = self._runtime_localization_status()
-        if state == "localized" and valid:
+        slam_state = self._get_fresh_slam_state()
+        if slam_state is not None:
+            state = str(getattr(slam_state, "localization_state", "") or "").strip().lower()
+            valid = bool(getattr(slam_state, "localization_valid", False))
+            manual_assist_required = bool(getattr(slam_state, "manual_assist_required", False))
+            manual_assist_map_name = str(getattr(slam_state, "manual_assist_map_name", "") or "").strip()
+            manual_assist_map_revision_id = str(
+                getattr(slam_state, "manual_assist_map_revision_id", "") or ""
+            ).strip()
+            manual_assist_retry_action = str(
+                getattr(slam_state, "manual_assist_retry_action", "") or ""
+            ).strip()
+        else:
+            state, valid = self._runtime_localization_status()
+            manual_assist_required = localization_needs_manual_assist(state)
+            selected_asset_getter = getattr(self, "_get_selected_active_map", None)
+            selected_asset = selected_asset_getter() if callable(selected_asset_getter) else {}
+            manual_assist_map_name = str(selected_asset.get("map_name") or "").strip()
+            manual_assist_map_revision_id = str(selected_asset.get("revision_id") or "").strip()
+            manual_assist_retry_action = "relocalize"
+        if localization_is_ready(state, valid):
             return True, ""
-        if state:
-            return False, "runtime localization not ready: state=%s; relocalize before start/resume" % state
-        return False, "runtime localization not ready; relocalize before start/resume"
+        if bool(manual_assist_required) or localization_needs_manual_assist(state):
+            return False, runtime_localization_not_ready_message(
+                state,
+                valid,
+                map_name=manual_assist_map_name,
+                map_revision_id=manual_assist_map_revision_id,
+                retry_action=manual_assist_retry_action or "relocalize",
+            )
+        return False, runtime_localization_relocalize_required_before_task_message(state, valid)
 
-    def _manual_relocalize(
+    def _prepare_runtime_for_execution(
         self,
         *,
-        x: float,
-        y: float,
-        yaw: float,
-        frame_id: str = "",
-        map_name: str = "",
+        explicit_map_name: str = "",
+        run_id: str = "",
+        require_localized: bool = True,
+        log_action: str = "",
+        log_context_key: str = "",
+        log_context_value: str = "",
+        default_error: str = "map prepare failed",
     ) -> Tuple[bool, str]:
-        if self._relocalize_map_cli is None:
-            try:
-                self._relocalize_map_cli = rospy.ServiceProxy(self._relocalize_map_service, RelocalizeMapAsset)
-            except Exception as e:
-                return False, str(e)
-        try:
-            rospy.logwarn_throttle(
-                30.0,
-                "[TASK] legacy relocalize helper invoked; formal flow should relocalize from external Cartographer UI",
+        _asset, ok, msg = self._prepare_map_for_run(
+            explicit_map_name=explicit_map_name,
+            run_id=run_id,
+            require_localized=require_localized,
+        )
+        if ok:
+            return True, str(msg or "")
+
+        detail = str(msg or default_error or "map prepare failed").strip()
+        if log_action:
+            rospy.logerr(
+                "[TASK] %s blocked: runtime prepare failed %s=%s err=%s",
+                str(log_action or "task_prepare"),
+                str(log_context_key or "context"),
+                str(log_context_value or "-"),
+                detail,
             )
-            rospy.wait_for_service(self._relocalize_map_service, timeout=float(self._relocalize_map_timeout_s))
-            resp = self._relocalize_map_cli(
-                robot_id=str(self._robot_id or "local_robot"),
-                map_name=str(map_name or self._task_map_name or ""),
-                frame_id=str(frame_id or self.frame_id or "map"),
-                x=float(x),
-                y=float(y),
-                yaw=float(yaw),
-            )
-        except Exception as e:
-            return False, str(e)
-        if not getattr(resp, "success", False):
-            return False, str(getattr(resp, "message", "") or "relocalize failed")
-        self._task_map_name = str(getattr(resp, "map_name", "") or self._task_map_name or "")
-        self._persist_now()
-        return True, str(getattr(resp, "message", "") or "relocalized")
+        return False, detail
+
+    def _block_restore_auto_resume(self, reason: str):
+        self._mission_state = "PAUSED"
+        self._set_phase_and_publish("IDLE", public_state="WAIT_RELOCALIZE")
+        self._emit("RESTORE:RESUME_BLOCKED:%s" % str(reason or "relocalize required"))
 
     def _prepare_map_for_run(
         self,
@@ -2664,26 +4276,48 @@ class TaskManager:
         run_id: str = "",
         require_localized: bool = True,
     ) -> Tuple[Optional[Dict[str, object]], bool, str]:
-        asset = self._resolve_task_map_asset(
-            explicit_map_name=explicit_map_name,
-            run_id=run_id,
-            fallback_to_active=True,
-        )
+        try:
+            asset = self._resolve_task_map_asset(
+                explicit_map_name=explicit_map_name,
+                run_id=run_id,
+            )
+        except ValueError as exc:
+            return None, False, str(exc)
         requested_name = str(explicit_map_name or "").strip()
+        requested_revision_id = str(getattr(self, "_task_map_revision_id", "") or "").strip()
         if (not requested_name) and run_id and self._mission_store is not None:
             try:
                 run = self._mission_store.get_run(str(run_id or "").strip())
                 if run is not None:
                     requested_name = str(run.map_name or "").strip()
+                    requested_revision_id = str(getattr(run, "map_revision_id", "") or requested_revision_id).strip()
             except Exception:
                 pass
         selected_asset = self._get_selected_active_map()
         if selected_asset is None and self._require_managed_map_asset:
-            return None, False, "no current map selected"
+            return None, False, no_current_active_map_selected_message()
         if selected_asset is not None and requested_name:
             selected_name = str(selected_asset.get("map_name") or "").strip()
+            selected_revision_id = str(selected_asset.get("revision_id") or "").strip()
+            if requested_revision_id and not selected_revision_id:
+                return None, False, selected_map_does_not_match_requested_map_message(
+                    selected_name or requested_name,
+                    requested_name,
+                    selected_revision_id=selected_revision_id,
+                    requested_revision_id=requested_revision_id,
+                )
+            if requested_revision_id and selected_revision_id and requested_revision_id != selected_revision_id:
+                return None, False, selected_map_does_not_match_requested_map_message(
+                    selected_name or requested_name,
+                    requested_name,
+                    selected_revision_id=selected_revision_id,
+                    requested_revision_id=requested_revision_id,
+                )
             if selected_name and requested_name != selected_name:
-                return None, False, "selected current map does not match requested task map"
+                return None, False, selected_map_does_not_match_requested_map_message(
+                    selected_name,
+                    requested_name,
+                )
         if not asset:
             requested_scope = bool(
                 str(explicit_map_name or "").strip()
@@ -2693,8 +4327,8 @@ class TaskManager:
                 return None, False, "no map asset available"
             if requested_scope:
                 return None, False, "map asset not found"
-            return None, True, "legacy_runtime_map"
-        ok, msg = self._activate_map_asset(asset)
+            return None, True, "runtime_map_unmanaged"
+        ok, msg = self._validate_runtime_map_asset(asset)
         if ok and require_localized and self._require_runtime_localized_before_start:
             ok, msg = self._ensure_runtime_localized()
         return asset, bool(ok), str(msg or "")
@@ -2703,6 +4337,7 @@ class TaskManager:
         self,
         *,
         map_name: str,
+        map_revision_id: str = "",
         zone_id: str,
         plan_profile_name: str,
     ) -> Tuple[bool, str]:
@@ -2710,13 +4345,18 @@ class TaskManager:
             return True, ""
         zone_id = str(zone_id or "").strip()
         map_name = str(map_name or "").strip()
+        map_revision_id = str(map_revision_id or "").strip()
         profile = str(plan_profile_name or "").strip() or "cover_standard"
         if not zone_id:
             return False, "task zone_id is empty"
         if not map_name:
             return False, "task map_name is empty"
         try:
-            zone = self._plan_store.get_zone_meta(zone_id, map_name=map_name)
+            zone = self._plan_store.get_zone_meta(
+                zone_id,
+                map_name=map_name,
+                map_revision_id=map_revision_id,
+            )
         except Exception as e:
             return False, "zone metadata unavailable: %s" % str(e)
         if not zone:
@@ -2724,7 +4364,12 @@ class TaskManager:
         if not bool(zone.get("enabled", True)):
             return False, "zone is disabled"
         try:
-            plan_id = self._plan_store.get_active_plan_id(zone_id, profile, map_name=map_name)
+            plan_id = self._plan_store.get_active_plan_id(
+                zone_id,
+                profile,
+                map_name=map_name,
+                map_revision_id=map_revision_id,
+            )
         except Exception as e:
             return False, "active plan lookup failed: %s" % str(e)
         if not plan_id:
@@ -2733,9 +4378,12 @@ class TaskManager:
             plan_meta = self._plan_store.load_plan_meta(plan_id)
         except Exception as e:
             return False, "active plan metadata is unavailable: %s" % str(e)
+        plan_map_revision_id = str(plan_meta.get("map_revision_id") or "").strip()
         plan_map_name = str(plan_meta.get("map_name") or "").strip()
         plan_zone_id = str(plan_meta.get("zone_id") or "").strip()
-        plan_profile = str(plan_meta.get("plan_profile_name") or plan_meta.get("profile_name") or "").strip()
+        plan_profile = str(plan_meta.get("plan_profile_name") or "").strip()
+        if map_revision_id and plan_map_revision_id and plan_map_revision_id != map_revision_id:
+            return False, "active plan revision does not match task map revision"
         if plan_map_name and plan_map_name != map_name:
             return False, "active plan map does not match task map"
         if plan_zone_id and plan_zone_id != zone_id:
@@ -2924,14 +4572,9 @@ class TaskManager:
                 rospy.logerr("[TASK] sys_profile switch abort: nav apply failed sys=%s (executor stays paused)", sys_profile_name)
                 return
 
-            self._push_task_intent_to_executor()
-
-            if run_id:
-                self._send_exec_cmd(f"resume run={run_id}")
-            elif zone_id:
-                self._send_exec_cmd(f"resume {zone_id}")
-            else:
-                self._send_exec_cmd("resume")
+            if not self._resume_executor_with_current_intent(run_id=run_id, context="sys_profile_switch"):
+                self._emit(f"SYS_PROFILE_SWITCH_ABORT:{sys_profile_name}:reason=missing_run_id")
+                return
             self._emit(f"SYS_PROFILE_SWITCH_DONE:{sys_profile_name}")
             return
 
@@ -3236,6 +4879,7 @@ class TaskManager:
             if mr.zone_id:
                 self._active_zone = str(mr.zone_id)
             self._task_map_name = str(mr.map_name or "")
+            self._task_map_revision_id = str(getattr(mr, "map_revision_id", "") or "")
         except Exception as e:
             rospy.logwarn("[TASK] rehydrate run context failed run=%s err=%s", str(run_id), str(e))
 
@@ -3260,7 +4904,13 @@ class TaskManager:
         self._mission_state = "ESTOP" if st == "ESTOP" else "IDLE"
         self._phase = "IDLE"
         self._dock_supply_exit_inflight = False
-        self._publish_state(st or "IDLE")
+        if st == "DONE":
+            # Keep DONE as a mission_run terminal record, but return the live
+            # runtime state to a launch-ready idle posture.
+            self._executor_state = "IDLE"
+            self._publish_state("IDLE")
+        else:
+            self._publish_state(st or "IDLE")
         if finish_dock:
             self._emit("POST_RUN_DOCK")
             self._start_dock_sequence(manual=True)
@@ -3303,15 +4953,7 @@ class TaskManager:
             trigger_source="SCHEDULE:%s" % schedule_id,
         )
         if not ok:
-            self._emit(f"JOB_ABORT:id={self._active_job_id} reason=map_activate_failed:{msg}")
-            rospy.logerr("[TASK] start_job aborted: map activation failed job=%s err=%s", self._active_job_id, msg)
-            if self._active_schedule_id:
-                self._sched_store_mark_done(self._active_schedule_id, "ERROR_MAP_ACTIVATE")
-            self._reset_job_runner()
-            self._phase = "IDLE"
-            self._mission_state = "IDLE"
-            self._publish_state("IDLE")
-            return False, str(msg or "start rejected")
+            return self._abort_active_job_start(msg, schedule_status="ERROR_MAP_ACTIVATE")
         return True, ""
 
     def _finish_active_job(self, *, status: str):
@@ -3325,6 +4967,15 @@ class TaskManager:
                 f"status={status} loops={self._job_loops_done}/{self._job_loops_total}"
             )
         self._reset_job_runner()
+
+    def _abort_active_job_start(self, reason: str, *, schedule_status: str = "ERROR_MAP_ACTIVATE") -> Tuple[bool, str]:
+        detail = str(reason or "start rejected")
+        self._emit(f"JOB_ABORT:id={self._active_job_id} reason=map_activate_failed:{detail}")
+        rospy.logerr("[TASK] start_job aborted: runtime prepare failed job=%s err=%s", self._active_job_id, detail)
+        if self._active_schedule_id:
+            self._sched_store_mark_done(self._active_schedule_id, schedule_status)
+        self._enter_idle_state(reset_job_runner=True)
+        return False, detail
 
     def _tick_exec_terminal_and_loops(self):
         st = self._get_exec_state()
@@ -3360,7 +5011,9 @@ class TaskManager:
                             else ("TASK" if str(self._active_job_id or "").strip() else "MANUAL")
                         ),
                     )
-                    self._send_exec_cmd(f"start {self._active_zone} run={self._active_run_id}")
+                    if not self._send_exec_start_cmd(zone_id=self._active_zone, run_id=self._active_run_id):
+                        self._enter_blocking_fault("ERROR_START_CONTEXT", "missing zone_id during repeat start")
+                        return
                     return
 
                 self._emit(f"LOOPS_DONE:status=DONE loops={loops_done}/{loops_total}")
@@ -3509,219 +5162,64 @@ class TaskManager:
 
     # ------------------- cmd handling -------------------
     def _handle_cmd(self, cmd: str):
-        low = cmd.lower().strip()
+        parts = self._split_cmd(cmd)
+        if not parts:
+            return
+        verb = parts[0].lower().strip()
 
-        if low in ["dump", "status", "debug", "diag"]:
+        if verb == "status":
             self._emit("DUMP_STATE")
             return
-        if low in ["health", "health_status"]:
+        if verb == "health":
             self._emit("HEALTH_STATUS")
             return
 
-        if low.startswith("start_task"):
+        if verb == "start":
             if self._task_busy():
                 self._emit("CMD_REJECT:START_BUSY")
                 return
-            parts = self._split_cmd(cmd)
-            task_id = parts[1].strip() if len(parts) >= 2 else ""
-            kv = self._parse_kv_tokens(parts[2:])
-            if (not task_id) and kv:
-                task_id = (kv.get("task_id") or kv.get("job_id") or kv.get("job") or kv.get("id") or "").strip()
-            ok, msg = self._start_task_by_id(task_id, source="CMD_TASK")
-            if not ok:
-                self._emit(f"CMD_REJECT:START_TASK:{msg}")
-            return
-
-        if low.startswith("start"):
-            if self._task_busy():
-                self._emit("CMD_REJECT:START_BUSY")
-                return
-            parts = self._split_cmd(cmd)
-            pos_zone = ""
-            kv_start_index = 1
-            if len(parts) >= 2 and ("=" not in parts[1]):
-                pos_zone = parts[1]
-                kv_start_index = 2
-            kv = self._parse_kv_tokens(parts[kv_start_index:])
-            task_id = ""
-            if kv:
-                task_id = (kv.get("task_id") or kv.get("job_id") or kv.get("job") or kv.get("id") or "").strip()
+            kv = self._parse_kv_tokens(parts[1:])
+            task_id = (kv.get("task_id") or "").strip() if kv else ""
             if task_id:
                 ok, msg = self._start_task_by_id(task_id, source="CMD_TASK")
                 if not ok:
                     self._emit(f"CMD_REJECT:START_TASK:{msg}")
                 return
 
-            if not bool(self.allow_legacy_zone_start):
-                self._emit("CMD_REJECT:LEGACY_ZONE_START_DISABLED")
-                rospy.logwarn_throttle(
-                    30.0,
-                    "[TASK] legacy manual zone start rejected; formal flow must start a persisted task via task_id",
-                )
-                return
-
+            self._emit("CMD_REJECT:START_REQUIRES_TASK_ID")
             rospy.logwarn_throttle(
                 30.0,
-                "[TASK] legacy manual zone start invoked; formal flow should start a persisted task via task_id",
+                "[TASK] manual start requires canonical form: start task_id=<id>",
             )
-            self._emit("LEGACY_ZONE_START")
-
-            if pos_zone:
-                self._active_zone = pos_zone
-
-            loops = 1
-            if kv:
-                loops = self._parse_int(kv.get("loops") or kv.get("loop") or kv.get("repeat"), default=1) or 1
-            loops = max(1, int(loops))
-
-            run_tok = ""
-            if kv:
-                run_tok = (kv.get("run") or kv.get("run_id") or "").strip()
-            map_name = ""
-            if kv:
-                map_name = (kv.get("map") or kv.get("map_name") or "").strip()
-
-            if kv:
-                plan_prof = (kv.get("plan_profile") or kv.get("plan") or "").strip()
-                sys_prof = (kv.get("sys_profile") or kv.get("sys") or "").strip()
-                mode = (kv.get("mode") or kv.get("clean_mode") or "").strip()
-                finish_dock = self._parse_bool(
-                    kv.get("finish_dock")
-                    or kv.get("return_to_dock_on_finish")
-                    or kv.get("dock_on_finish")
-                    or kv.get("finish_return"),
-                    default=None,
-                )
-
-                if plan_prof:
-                    self._task_plan_profile_name = str(plan_prof)
-                if sys_prof:
-                    self._task_sys_profile_name = self._resolve_effective_sys_profile(str(sys_prof))
-                if mode:
-                    self._task_clean_mode = str(mode)
-                if finish_dock is not None:
-                    self._task_return_to_dock_on_finish = bool(finish_dock)
-
-            self._task_sys_profile_name = self._resolve_effective_sys_profile(self._task_sys_profile_name)
-            self._task_clean_mode = self._resolve_effective_clean_mode(self._task_sys_profile_name, self._task_clean_mode)
-            if map_name:
-                self._task_map_name = str(map_name)
-
-            asset, ok, msg = self._prepare_map_for_run(
-                explicit_map_name=map_name,
-                run_id=run_tok,
-                require_localized=True,
-            )
-            if not ok:
-                self._emit(f"CMD_REJECT:START_MAP:{msg}")
-                rospy.logerr("[TASK] start rejected: map prepare failed zone=%s err=%s", self._active_zone, msg)
-                return
-            del asset
-
-            self._phase = "IDLE"
-            self._mission_state = "RUNNING"
-
-            self._active_job_id = ""
-            self._active_schedule_id = ""
-            self._job_loops_total = int(loops)
-            self._job_loops_done = 0
-
-            if run_tok:
-                self._active_run_id = run_tok
-                self._active_run_loop_index = 1
-                self._emit(f"RUN_START:run={run_tok} zone={self._active_zone} job=manual loop=1/{self._job_loops_total}")
-            else:
-                self._mission_create_run(
-                    job_id="",
-                    zone_id=self._active_zone,
-                    loop_index=1,
-                    loops_total=self._job_loops_total,
-                    trigger_source="MANUAL",
-                )
-
-            self._publish_state("RUNNING")
-            self._push_task_intent_to_executor()
-            self._send_exec_cmd(f"start {self._active_zone} run={self._active_run_id}")
             return
 
-        if low.startswith("resume"):
+        if verb == "resume":
             if self._is_mission_running():
                 self._emit("CMD_REJECT:RESUME_BUSY")
                 return
-            parts = self._split_cmd(cmd)
             kv = self._parse_kv_tokens(parts[1:])
 
             run_tok = ""
             if kv:
-                run_tok = (kv.get("run") or kv.get("run_id") or "").strip()
+                run_tok = (kv.get("run_id") or "").strip()
             map_name = ""
             if kv:
-                map_name = (kv.get("map") or kv.get("map_name") or "").strip()
+                map_name = (kv.get("map_name") or "").strip()
 
-            if run_tok:
-                self._active_run_id = run_tok
-
-            if self._active_run_id and (not self._active_job_id):
-                self._active_schedule_id = ""
-                self._rehydrate_job_context_from_run(self._active_run_id)
-
-            asset, ok, msg = self._prepare_map_for_run(
-                explicit_map_name=map_name,
-                run_id=self._active_run_id,
-                require_localized=True,
-            )
+            ok, msg = self._resume_current_task(run_id=run_tok, map_name=map_name)
             if not ok:
                 self._emit(f"CMD_REJECT:RESUME_MAP:{msg}")
-                rospy.logerr("[TASK] resume rejected: map prepare failed run=%s err=%s", self._active_run_id, msg)
-                return
-            del asset
-
-            self._phase = "IDLE"
-            self._mission_state = "RUNNING"
-
-            self._publish_state("RUNNING")
-            self._push_task_intent_to_executor()
-
-            if self._active_run_id:
-                self._mission_update_state(self._active_run_id, "RUNNING", reason="manual_resume")
-                self._send_exec_cmd(f"resume run={self._active_run_id}")
-            else:
-                self._send_exec_cmd(f"resume {self._active_zone}")
             return
 
-        if low == "pause":
-            self._send_exec_cmd("pause")
-            self._mission_update_state(self._active_run_id, "PAUSED")
-            self._mission_state = "PAUSED"
-            self._publish_state("PAUSED")
+        if verb == "pause":
+            self._pause_current_task()
             return
 
-        if low in ["cancel", "stop"]:
-            # if real-robot dock supply is running, request cancel (best-effort)
-            if self._dock_supply_enable and (
-                self._is_dock_supply_owner_phase()
-                or self._dock_supply_managed_undocking()
-                or str(self._dock_supply_state or "").upper() == "READY_TO_EXIT"
-            ):
-                self._dock_supply_cancel()
-            self.nav.cancel_all()
-            self._send_exec_cmd("cancel")
-            self._mission_update_state(self._active_run_id, "CANCELED")
-            self._clear_charge_monitor()
-            self._reset_dock_retry_state()
-            self._dock_nav_started_ts = 0.0
-            self._undock_nav_started_ts = 0.0
-            self._phase = "IDLE"
-            self._mission_state = "IDLE"
-
-            if self._active_schedule_id:
-                self._sched_store_mark_done(self._active_schedule_id, "CANCELED")
-            self._clear_health_auto_recover(reset_count=True)
-            self._reset_job_runner()
-            self._publish_state("IDLE")
+        if verb in ["cancel", "stop"]:
+            self._stop_current_task()
             return
 
-        if low in ["estop", "e-stop", "emergency_stop"]:
+        if verb in ["estop", "e-stop", "emergency_stop"]:
             if self._dock_supply_enable and (
                 self._is_dock_supply_owner_phase()
                 or self._dock_supply_managed_undocking()
@@ -3745,20 +5243,19 @@ class TaskManager:
             self._publish_state("ESTOP")
             return
 
-        if low == "dock":
-            if self._phase != "IDLE":
-                self._emit("CMD_REJECT:DOCK_BUSY")
+        if verb == "dock":
+            ok, msg = self._start_manual_return()
+            if not ok:
+                self._emit(f"CMD_REJECT:DOCK:{msg}")
                 return
-            self._emit("MANUAL_DOCK")
-            self._start_dock_sequence(manual=True)
             return
 
-        if low == "undock":
+        if verb == "undock":
             self._emit("MANUAL_UNDOCK")
             self._start_undock_only()
             return
 
-        if low.startswith("set_plan_profile"):
+        if verb == "set_plan_profile":
             parts = cmd.split(maxsplit=1)
             self._task_plan_profile_name = parts[1].strip() if len(parts) >= 2 else ""
             self._emit(f"SET_PLAN_PROFILE:{self._task_plan_profile_name}")
@@ -3766,7 +5263,7 @@ class TaskManager:
             self._push_task_intent_to_executor()
             return
 
-        if low.startswith("set_sys_profile") or low.startswith("set_act_profile"):
+        if verb == "set_sys_profile":
             parts = cmd.split(maxsplit=1)
             sys_prof = parts[1].strip() if len(parts) >= 2 else ""
             sys_prof = self._resolve_effective_sys_profile(sys_prof)
@@ -3774,7 +5271,7 @@ class TaskManager:
             self._switch_sys_profile_safe(sys_prof, source="CMD")
             return
 
-        if low.startswith("set_mode"):
+        if verb == "set_mode":
             parts = cmd.split(maxsplit=1)
             self._task_clean_mode = parts[1].strip() if len(parts) >= 2 else ""
             self._emit(f"SET_MODE:{self._task_clean_mode}")
@@ -3782,73 +5279,31 @@ class TaskManager:
             self._push_task_intent_to_executor()
             return
 
-        if low.startswith("set_finish_dock") or low.startswith("set_return_to_dock_on_finish"):
+        if verb == "set_return_to_dock_on_finish":
             parts = cmd.split(maxsplit=1)
             value = parts[1].strip() if len(parts) >= 2 else ""
             resolved = self._parse_bool(value, default=None)
             if resolved is None:
-                self._emit("CMD_REJECT:SET_FINISH_DOCK_BAD_VALUE")
+                self._emit("CMD_REJECT:SET_RETURN_TO_DOCK_ON_FINISH_BAD_VALUE")
                 return
             self._task_return_to_dock_on_finish = bool(resolved)
-            self._emit(f"SET_FINISH_DOCK:{int(self._task_return_to_dock_on_finish)}")
+            self._emit(f"SET_RETURN_TO_DOCK_ON_FINISH:{int(self._task_return_to_dock_on_finish)}")
             self._persist_now()
             return
 
-        if low.startswith("set_map"):
-            if str(self._mission_state or "").upper() != "IDLE" or str(self._phase or "").upper() != "IDLE":
-                self._emit("CMD_REJECT:SET_MAP_BUSY")
-                return
-            parts = self._split_cmd(cmd)
-            map_name = parts[1].strip() if len(parts) >= 2 else ""
-            if not map_name:
-                self._emit("CMD_REJECT:SET_MAP_MISSING")
-                return
-            asset = self._resolve_task_map_asset(
-                explicit_map_name=map_name,
-                fallback_to_active=False,
-            )
-            ok, msg = self._set_selected_map(asset)
-            if not ok:
-                self._emit(f"CMD_REJECT:SET_MAP:{msg}")
-                return
-            self._emit(
-                "SET_MAP:%s" % (
-                    str((asset or {}).get("map_name") or map_name),
-                )
+        if verb == "set_map":
+            self._emit("CMD_REJECT:SET_MAP_USE_SLAM_WORKFLOW")
+            rospy.logwarn_throttle(
+                30.0,
+                "[TASK] set_map command removed; switch maps through SLAM workflow instead",
             )
             return
 
-        if low.startswith("relocalize"):
-            if str(self._mission_state or "").upper() != "IDLE" or str(self._phase or "").upper() != "IDLE":
-                self._emit("CMD_REJECT:RELOCALIZE_BUSY")
-                return
-            parts = self._split_cmd(cmd)
-            kv = self._parse_kv_tokens(parts[1:])
-            pose_val = (kv.get("pose") or kv.get("xyyaw") or "").strip() if kv else ""
-            if pose_val:
-                x, y, yaw = _parse_xyyaw(pose_val, default=(0.0, 0.0, 0.0))
-            else:
-                if not kv or ("x" not in kv) or ("y" not in kv):
-                    self._emit("CMD_REJECT:RELOCALIZE_MISSING_POSE")
-                    return
-                x = float(kv.get("x") or 0.0)
-                y = float(kv.get("y") or 0.0)
-                yaw = float(kv.get("yaw") or 0.0)
-            frame_id = (kv.get("frame") or kv.get("frame_id") or self.frame_id).strip() if kv else self.frame_id
-            map_name = (kv.get("map") or kv.get("map_name") or "").strip() if kv else ""
-            ok, msg = self._manual_relocalize(
-                x=x,
-                y=y,
-                yaw=yaw,
-                frame_id=frame_id,
-                map_name=map_name,
-            )
-            if not ok:
-                self._emit(f"CMD_REJECT:RELOCALIZE:{msg}")
-                return
-            self._emit(
-                "RELOCALIZE:%s pose=[%.3f,%.3f,%.3f]"
-                % (self._task_map_name or "-", float(x), float(y), float(yaw))
+        if verb == "relocalize":
+            self._emit("CMD_REJECT:RELOCALIZE_USE_SLAM_WORKFLOW")
+            rospy.logwarn_throttle(
+                30.0,
+                "[TASK] relocalize command removed from task manager; use SLAM workflow relocalize instead",
             )
             return
 
@@ -3890,11 +5345,11 @@ class TaskManager:
         self._publish_state(self._dock_public_state(manual))
         if self.dock_two_stage_enable:
             x, y, yaw = self.dock_stage1_xyyaw
-            self._emit(f"DOCK_STAGE1:manual={manual} goal=({x:.2f},{y:.2f},{yaw:.2f})")
+            self._emit_dock_stage1_goal_event(manual=manual, x=x, y=y, yaw=yaw)
             self.nav.send_goal(self._dock_stage1_pose())
         else:
             x, y, yaw = self.dock_xyyaw
-            self._emit(f"DOCKING:manual={manual} goal=({x:.2f},{y:.2f},{yaw:.2f})")
+            self._emit_dock_goal_event(manual=manual, x=x, y=y, yaw=yaw)
             self.nav.send_goal(self._dock_pose())
         return True
 
@@ -3939,10 +5394,10 @@ class TaskManager:
                 self._dock_supply_state_ts = time.time()
                 self._emit("SUPPLY_START")
                 return True
-            self._emit(f"SUPPLY_START_FAILED:{getattr(resp,'message','')}")
+            self._emit_supply_command_failure("START", str(getattr(resp, "message", "") or ""))
             return False
         except Exception as e:
-            self._emit(f"SUPPLY_START_EX:{e}")
+            self._emit_supply_command_failure("START", str(e))
             return False
 
     def _dock_supply_cancel(self):
@@ -4007,11 +5462,11 @@ class TaskManager:
             if not self._dock_supply_request_exit():
                 self._dock_supply_exit_inflight = False
                 return False
-            self._emit("UNDOCKING:dock_supply_exit")
+            self._emit_undock_exit_requested()
             return True
 
         pose, xyyaw = self._undock_pose()
-        self._emit(f"UNDOCKING:goal=({xyyaw[0]:.2f},{xyyaw[1]:.2f},{xyyaw[2]:.2f})")
+        self._emit_undock_goal_event(xyyaw[0], xyyaw[1], xyyaw[2])
         self.nav.send_goal(pose)
         return True
 
@@ -4027,7 +5482,11 @@ class TaskManager:
             self._undock_nav_started_ts = time.time()
             self._publish_state(self._phase)
             if not self._dock_supply_request_exit():
-                self._enter_charge_fault("ERROR_UNDOCK_PREP", reason="dock_supply_exit_start_failed", manual=True)
+                self._enter_charge_fault(
+                    "ERROR_UNDOCK_PREP",
+                    reason=self._supply_reason("exit_start_failed"),
+                    manual=True,
+                )
                 return False
             return True
 
@@ -4039,7 +5498,11 @@ class TaskManager:
                 return st in ["IDLE", "DONE", "FAILED", "CANCELED"]
 
             if not self._wait(10.0, _supply_quiesced, sleep_s=0.1):
-                self._enter_charge_fault("ERROR_UNDOCK_PREP", reason="dock_supply_cancel_timeout", manual=(not self._active_run_id))
+                self._enter_charge_fault(
+                    "ERROR_UNDOCK_PREP",
+                    reason=self._supply_reason("cancel_timeout"),
+                    manual=(not self._active_run_id),
+                )
                 return False
 
         self._clear_charge_monitor()
@@ -4047,7 +5510,7 @@ class TaskManager:
         self._undock_nav_started_ts = time.time()
         self._publish_state(self._phase)
         pose, xyyaw = self._undock_pose()
-        self._emit(f"UNDOCKING:goal=({xyyaw[0]:.2f},{xyyaw[1]:.2f},{xyyaw[2]:.2f})")
+        self._emit_undock_goal_event(xyyaw[0], xyyaw[1], xyyaw[2])
         self.nav.send_goal(pose)
         return True
 
@@ -4066,12 +5529,12 @@ class TaskManager:
             # re-arm hysteresis
             if (not self._armed) and _soc_reached_threshold(soc, self.rearm_soc):
                 self._armed = True
-                self._emit(f"REARM:soc={soc:.3f}")
+                self._emit_battery_rearmed_event(soc)
 
             # Auto trigger dock
             if self._phase == "IDLE" and soc is not None and fresh and self._should_trigger_auto_charge(soc):
                 self._armed = False
-                self._emit(f"LOW_BATTERY:soc={soc:.3f}")
+                self._emit_battery_low_event(soc)
                 self._start_dock_sequence(manual=False)
 
             # Docking done?
@@ -4088,7 +5551,7 @@ class TaskManager:
                 if active_nav.done():
                     if active_nav.succeeded():
                         if self._is_stage1_docking_phase():
-                            self._emit("DOCK_STAGE1_OK")
+                            self._emit_dock_stage1_succeeded()
                             self._start_dock_stage2(manual=self._phase.startswith("MANUAL"))
                         else:
                             self._begin_supply_or_charge_after_dock(
@@ -4099,7 +5562,7 @@ class TaskManager:
                     else:
                         state = active_nav.get_state()
                         stage_reason = "predock_stage2_nav_failed" if self._is_stage2_docking_phase() else "predock_stage1_nav_failed"
-                        self._emit(f"DOCK_FAILED:stage={stage_reason} mbf_state={state}")
+                        self._emit_dock_nav_failed(stage=stage_reason, nav_state=state)
                         self._enter_charge_fault(
                             "ERROR_DOCK",
                             reason=f"{stage_reason}:{state}",
@@ -4107,217 +5570,16 @@ class TaskManager:
                         )
 
             # Fine-dock + supply + charge manager done?
-            if self._is_dock_supply_owner_phase():
-                st = str(self._dock_supply_state or "").upper()
-                manual = (self._phase == "MANUAL_SUPPLY")
-                if self._is_recoverable_dock_supply_failure(st):
-                    if self._retry_dock_from_stage1(manual=manual, reason=st.lower()):
-                        continue
-                    self._emit(f"SUPPLY_{st}")
-                    self._enter_charge_fault(
-                        "ERROR_DOCK",
-                        reason=f"dock_supply_{st.lower()}",
-                        manual=(not self._active_run_id),
-                    )
-                elif st == "READY_TO_EXIT":
-                    repeat_enabled = self._repeat_after_charge_enabled()
-                    self._emit(
-                        f"SUPPLY_READY_TO_EXIT:{self._repeat_cycle_context()} "
-                        f"repeat_enabled={int(bool(repeat_enabled))}"
-                    )
-                    rospy.loginfo(
-                        "[TASK] dock supply ready_to_exit repeat_enabled=%s %s",
-                        str(bool(repeat_enabled)).lower(),
-                        self._repeat_cycle_context(),
-                    )
-                    if self._phase == "AUTO_SUPPLY":
-                        if repeat_enabled:
-                            self._emit(f"AUTO_RELOCALIZING_ARMED:{self._repeat_cycle_context()}")
-                            rospy.loginfo("[TASK] auto relocalizing armed %s", self._repeat_cycle_context())
-                            self._phase = "AUTO_RELOCALIZING"
-                            self._publish_state("AUTO_RELOCALIZING")
-                        else:
-                            if not self._transition_to_undocking(manual=False):
-                                self._enter_charge_fault(
-                                    "ERROR_UNDOCK_PREP",
-                                    reason="dock_supply_exit_start_failed",
-                                    manual=False,
-                                )
-                    else:
-                        self._reset_dock_retry_state()
-                        self._phase = "IDLE"
-                        self._publish_state(self._manual_sequence_idle_public_state())
-                elif st == "DONE":
-                    self._emit("SUPPLY_DONE")
-                    if self._phase == "AUTO_SUPPLY":
-                        if self._repeat_after_charge_enabled():
-                            self._enter_blocking_fault(
-                                "ERROR_RELOCALIZE_REQUIRED",
-                                "dock supply exited before relocalization",
-                            )
-                        elif self._active_run_id:
-                            self._phase = "AUTO_RESUMING"
-                            self._publish_state("AUTO_RESUMING")
-                            self._push_task_intent_to_executor()
-                            self._send_exec_cmd(f"resume run={self._active_run_id}")
-                        else:
-                            self._phase = "IDLE"
-                            self._publish_state("IDLE")
-                    else:
-                        self._reset_dock_retry_state()
-                        self._phase = "IDLE"
-                        self._publish_state(self._manual_sequence_idle_public_state())
-                elif st.startswith("FAILED") or st == "CANCELED":
-                    self._emit(f"SUPPLY_{st}")
-                    self._enter_charge_fault(
-                        "ERROR_SUPPLY_FAILED" if st.startswith("FAILED") else f"ERROR_SUPPLY_{st}",
-                        reason=f"dock_supply_{st.lower()}",
-                        manual=(not self._active_run_id),
-                    )
+            if self._handle_dock_supply_phase():
+                continue
 
-            if self._phase == "AUTO_RELOCALIZING":
-                self._emit(f"AUTO_RELOCALIZING_START:{self._repeat_cycle_context()}")
-                rospy.loginfo("[TASK] auto relocalizing start %s", self._repeat_cycle_context())
-                ok, msg = self._restart_localization_for_task()
-                if not ok:
-                    self._emit(f"AUTO_RELOCALIZING_FAILED:{msg}")
-                    rospy.logerr("[TASK] auto relocalizing failed %s err=%s", self._repeat_cycle_context(), str(msg))
-                    self._enter_blocking_fault("ERROR_RELOCALIZE_FAILED", msg)
-                else:
-                    self._emit(f"AUTO_RELOCALIZING_OK:{self._repeat_cycle_context()} message={msg}")
-                    rospy.loginfo("[TASK] auto relocalizing ok %s message=%s", self._repeat_cycle_context(), str(msg))
-                    ok, clear_msg = self._clear_costmaps()
-                    if not ok:
-                        self._emit(f"AUTO_RELOCALIZING_CLEAR_COSTMAPS_FAILED:{clear_msg}")
-                        self._enter_blocking_fault("ERROR_CLEAR_COSTMAPS", clear_msg)
-                    elif not self._transition_to_undocking(manual=False):
-                        self._emit("AUTO_RELOCALIZING_UNDOCK_PREP_FAILED")
-                        self._enter_blocking_fault(
-                            "ERROR_UNDOCK_PREP",
-                            "dock_supply_exit_start_failed_after_relocalize",
-                        )
-                    else:
-                        self._emit(f"AUTO_RELOCALIZING_TO_UNDOCK:{self._repeat_cycle_context()}")
-                        rospy.loginfo("[TASK] auto relocalizing -> undock %s", self._repeat_cycle_context())
+            self._handle_auto_repeat_recovery_phase()
 
             # Charging -> undock
-            if self._is_task_side_charge_phase():
-                now = time.time()
-                if fresh and soc is not None:
-                    if self._charge_last_soc is None or float(soc) > float(self._charge_last_soc) + 1e-3:
-                        self._charge_last_soc = float(soc)
-                        self._charge_last_fresh_ts = now
-                    elif self._charge_last_fresh_ts <= 0.0:
-                        self._charge_last_fresh_ts = now
-
-                if self.charge_timeout_s > 1e-3 and self._charge_started_ts > 0.0 and (now - self._charge_started_ts) >= self.charge_timeout_s:
-                    self._enter_charge_fault(
-                        "ERROR_CHARGE_TIMEOUT",
-                        reason="charge_timeout",
-                        manual=(not self._active_run_id),
-                    )
-                elif (not fresh) and self.charge_battery_stale_timeout_s > 1e-3 and self._charge_started_ts > 0.0 and (
-                    now - (self._charge_last_fresh_ts if self._charge_last_fresh_ts > 0.0 else self._charge_started_ts)
-                ) >= self.charge_battery_stale_timeout_s:
-                    self._enter_charge_fault(
-                        "ERROR_CHARGE_BATTERY_STALE",
-                        reason="battery_stale_during_charge",
-                        manual=(not self._active_run_id),
-                    )
-                elif fresh and _soc_reached_threshold(soc, self.resume_soc):
-                    self._emit(f"CHARGED:soc={soc:.3f}")
-                    if self._phase == "AUTO_CHARGING":
-                        self._transition_to_undocking(manual=False)
-                    else:
-                        self._clear_charge_monitor()
-                        self._phase = "IDLE"
-                        self._publish_state(self._manual_sequence_idle_public_state())
+            self._handle_task_side_charge_phase(soc=soc, fresh=fresh)
 
             # Undocking -> resume
-            if self._phase in ["AUTO_UNDOCKING", "MANUAL_UNDOCKING"]:
-                if self._dock_sequence_timed_out(self._undock_nav_started_ts):
-                    if self._dock_supply_managed_undocking():
-                        self._dock_supply_cancel()
-                    else:
-                        self.nav.cancel_all()
-                    self._enter_charge_fault(
-                        "ERROR_UNDOCK_TIMEOUT",
-                        reason="undock_timeout",
-                        manual=(not self._active_run_id),
-                    )
-                if self._dock_supply_managed_undocking():
-                    st = str(self._dock_supply_state or "").upper()
-                    if st == "READY_TO_EXIT" and (not self._dock_supply_exit_inflight):
-                        if not self._dock_supply_request_exit():
-                            self._enter_charge_fault(
-                                "ERROR_UNDOCK_PREP",
-                                reason="dock_supply_exit_restart_failed",
-                                manual=(not self._active_run_id),
-                            )
-                    elif st == "DONE":
-                        self._emit("UNDOCK_OK")
-                        self._undock_nav_started_ts = 0.0
-                        self._dock_supply_exit_inflight = False
-                        if self._phase == "AUTO_UNDOCKING":
-                            if self._active_run_id:
-                                self._phase = "AUTO_RESUMING"
-                                self._publish_state("AUTO_RESUMING")
-                                self._push_task_intent_to_executor()
-                                self._send_exec_cmd(f"resume run={self._active_run_id}")
-                            elif self._repeat_after_charge_enabled():
-                                self._emit(f"AUTO_REDISPATCHING_ARMED:{self._repeat_cycle_context()}")
-                                rospy.loginfo("[TASK] auto redispatching armed %s", self._repeat_cycle_context())
-                                self._phase = "AUTO_REDISPATCHING"
-                                self._publish_state("AUTO_REDISPATCHING")
-                            else:
-                                self._phase = "IDLE"
-                                self._publish_state("IDLE")
-                        else:
-                            self._phase = "IDLE"
-                            self._publish_state(self._manual_sequence_idle_public_state())
-                    elif st.startswith("FAILED") or st == "CANCELED":
-                        self._emit(f"UNDOCK_{st}")
-                        self._enter_charge_fault(
-                            "ERROR_UNDOCK",
-                            reason=f"dock_supply_{st.lower()}",
-                            manual=(not self._active_run_id),
-                        )
-                elif self.nav.done():
-                    if self.nav.succeeded():
-                        self._emit("UNDOCK_OK")
-                        self._undock_nav_started_ts = 0.0
-                        if self._phase == "AUTO_UNDOCKING":
-                            self._phase = "AUTO_RESUMING"
-                            self._publish_state("AUTO_RESUMING")
-                            self._push_task_intent_to_executor()
-                            if self._active_run_id:
-                                self._send_exec_cmd(f"resume run={self._active_run_id}")
-                            else:
-                                self._send_exec_cmd(f"resume {self._active_zone}")
-                        else:
-                            self._phase = "IDLE"
-                            self._publish_state(self._manual_sequence_idle_public_state())
-                    else:
-                        self._emit(f"UNDOCK_FAILED:mbf_state={self.nav.get_state()}")
-                        self._enter_charge_fault(
-                            "ERROR_UNDOCK",
-                            reason=f"undock_nav_failed:{self.nav.get_state()}",
-                            manual=(not self._active_run_id),
-                        )
-
-            if self._phase == "AUTO_REDISPATCHING":
-                rospy.loginfo("[TASK] auto redispatching start %s", self._repeat_cycle_context())
-                ok, msg = self._redispatch_current_task_template()
-                if not ok:
-                    self._enter_blocking_fault("ERROR_REDISPATCH", msg)
-
-            # Resuming -> back to running monitor
-            if self._phase == "AUTO_RESUMING":
-                st = self._get_exec_state()
-                if st.startswith("CONNECT") or st.startswith("FOLLOW"):
-                    self._emit(f"RESUMED:{st}")
-                    self._phase = "IDLE"
-                    self._publish_state("RUNNING")
+            self._handle_undocking_phase()
 
             if self._phase == "IDLE":
                 try:

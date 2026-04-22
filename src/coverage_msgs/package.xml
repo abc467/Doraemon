@@ -2,7 +2,11 @@
 <package format="2">
   <name>coverage_msgs</name>
   <version>0.1.0</version>
-  <description>Messages and actions for commercial coverage cleaning robot planning/execution.</description>
+  <description>
+    Internal coverage-domain message/action package for commercial cleaning workflow.
+    This package owns planning/execution progress, task-state and map-constraint interfaces
+    used inside the coverage planner/executor/task-manager stack.
+  </description>
 
   <maintainer email="dev@yourcompany.com">dev</maintainer>
   <license>Proprietary</license>

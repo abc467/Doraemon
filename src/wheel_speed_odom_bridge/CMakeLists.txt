@@ -51,9 +51,3 @@ target_link_libraries(receiver_cmd_vel_node
 target_link_libraries(ekf_covariance_override_node
   ${catkin_LIBRARIES}
 )
-
-catkin_install_python(PROGRAMS
-  scripts/cmd_vel_angular_step_sequence.py
-  scripts/cmd_vel_linear_single_speed.py
-  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)

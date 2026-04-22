@@ -11,7 +11,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_ros
   tf2_geometry_msgs
   mbf_msgs
-  my_msg_srv
+  robot_platform_msgs
   coverage_msgs
   coverage_planner
 )
@@ -32,3 +32,7 @@ install(DIRECTORY launch
 install(DIRECTORY config
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test)
+endif()

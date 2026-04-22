@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>robot_runtime_flags</name>
+  <version>0.1.0</version>
+  <description>
+    Low-level runtime flag bus for SLAM/localization orchestration.
+    This package now owns only the runtime_flag_server implementation.
+    ROS interfaces for the runtime flag bus live in robot_runtime_flags_msgs.
+  </description>
+
+  <maintainer email="dev@yourcompany.com">dev</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>roscpp</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>robot_runtime_flags_msgs</build_depend>
+
+  <build_export_depend>roscpp</build_export_depend>
+  <build_export_depend>rospy</build_export_depend>
+  <build_export_depend>std_msgs</build_export_depend>
+  <build_export_depend>robot_runtime_flags_msgs</build_export_depend>
+
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>robot_runtime_flags_msgs</exec_depend>
+
+  <export>
+  </export>
+</package>

@@ -88,7 +88,7 @@ def build_cells_from_regions(regions: List[dict]) -> f2c.Cells:
 
 
 # =========================
-# Build robot from spec (binding compatible)
+# Build robot from spec for the current binding shape
 # =========================
 def build_robot(cov_width: float, width: float, R: float, max_diff_curv: float):
     robot = None

@@ -1,0 +1,55 @@
+<launch>
+  <arg name="mbf_nav_yaml" default="$(find cleanrobot)/config/nav/mbf_nav.yaml"/>
+  <arg name="mbf_timing_yaml" default="$(find cleanrobot)/config/nav/mbf_timing.yaml"/>
+  <arg name="costmap_common_yaml" default="$(find cleanrobot)/config/nav/costmap_common.yaml"/>
+  <arg name="global_costmap_yaml" default="$(find cleanrobot)/config/nav/global_costmap.yaml"/>
+  <arg name="local_costmap_yaml" default="$(find cleanrobot)/config/nav/local_costmap.yaml"/>
+  <arg name="enable_depth_obstacle_tracking" default="true"/>
+  <arg name="enable_depth_left_cam" default="true"/>
+  <arg name="enable_depth_right_cam" default="true"/>
+  <arg name="enable_depth_up_cam" default="true"/>
+  <arg name="depth_left_points_topic" default="/gemini_cf/depth/points"/>
+  <arg name="depth_right_points_topic" default="/gemini_nj/depth/points"/>
+  <arg name="depth_left_obstacle_topic" default="obstacle_2d"/>
+  <arg name="depth_right_obstacle_topic" default="obstacle_2d"/>
+  <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
+  <arg name="maps_root" default="/data/maps"/>
+  <arg name="external_maps_root" default="/data/maps/imports"/>
+  <arg name="robot_id" default="local_robot"/>
+  <arg name="map_name" default=""/>
+  <arg name="start_map_asset_service" default="false"/>
+
+  <node pkg="mbf_costmap_nav" type="mbf_costmap_nav" name="move_base_flex" output="screen" clear_params="true">
+    <rosparam command="load" file="$(arg mbf_nav_yaml)"/>
+    <rosparam command="load" file="$(arg mbf_timing_yaml)"/>
+    <rosparam command="load" file="$(arg costmap_common_yaml)" ns="global_costmap"/>
+    <rosparam command="load" file="$(arg costmap_common_yaml)" ns="local_costmap"/>
+    <rosparam command="load" file="$(arg global_costmap_yaml)"/>
+    <rosparam command="load" file="$(arg local_costmap_yaml)"/>
+    <param name="global_costmap/obstacle_layer/left_cam_source/topic" value="/left/$(arg depth_left_obstacle_topic)"/>
+    <param name="global_costmap/obstacle_layer/right_cam_source/topic" value="/right/$(arg depth_right_obstacle_topic)"/>
+    <param name="local_costmap/obstacle_layer/left_cam_source/topic" value="/left/$(arg depth_left_obstacle_topic)"/>
+    <param name="local_costmap/obstacle_layer/right_cam_source/topic" value="/right/$(arg depth_right_obstacle_topic)"/>
+  </node>
+
+  <node pkg="coverage_planner" type="map_constraints_node.py" name="map_constraints" output="screen">
+    <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="map_topic" value="/map"/>
+    <param name="frame_id" value="map"/>
+    <param name="constraints_topic" value="/map_constraints/current"/>
+    <param name="publish_markers" value="true"/>
+  </node>
+
+  <group if="$(arg enable_depth_obstacle_tracking)">
+    <include file="$(find ground_segmentation_tracking)/launch/duoxiangji.launch">
+      <arg name="enable_cam1" value="$(arg enable_depth_left_cam)"/>
+      <arg name="enable_cam2" value="$(arg enable_depth_right_cam)"/>
+      <arg name="enable_cam3" value="$(arg enable_depth_up_cam)"/>
+      <arg name="cam1_input_topic" value="$(arg depth_left_points_topic)"/>
+      <arg name="cam2_input_topic" value="$(arg depth_right_points_topic)"/>
+      <arg name="cam1_output_topic" value="$(arg depth_left_obstacle_topic)"/>
+      <arg name="cam2_output_topic" value="$(arg depth_right_obstacle_topic)"/>
+    </include>
+  </group>
+</launch>

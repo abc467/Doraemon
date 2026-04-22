@@ -1,21 +1,47 @@
+# 执行机构参数配置
+# 说明：
+# - standard / heavy / eco：三套执行机构档位
+# - water_pump_pwm：清水泵 PWM，范围通常为 0-100
+# - suction_machine_pwm：吸水机力度，范围通常为 0-100
+# - vacuum_motor_pwm：真空电机力度，范围通常为 0-100
+# - height_scrub：预留的刷盘高度参数，当前协议里主要作为配置记录，不一定直接下发到底盘
+# - height_scrub_active：是否启用刷盘高度参数，当前通常保持 false
 actuator_profiles:
+  # 标准清扫档：常规日常清洁
   standard:
-    water_pump_pwm: 28
-    suction_machine_pwm: 50
-    vacuum_motor_pwm: 50
-    height_scrub: 44
+    # 清水泵力度
+    water_pump_pwm: 15
+    # 吸水机力度
+    suction_machine_pwm: 70
+    # 真空电机力度
+    vacuum_motor_pwm: 70
+    # 刷盘高度参数（预留）
+    height_scrub: 10
+    # 是否启用刷盘高度控制
     height_scrub_active: false
 
+  # 强力清扫档：出水更大，适合较脏区域
   heavy:
+    # 清水泵力度
     water_pump_pwm: 40
+    # 吸水机力度
     suction_machine_pwm: 50
+    # 真空电机力度
     vacuum_motor_pwm: 50
+    # 刷盘高度参数（预留）
     height_scrub: 42
+    # 是否启用刷盘高度控制
     height_scrub_active: false
 
+  # 节能档：关闭出水和吸风，适合空载或测试
   eco:
-    water_pump_pwm: 18
-    suction_machine_pwm: 24
-    vacuum_motor_pwm: 24
-    height_scrub: 34
+    # 清水泵力度
+    water_pump_pwm: 00
+    # 吸水机力度
+    suction_machine_pwm: 00
+    # 真空电机力度
+    vacuum_motor_pwm: 00
+    # 刷盘高度参数（预留）
+    height_scrub: 05
+    # 是否启用刷盘高度控制
     height_scrub_active: false

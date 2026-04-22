@@ -1,0 +1,27 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+int8 ENABLE_KEEP = 0
+int8 ENABLE_DISABLE = 1
+int8 ENABLE_ENABLE = 2
+
+uint8 operation # get; add; modify; Delete(soft-disable); getAll
+string map_name
+PgmData map
+bool set_active
+int8 enabled_state # 0: 保持不变 1: 禁用 2: 启用
+
+---
+
+bool success
+string message
+PgmData map
+PgmData[] maps # getAll: one display view per map_name; get: default returns active revision when same-name head differs
+
+# add: 纳管工作空间 map 目录中的 <map_name>.pbstream 到正式资产库，可选设为当前地图
+# modify: 更新资产元数据（description/enabled），可选 set_active
+# Delete: 软删除/禁用 map_name，不删除磁盘文件
+# get: 按 map_name / map_revision_id 查询；若同名 head 与 active 不同且未显式指定 revision，默认返回 active revision 视图
+# getAll: 返回所有已纳管地图的展示视图，并通过 latest_head_* 字段暴露最新 head revision 信息

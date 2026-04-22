@@ -1,0 +1,4 @@
+default_mapping_profile: slam
+default_localization_profile: pure_location_odom
+default_landmark_profile: landmark_719
+default_relocalization_profile: global_relocation

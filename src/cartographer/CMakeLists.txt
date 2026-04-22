@@ -35,7 +35,7 @@ google_enable_testing()
 
 find_package(FLIRT REQUIRED)
 
-find_package(SML REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 find_package(absl REQUIRED)
 set(BOOST_COMPONENTS iostreams)
@@ -68,12 +68,6 @@ if (NOT WIN32)
   PKG_SEARCH_MODULE(CAIRO REQUIRED cairo>=1.12.16)
 else()
   find_library(CAIRO_LIBRARIES cairo)
-endif()
-
-# Only build the documentation if we can find Sphinx.
-find_package(Sphinx)
-if(SPHINX_FOUND)
-  add_subdirectory("docs")
 endif()
 
 # Install catkin package.xml
@@ -236,9 +230,8 @@ endif()
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${FLIRT_INCLUDE_DIR})
 target_link_libraries(${PROJECT_NAME} PUBLIC ${FLIRT_LIBRARY})
 
-# SML
-target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${SML_INCLUDE_DIR})
-target_link_libraries(${PROJECT_NAME} PUBLIC ${SML_LIBRARY})
+# YAML-CPP
+target_link_libraries(${PROJECT_NAME} PUBLIC ${YAML_CPP_LIBRARIES})
 
 
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC

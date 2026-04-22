@@ -1,14 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <launch>
-   <!-- urdf model -->
-   <!-- <include file="$(find cleanrobot)/launch/display.launch"/>		 -->
-   <include file="$(find clean_robot_urdf)/launch/display.launch"/>
+   <arg name="start_depth_cameras" default="true"/>
+   <include file="$(find cleanrobot_description)/launch/robot_state_only.launch"/>
    <include file="$(find vanjee_lidar_sdk)/launch/start.launch"/>
-   <!-- scan -->
    <include file="$(find fdilink_ahrs)/launch/ahrs_data.launch"/>
-   <!-- imu_data -->
-   <include file="$(find cleanrobot)/launch/sensors.launch"/>
-   <!-- camera -->
-   <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find cleanrobot)/config/cleanrobot.rviz"/> -->
+   <group if="$(arg start_depth_cameras)">
+      <include file="$(find cleanrobot)/launch/orbbec_dual_depth_ground.launch"/>
+   </group>
 </launch>
-

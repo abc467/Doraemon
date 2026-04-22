@@ -14,6 +14,7 @@ class MissionRun:
     run_id: str
     job_id: str
     map_name: str
+    map_revision_id: str
     zone_id: str
     plan_profile_name: str
     constraint_version: str
@@ -41,6 +42,7 @@ def _convert_run(row: MissionRunRecord) -> MissionRun:
         run_id=str(row.run_id or ""),
         job_id=str(row.job_id or ""),
         map_name=str(row.map_name or ""),
+        map_revision_id=str(row.map_revision_id or ""),
         zone_id=str(row.zone_id or ""),
         plan_profile_name=str(row.plan_profile_name or ""),
         constraint_version=str(row.constraint_version or ""),
@@ -83,6 +85,7 @@ class MissionStore:
         loop_index: int,
         loops_total: int,
         map_name: str = "",
+        map_revision_id: str = "",
         state: str = "RUNNING",
         reason: str = "",
         start_ts: Optional[float] = None,
@@ -99,6 +102,7 @@ class MissionStore:
             run_id=str(run_id or ""),
             job_id=str(job_id or ""),
             map_name=str(map_name or ""),
+            map_revision_id=str(map_revision_id or ""),
             zone_id=str(zone_id or ""),
             plan_profile_name=str(plan_profile_name or ""),
             plan_id=str(plan_id or ""),

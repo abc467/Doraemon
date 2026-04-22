@@ -1,10 +1,10 @@
 <launch>
   <arg name="enable_cam1"          default="true"/>
   <arg name="enable_cam2"          default="true"/>
-  <arg name="enable_cam3"          default="true"/>
+  <arg name="enable_cam3"          default="false"/>
 
   <arg name="cam1_ns"            default="left"/>
-  <arg name="cam1_input_topic"   default="/cam_1/depth/color/points"/>
+  <arg name="cam1_input_topic"   default="/gemini_cf/depth/points"/>
   <arg name="cam1_output_topic"  default="obstacle_2d"/>
   <arg name="cam1_target_frame"  default="base_link"/>
   <arg name="cam1_queue_size"    default="5"/>
@@ -35,7 +35,7 @@
   <arg name="std_mul" default="1.0"/>
   <arg name="plane_alpha" default="0.05"/>
   <arg name="dist_lo" default="0.04"/>
-  <arg name="dist_hi" default="0.08"/>
+  <arg name="dist_hi" default="0.15"/>
   <arg name="self_filter_enabled" default="true"/>
   <arg name="self_x_min" default="-0.65"/>
   <arg name="self_x_max" default="0.65"/>
@@ -43,12 +43,12 @@
   <arg name="self_y_max" default="0.55"/>
   <arg name="cluster_filter_enabled" default="true"/>
   <arg name="cluster_tolerance" default="0.10"/>
-  <arg name="min_cluster_size" default="12"/>
+  <arg name="min_cluster_size" default="18"/>
   <arg name="max_cluster_size" default="10000"/>
-  <arg name="min_obstacle_points" default="12"/>
+  <arg name="min_obstacle_points" default="18"/>
 
   <arg name="cam2_ns"            default="right"/>
-  <arg name="cam2_input_topic"   default="/cam_2/depth/color/points"/>
+  <arg name="cam2_input_topic"   default="/gemini_nj/depth/points"/>
   <arg name="cam2_output_topic"  default="obstacle_2d"/>
   <arg name="cam2_target_frame"  default="base_link"/>
   <arg name="cam2_queue_size"    default="5"/>

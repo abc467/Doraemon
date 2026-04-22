@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>robot_platform_msgs</name>
+  <version>0.1.0</version>
+  <description>
+    Interface package for robot platform, station, and actuator status/control messages.
+    This package is the canonical long-term home for platform-side ROS messages.
+  </description>
+
+  <maintainer email="dev@company.com">dev</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>message_generation</build_depend>
+
+  <build_export_depend>message_generation</build_export_depend>
+
+  <exec_depend>message_runtime</exec_depend>
+
+  <export>
+  </export>
+</package>

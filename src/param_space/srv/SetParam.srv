@@ -1,5 +1,0 @@
-string[] keys
-string[] vals
----
-int32 opcode
-string msg

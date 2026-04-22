@@ -1,6 +1,10 @@
 <launch>
-  <arg name="config_root" default="$(find cleanrobot)/config/cartographer"/>
-  <arg name="landmark_param_yaml" default="$(find cleanrobot)/config/cartographer/landmark_719.yaml"/>
+  <!-- Source-workspace legacy manual entry only.
+       Excluded from formal install artifacts.
+       Formal bringup now uses coverage_planner/planner_server.launch ->
+       slam_runtime_manager as the runtime owner. -->
+  <arg name="config_root" default=""/>
+  <arg name="landmark_param_yaml" default=""/>
   <arg name="runtime_ns" default="/cartographer/runtime"/>
   <arg name="map_topic" default="/map"/>
   <arg name="resolution" default="0.05"/>
@@ -8,14 +12,14 @@
   <arg name="map_name" default=""/>
   <arg name="pbstream_path" default=""/>
   <arg name="auto_start" default="false"/>
-  <arg name="start_param_space" default="true"/>
+  <arg name="start_runtime_flag_bus" default="true"/>
   <arg name="cartographer_node_bin" default=""/>
   <arg name="occupancy_grid_node_bin" default=""/>
 
-  <node if="$(arg start_param_space)"
-        pkg="param_space"
-        type="param_space_node"
-        name="param_space_node"
+  <node if="$(arg start_runtime_flag_bus)"
+        pkg="robot_runtime_flags"
+        type="runtime_flag_server_node"
+        name="runtime_flag_server"
         output="screen"
         respawn="true"
         respawn_delay="2.0"/>

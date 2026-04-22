@@ -1,0 +1,8 @@
+string job_id
+string robot_id
+
+---
+bool found
+string message
+string error_code
+SlamJobState job

@@ -1,0 +1,16 @@
+string map_name
+string map_revision_id
+string description
+bool enabled
+string map_id
+string map_md5
+string lifecycle_status
+string verification_status
+bool is_active
+bool is_latest_head
+bool has_newer_head_revision
+string active_revision_id
+string latest_head_revision_id
+string latest_head_lifecycle_status
+string latest_head_verification_status
+nav_msgs/OccupancyGrid map_data  # 地图详情查询时返回；列表接口可留空

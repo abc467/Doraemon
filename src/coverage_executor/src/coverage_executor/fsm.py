@@ -24,7 +24,12 @@ from .sys_profile_catalog import SysProfileCatalog
 from .debug_bus import DebugBus
 from .ros_utils import make_pose, make_path
 
-from .map_identity import ensure_map_identity, get_runtime_map_identity, get_runtime_map_scope
+from .map_identity import (
+    ensure_map_identity,
+    get_runtime_map_identity,
+    get_runtime_map_revision_id,
+    get_runtime_map_scope,
+)
 from .run_event_store import RunEventStore
 from coverage_planner.ops_store.store import MissionCheckpointRecord, OperationsStore
 
@@ -72,7 +77,7 @@ class ExecutorFSM:
         default_clean_mode: str = "scrub",
         mode_profiles: Optional[dict] = None,
 
-        # compat / launch params
+        # runtime defaults injected from launch params
         vacuum_delay_s: float = 1.5,
         keep_cleaning_on_during_connect: bool = True,
 
@@ -84,7 +89,7 @@ class ExecutorFSM:
         resume_backtrack_m: float = 0.5,
         resume_accept_dist: float = 1.0,
         resume_finish_thresh_m: float = 0.3,
-        water_off_distance: float = 0.5,
+        water_off_distance: float = 2.0,
 
         # 防止“向前跳进度”导致漏扫（仅在 need_connect=False 时允许小幅前进）
         resume_forward_allow_m: float = 0.3,
@@ -96,8 +101,6 @@ class ExecutorFSM:
 
         # 执行一致性检查：zone/map 更新后，旧 plan/旧 checkpoint 不允许继续执行
         strict_zone_version_check: bool = True,
-        # True: resume 时若 ckpt.plan_id != 当前加载 plan_id，则直接报错而不是 fallback start
-        strict_resume_plan_id_check: bool = True,
 
         # 执行一致性检查：map identity (map_id/map_md5)
         strict_map_check: bool = True,
@@ -167,7 +170,6 @@ class ExecutorFSM:
 
         # consistency policies
         self.strict_zone_version_check = bool(strict_zone_version_check)
-        self.strict_resume_plan_id_check = bool(strict_resume_plan_id_check)
 
         # map identity policies
         self.strict_map_check = bool(strict_map_check)
@@ -187,7 +189,6 @@ class ExecutorFSM:
         # Task intent overrides (from Task layer / TaskManager / String cmd)
         # - plan_profile: choose which plan to execute (lookup in DB)
         # - sys_profile:  choose which actuator/controller params to use (heavy/standard/eco)
-        # NOTE: legacy "profile" maps to both when sys_profile not provided.
         self._plan_profile_override: str = self._default_plan_profile_name
         self._sys_profile_override: str = self._default_sys_profile_name
         self._clean_mode: str = self._default_clean_mode
@@ -287,6 +288,7 @@ class ExecutorFSM:
         # plan/runtime
         self._plan: Optional[LoadedPlan] = None
         self._runtime_map_name: str = ""
+        self._runtime_map_revision_id: str = ""
         self._runtime_map_id: str = ""
         self._runtime_map_md5: str = ""
 
@@ -410,7 +412,7 @@ class ExecutorFSM:
             msg.zone_id = str(getattr(self, "_zone_id", "") or "")
             msg.plan_id = ""
             msg.state = str(getattr(self, "_state", "") or "")
-            msg.plan_profile = str(getattr(getattr(self, "_plan", None), "profile_name", "") or "")
+            msg.plan_profile = str(getattr(getattr(self, "_plan", None), "plan_profile_name", "") or "")
             msg.sys_profile = str((getattr(self, "_sys_profile_override", "") or "") or (getattr(self, "_plan_profile_override", "") or "") or (msg.plan_profile or ""))
             msg.mode = str(getattr(self, "_clean_mode", "") or "")
             msg.map_id = str(getattr(self, "_runtime_map_id", "") or "")
@@ -487,7 +489,7 @@ class ExecutorFSM:
                 state = str(self._state or "")
 
                 # intent snapshot (avoid nested lock calls)
-                plan_prof = str(getattr(plan, "profile_name", "") or "") if plan else ""
+                plan_prof = str(getattr(plan, "plan_profile_name", "") or "") if plan else ""
                 sys_ovr = str(self._sys_profile_override or "")
                 plan_ovr = str(self._plan_profile_override or "")
                 mode_ovr = str(self._clean_mode or "")
@@ -617,10 +619,6 @@ class ExecutorFSM:
             return
         self._apply_cmd(cmd)
 
-    # Backward-compatible alias (older code calls apply_cmd)
-    def apply_cmd(self, cmd: str):
-        self.enqueue_cmd(cmd)
-
     def publish_state_external(self, s: str):
         """Allow external manager to publish state on the same topic."""
         self._publish_state(s)
@@ -715,6 +713,10 @@ class ExecutorFSM:
     def get_state(self) -> str:
         with self._lock:
             return str(self._state)
+
+    def get_active_run_id(self) -> str:
+        with self._lock:
+            return str(self._run_id or "")
 
     def is_running(self) -> bool:
         with self._lock:
@@ -826,7 +828,7 @@ class ExecutorFSM:
 
     # ---------- task intent (profile/mode) ----------
     def _parse_kv_tokens(self, tokens) -> Dict[str, str]:
-        """Parse tokens like ['profile=xxx','mode=yyy'] into a dict."""
+        """Parse tokens like ['plan_profile=xxx', 'mode=yyy'] into a dict."""
         kv: Dict[str, str] = {}
         for t in tokens or []:
             if not t or "=" not in t:
@@ -840,34 +842,20 @@ class ExecutorFSM:
         return kv
 
     def _apply_intent_from_kv(self, kv: Dict[str, str]):
-        """Update plan/sys profile and clean_mode intent from kv tokens.
-
-        Supported tokens (case-insensitive):
-          - plan_profile=... / plan=...
-          - sys_profile=... / sys=... / act_profile=...
-          - profile=... (LEGACY): if sys_profile not provided, treat as both plan_profile + sys_profile
-          - mode=... / clean_mode=...
-        """
+        """Update plan/sys profile and clean_mode intent from canonical kv tokens."""
         if not kv:
             return
 
-        # legacy: profile affects both plan + sys when sys is not provided
-        legacy_profile = kv.get("profile") or kv.get("profile_name")
-        plan_prof = kv.get("plan_profile") or kv.get("plan") or kv.get("planner_profile")
-        sys_prof = kv.get("sys_profile") or kv.get("sys") or kv.get("system_profile") or kv.get("act_profile") or kv.get("clean_profile")
-        mode = kv.get("mode") or kv.get("clean_mode") or kv.get("cleaning_mode")
+        plan_prof = kv.get("plan_profile")
+        sys_prof = kv.get("sys_profile")
+        mode = kv.get("mode")
 
         with self._lock:
             if plan_prof is not None and str(plan_prof).strip():
                 self._plan_profile_override = str(plan_prof).strip()
-            elif legacy_profile is not None and str(legacy_profile).strip():
-                self._plan_profile_override = str(legacy_profile).strip()
 
             if sys_prof is not None and str(sys_prof).strip():
                 self._sys_profile_override = str(sys_prof).strip()
-            elif legacy_profile is not None and str(legacy_profile).strip():
-                # legacy behavior: profile also changes sys_profile
-                self._sys_profile_override = str(legacy_profile).strip()
 
             if mode is not None:
                 self._clean_mode = str(mode).strip()
@@ -877,8 +865,6 @@ class ExecutorFSM:
             prof_to_apply = ""
             if sys_prof is not None and str(sys_prof).strip():
                 prof_to_apply = str(sys_prof).strip()
-            elif legacy_profile is not None and str(legacy_profile).strip():
-                prof_to_apply = str(legacy_profile).strip()
 
             if prof_to_apply:
                 _sys_name, _controller_name, actuator_profile_name, default_mode = self._resolve_sys_profile_spec(prof_to_apply)
@@ -1045,7 +1031,10 @@ class ExecutorFSM:
 
 
     def _apply_cmd(self, cmd: str):
-        low = cmd.strip().lower()
+        parts = cmd.split()
+        if not parts:
+            return
+        verb = parts[0].strip().lower()
         self._emit(f"CMD:{cmd}")
         try:
             self._add_run_event(level="INFO", code="CMD", msg=str(cmd), data={})
@@ -1053,10 +1042,9 @@ class ExecutorFSM:
             pass
 
         # Task intent update (used by Task layer; keep String cmd interface)
-        # Task intent update (used by Task layer; keep String cmd interface)
 
         # Explicit: plan_profile only (affects plan selection; does NOT touch actuator)
-        if low.startswith("set_plan_profile"):
+        if verb == "set_plan_profile":
             parts = cmd.split(maxsplit=1)
             plan_prof = parts[1].strip() if len(parts) >= 2 else ""
             with self._lock:
@@ -1066,7 +1054,7 @@ class ExecutorFSM:
             return
 
         # Explicit: sys_profile only (selects MBF controller + actuator profile)
-        if low.startswith("set_sys_profile") or low.startswith("set_act_profile"):
+        if verb == "set_sys_profile":
             parts = cmd.split(maxsplit=1)
             sys_prof = parts[1].strip() if len(parts) >= 2 else ""
             with self._lock:
@@ -1079,22 +1067,7 @@ class ExecutorFSM:
             self._publish_state("SYS_PROFILE_SET")
             return
 
-        # Legacy alias: still accepted but resolves through sys_profile runtime mapping.
-        if low.startswith("set_profile"):
-            parts = cmd.split(maxsplit=1)
-            prof = parts[1].strip() if len(parts) >= 2 else ""
-            with self._lock:
-                self._plan_profile_override = prof
-                self._sys_profile_override = prof
-            rospy.loginfo("[EXEC] set_profile(legacy)=%s", prof)
-            try:
-                self._apply_sys_profile_runtime(prof, water_off_latched=self._water_off_latched)
-            except Exception:
-                pass
-            self._publish_state("PROFILE_SET")
-            return
-
-        if low.startswith("set_mode"):
+        if verb == "set_mode":
             parts = cmd.split(maxsplit=1)
             mode = parts[1].strip() if len(parts) >= 2 else ""
             with self._lock:
@@ -1108,16 +1081,17 @@ class ExecutorFSM:
             return
 
 
-        if low.startswith("start"):
-            parts = cmd.split()
-            zone = parts[1] if len(parts) >= 2 else None
-            # optional: start zone_id profile=xxx mode=yyy
-            kv = self._parse_kv_tokens(parts[2:])
+        if verb == "start":
+            kv = self._parse_kv_tokens(parts[1:])
+            zone = (kv.get("zone_id") or "").strip() if kv else ""
+            # canonical: start zone_id=... plan_profile=... sys_profile=... mode=... run_id=...
+            if not zone:
+                rospy.logwarn("[EXEC] start requires zone_id")
+                return
             self._apply_intent_from_kv(kv)
-            req_run = (kv.get("run") or kv.get("run_id") or "").strip() if kv else ""
+            req_run = (kv.get("run_id") or "").strip() if kv else ""
             with self._lock:
-                if zone:
-                    self._zone_id = zone
+                self._zone_id = zone
                 # always create/use a run_id for this execution
                 self._run_id = req_run or uuid.uuid4().hex
                 self._pause_req = False
@@ -1127,33 +1101,19 @@ class ExecutorFSM:
             self._start_thread(mode="start")
             return
 
-        if low.startswith("resume"):
-            parts = cmd.split()
-            zone = None
-            token_start = 2
-            if len(parts) >= 2:
-                # allow "resume run=<id>" without zone
-                if "=" in parts[1]:
-                    token_start = 1
-                else:
-                    zone = parts[1]
-                    token_start = 2
-            # optional tokens: profile=..., mode=..., run=...
-            kv = self._parse_kv_tokens(parts[token_start:])
+        if verb == "resume":
+            kv = self._parse_kv_tokens(parts[1:])
+            zone = (kv.get("zone_id") or "").strip() if kv else ""
+            # canonical: resume run_id=... [zone_id=...] [plan_profile=...] [sys_profile=...] [mode=...]
             self._apply_intent_from_kv(kv)
-            req_run = (kv.get("run") or kv.get("run_id") or "").strip() if kv else ""
+            req_run = (kv.get("run_id") or "").strip() if kv else ""
+            if not req_run:
+                rospy.logwarn("[EXEC] resume requires run_id")
+                return
             with self._lock:
                 if zone:
                     self._zone_id = zone
-                # if run not provided, try to find latest run for zone; fallback to legacy zone checkpoint.
-                if req_run:
-                    self._run_id = req_run
-                elif self._zone_id:
-                    self._run_id = self._find_latest_run_for_zone(self._zone_id) or ""
-                # allow resume by run_id only (zone can be inferred from checkpoint)
-                if not self._zone_id and not self._run_id:
-                    rospy.logwarn("[EXEC] resume requires zone_id or run_id")
-                    return
+                self._run_id = req_run
                 self._pause_req = False
                 self._cancel_req = False
             rospy.logwarn("[EXEC] RESUME zone_id=%s", self._zone_id)
@@ -1162,7 +1122,7 @@ class ExecutorFSM:
             self._start_thread(mode="resume")
             return
 
-        if low == "pause":
+        if verb == "pause":
             with self._lock:
                 self._pause_req = True
             rospy.logwarn("[EXEC] PAUSE (async)")
@@ -1182,7 +1142,7 @@ class ExecutorFSM:
 
         # SUSPEND: like PAUSE (preserve checkpoint & allow resume), but WITHOUT pause-hold.
         # Used by Task layer for auto-docking: executor should not fight navigation by publishing cmd_vel=0 continuously.
-        if low == "suspend":
+        if verb == "suspend":
             with self._lock:
                 self._pause_req = True
             rospy.logwarn("[EXEC] SUSPEND (async, no hold)")
@@ -1203,11 +1163,15 @@ class ExecutorFSM:
             self._stop_pause_hold()
             return
 
-        if low in ["cancel", "stop"]:
+        if verb in ["cancel", "stop"]:
             with self._lock:
-                self._cancel_req = True
-            rospy.logwarn("[EXEC] CANCEL (async)")
-            self._publish_state("CANCEL_REQ")
+                t = getattr(self, "_running_thread", None)
+                run_active = bool(t and t.is_alive())
+                self._cancel_req = bool(run_active)
+                if not run_active:
+                    self._pause_req = False
+            rospy.logwarn("[EXEC] CANCEL (async)" if run_active else "[EXEC] CANCEL while idle -> keep IDLE")
+            self._publish_state("CANCEL_REQ" if run_active else "IDLE")
             try:
                 self.mbf.cancel_all()
             except Exception:
@@ -1224,7 +1188,7 @@ class ExecutorFSM:
             self._stop_pause_hold()
             return
 
-        if low in ["estop", "e-stop", "emergency_stop"]:
+        if verb in ["estop", "e-stop", "emergency_stop"]:
             with self._lock:
                 self._estop = True
             rospy.logerr("[EXEC] E-STOP")
@@ -1340,59 +1304,37 @@ class ExecutorFSM:
         # OperationsStore ensures mission_checkpoints on init.
         return
 
-    def _find_latest_run_for_zone(self, zone_id: str) -> str:
-        """Return latest run_id for a zone (v2), else empty."""
-        zone_id = (zone_id or "").strip()
-        if not zone_id:
-            return ""
-        try:
-            return str(self._ops_store.get_latest_checkpoint_run_id(zone_id) or "")
-        except Exception:
-            return ""
-
-    def _load_checkpoint(self, *, run_id: str = "", zone_id: str = "") -> Optional[Dict[str, Any]]:
-        """Load checkpoint.
-
-        Priority:
-          1) v2 by run_id
-          2) v2 latest by zone_id
-          3) legacy by zone_id (and auto-convert into v2 with a synthetic run_id)
-        """
+    def _load_checkpoint(self, *, run_id: str = "") -> Optional[Dict[str, Any]]:
+        """Load checkpoint by canonical run_id."""
         run_id = (run_id or "").strip()
-        zone_id = (zone_id or "").strip()
-        if not run_id and not zone_id:
+        if not run_id:
             return None
 
         try:
-            if run_id:
-                row = self._ops_store.get_mission_checkpoint(run_id)
-                if row is None:
-                    return None
-                ckpt = {
-                    "run_id": str(row.run_id or ""),
-                    "zone_id": str(row.zone_id or ""),
-                    "plan_id": str(row.plan_id or ""),
-                    "zone_version": int(row.zone_version or 0),
-                    "exec_index": int(row.exec_index or 0),
-                    "block_id": int(row.block_id if row.block_id is not None else -1),
-                    "path_index": int(row.path_index or 0),
-                    "path_s": float(row.path_s or 0.0),
-                    "state": str(row.state or ""),
-                    "water_off_latched": int(1 if row.water_off_latched else 0),
-                    "map_id": str(row.map_id or ""),
-                    "map_md5": str(row.map_md5 or ""),
-                }
-                rospy.logwarn(
-                    "[CKPT] load run=%s zone=%s plan_id=%s exec_index=%d block_id=%d path_index=%d path_s=%.3f state=%s water_off=%d",
-                    ckpt["run_id"], ckpt["zone_id"], ckpt["plan_id"], ckpt["exec_index"], ckpt["block_id"],
-                    ckpt["path_index"], ckpt["path_s"], ckpt["state"], ckpt["water_off_latched"],
-                )
-                return ckpt
-
-            if zone_id:
-                latest_run_id = str(self._ops_store.get_latest_checkpoint_run_id(zone_id) or "")
-                if latest_run_id:
-                    return self._load_checkpoint(run_id=latest_run_id)
+            row = self._ops_store.get_mission_checkpoint(run_id)
+            if row is None:
+                return None
+            ckpt = {
+                "run_id": str(row.run_id or ""),
+                "zone_id": str(row.zone_id or ""),
+                "plan_id": str(row.plan_id or ""),
+                "zone_version": int(row.zone_version or 0),
+                "exec_index": int(row.exec_index or 0),
+                "block_id": int(row.block_id if row.block_id is not None else -1),
+                "path_index": int(row.path_index or 0),
+                "path_s": float(row.path_s or 0.0),
+                "state": str(row.state or ""),
+                "water_off_latched": int(1 if row.water_off_latched else 0),
+                "map_revision_id": str(getattr(row, "map_revision_id", "") or ""),
+                "map_id": str(row.map_id or ""),
+                "map_md5": str(row.map_md5 or ""),
+            }
+            rospy.logwarn(
+                "[CKPT] load run=%s zone=%s plan_id=%s exec_index=%d block_id=%d path_index=%d path_s=%.3f state=%s water_off=%d",
+                ckpt["run_id"], ckpt["zone_id"], ckpt["plan_id"], ckpt["exec_index"], ckpt["block_id"],
+                ckpt["path_index"], ckpt["path_s"], ckpt["state"], ckpt["water_off_latched"],
+            )
+            return ckpt
         except Exception:
             pass
         return None
@@ -1410,6 +1352,7 @@ class ExecutorFSM:
         path_s: float,
         state: str,
         water_off_latched: int,
+        map_revision_id: str = "",
         map_id: str = "",
         map_md5: str = "",
         updated_ts: float,
@@ -1426,6 +1369,7 @@ class ExecutorFSM:
                 path_s=float(path_s),
                 state=str(state),
                 water_off_latched=bool(int(water_off_latched)),
+                map_revision_id=str(map_revision_id or ""),
                 map_id=str(map_id or ""),
                 map_md5=str(map_md5 or ""),
                 updated_ts=float(updated_ts),
@@ -1449,6 +1393,7 @@ class ExecutorFSM:
             path_s=float(max(0.0, self._block_cut_s0 + self._path_s)),
             state=str(state),
             water_off_latched=int(1 if self._water_off_latched else 0),
+            map_revision_id=str(self._runtime_map_revision_id or ""),
             map_id=str(self._runtime_map_id or ""),
             map_md5=str(self._runtime_map_md5 or ""),
             updated_ts=time.time(),
@@ -1468,14 +1413,18 @@ class ExecutorFSM:
         if not run_id:
             return
         map_name, _scope_ok = self._ensure_runtime_map_name()
+        map_revision_id = self._ensure_runtime_map_revision_id()
         if not map_name:
             map_name = str(getattr(plan, "map_name", "") or "").strip()
+        if not map_revision_id:
+            map_revision_id = str(getattr(plan, "map_revision_id", "") or "").strip()
         try:
             self._ops_store.update_run_execution_context(
                 run_id,
                 map_name=str(map_name or ""),
+                map_revision_id=str(map_revision_id or ""),
                 zone_id=str(zone_id or ""),
-                plan_profile_name=str(getattr(plan, "plan_profile_name", "") or getattr(plan, "profile_name", "") or ""),
+                plan_profile_name=str(getattr(plan, "plan_profile_name", "") or ""),
                 plan_id=str(plan.plan_id or ""),
                 zone_version=int(getattr(plan, "zone_version", 0) or 0),
                 constraint_version=str(getattr(plan, "constraint_version", "") or ""),
@@ -1501,6 +1450,18 @@ class ExecutorFSM:
             return ""
         return str(run.map_name or "").strip()
 
+    def _get_run_snapshot_map_revision_id(self, run_id: str = "") -> str:
+        rid = str(run_id or self._run_id or "").strip()
+        if not rid:
+            return ""
+        try:
+            run = self._ops_store.get_run(rid)
+        except Exception:
+            return ""
+        if run is None:
+            return ""
+        return str(getattr(run, "map_revision_id", "") or "").strip()
+
     def _ensure_runtime_map_name(self) -> Tuple[str, bool]:
         map_name = ""
         ok = False
@@ -1515,12 +1476,42 @@ class ExecutorFSM:
             self._runtime_map_name = map_name
         return map_name, bool(ok)
 
-    def _resolve_plan_lookup_map_name(self) -> str:
+    def _ensure_runtime_map_revision_id(self) -> str:
+        revision_id = ""
+        try:
+            revision_id = get_runtime_map_revision_id("/cartographer/runtime")
+        except Exception:
+            revision_id = ""
+        revision_id = str(revision_id or "").strip()
+        with self._lock:
+            self._runtime_map_revision_id = revision_id
+        return revision_id
+
+    def _resolve_plan_lookup_scope(self) -> Tuple[str, str]:
+        map_revision_id = self._get_run_snapshot_map_revision_id()
         map_name = self._get_run_snapshot_map_name()
+        if map_revision_id:
+            return map_name, map_revision_id
+        map_name = self._get_run_snapshot_map_name()
+        if map_name:
+            return map_name, ""
+        map_revision_id = self._ensure_runtime_map_revision_id()
+        map_name, _ok = self._ensure_runtime_map_name()
+        return map_name, map_revision_id
+
+    def _resolve_plan_lookup_map_name(self) -> str:
+        map_name, _map_revision_id = self._resolve_plan_lookup_scope()
         if map_name:
             return map_name
         map_name, _ok = self._ensure_runtime_map_name()
         return map_name
+
+    def _resolve_expected_map_revision_id(self, plan: LoadedPlan) -> str:
+        map_revision_id = self._get_run_snapshot_map_revision_id()
+        plan_revision_id = str(getattr(plan, "map_revision_id", "") or "").strip()
+        if not map_revision_id:
+            map_revision_id = plan_revision_id
+        return str(map_revision_id or "").strip()
 
     def _resolve_expected_map_name(self, plan: LoadedPlan) -> str:
         map_name = self._get_run_snapshot_map_name()
@@ -1567,11 +1558,11 @@ class ExecutorFSM:
             zone_id = self._zone_id
             run_id = str(self._run_id or "")
 
-        # start requires zone_id; resume can work with run_id only
+        # start requires zone_id; resume requires a concrete run_id
         if mode != "resume" and not zone_id:
             self._publish_state("IDLE")
             return
-        if mode == "resume" and (not zone_id) and (not run_id):
+        if mode == "resume" and (not run_id):
             self._publish_state("IDLE")
             return
 
@@ -1584,6 +1575,10 @@ class ExecutorFSM:
             rospy.logerr("[EXEC] run failed: %s", str(e))
             self.clean.fail_stop()
             self._publish_state("FAILED")
+        finally:
+            with self._lock:
+                if getattr(self, "_running_thread", None) is threading.current_thread():
+                    self._running_thread = None
 
     def _apply_profile_only_and_stop(self, profile_name: str, water_off_latched: bool):
         """
@@ -1611,9 +1606,11 @@ class ExecutorFSM:
         """
         try:
             scope_name = self._resolve_expected_map_name(plan)
+            scope_revision_id = self._resolve_expected_map_revision_id(plan)
             zm = self.loader.get_zone_meta(
                 str(plan.zone_id),
                 map_name=str(scope_name or ""),
+                map_revision_id=str(scope_revision_id or ""),
             )
             if not zm:
                 return True
@@ -1667,28 +1664,33 @@ class ExecutorFSM:
 
         - If plan carries map_md5/map_id, enforce strict_map_check.
         - If resume and checkpoint carries map_md5/map_id, enforce strict_resume_map_check.
-        - If no expected identity stored (legacy plans), skip check but keep auto-injection.
+        - If no expected identity is stored on the plan, skip check but keep auto-injection.
         """
         strict = bool(self.strict_resume_map_check) if ckpt else bool(self.strict_map_check)
 
         exp_name = self._resolve_expected_map_name(plan)
+        exp_revision_id = self._resolve_expected_map_revision_id(plan)
         exp_id = str(getattr(plan, "map_id", "") or "").strip()
         exp_md5 = str(getattr(plan, "map_md5", "") or "").strip()
 
         # If checkpoint stores map identity, it has the highest priority for resume.
         if ckpt:
+            exp_revision_id = str(ckpt.get("map_revision_id") or exp_revision_id).strip()
             exp_id = str(ckpt.get("map_id") or exp_id).strip()
             exp_md5 = str(ckpt.get("map_md5") or exp_md5).strip()
 
         # If plan doesn't have map fields, try zones table snapshot.
-        if (not exp_name) or (not exp_id) or (not exp_md5):
+        if (not exp_name) or (not exp_revision_id) or (not exp_id) or (not exp_md5):
             try:
                 zm = self.loader.get_zone_meta(
                     str(plan.zone_id),
                     map_name=str(exp_name or ""),
+                    map_revision_id=str(exp_revision_id or ""),
                 ) or {}
                 if not exp_name:
                     exp_name = str(zm.get("map_name") or "").strip()
+                if not exp_revision_id:
+                    exp_revision_id = str(zm.get("map_revision_id") or "").strip()
                 if not exp_id:
                     exp_id = str(zm.get("map_id") or "").strip()
                 if not exp_md5:
@@ -1696,17 +1698,76 @@ class ExecutorFSM:
             except Exception:
                 pass
 
-        # No expected identity stored -> don't block legacy behavior.
+        # No expected identity stored -> don't block execution on that basis.
         exp_name = str(exp_name or "").strip()
+        exp_revision_id = str(exp_revision_id or "").strip()
 
-        if (not exp_name) and (not exp_id and not exp_md5):
+        if (not exp_name) and (not exp_revision_id) and (not exp_id and not exp_md5):
             # still try to inject for later plans/checkpoints
             self._ensure_runtime_map_name()
+            self._ensure_runtime_map_revision_id()
             self._ensure_runtime_map_identity()
             return True
 
         runtime_name, scope_ok = self._ensure_runtime_map_name()
+        runtime_revision_id = self._ensure_runtime_map_revision_id()
         mid, mmd5, ok = self._ensure_runtime_map_identity()
+
+        if exp_revision_id:
+            if strict and not runtime_revision_id:
+                msg = (
+                    "runtime_map_revision_missing: runtime_map_revision_id='' expected_map_revision_id='%s'"
+                    % exp_revision_id
+                )
+                rospy.logerr("[EXEC] %s", msg)
+                self._emit(f"ERROR:MAP_REVISION_MISSING:{msg}")
+                self._set_error(
+                    code="MAP_REVISION_MISSING",
+                    msg=msg,
+                    data={
+                        "expected_map_revision_id": exp_revision_id,
+                        "runtime_map_revision_id": runtime_revision_id,
+                    },
+                )
+                self._publish_state("ERROR_MAP_MISSING")
+                return False
+
+            if runtime_revision_id and exp_revision_id != runtime_revision_id:
+                msg = (
+                    "map_revision_mismatch: expected=%s runtime=%s plan_id=%s zone=%s"
+                    % (exp_revision_id, runtime_revision_id, plan.plan_id, plan.zone_id)
+                )
+                if strict:
+                    rospy.logerr("[EXEC] %s", msg)
+                    self._emit(f"ERROR:MAP_MISMATCH:{msg}")
+                    self._set_error(
+                        code="MAP_REVISION_MISMATCH",
+                        msg=msg,
+                        data={
+                            "expected_map_revision_id": exp_revision_id,
+                            "runtime_map_revision_id": runtime_revision_id,
+                            "plan_id": str(plan.plan_id),
+                            "zone_id": str(plan.zone_id),
+                        },
+                    )
+                    self._publish_state("ERROR_MAP_MISMATCH")
+                    return False
+                rospy.logwarn("[EXEC] %s (strict_map_check=0 -> continue)", msg)
+
+            if exp_name and runtime_name and exp_name != runtime_name:
+                rospy.logwarn(
+                    "[EXEC] map_name differs while map_revision_id matches: expected=%s runtime=%s revision=%s",
+                    exp_name,
+                    runtime_name,
+                    exp_revision_id,
+                )
+
+            rospy.loginfo(
+                "[EXEC] map consistency ok by revision: map=%s revision=%s",
+                runtime_name,
+                runtime_revision_id or exp_revision_id,
+            )
+            return True
 
         if strict and (exp_name and (not runtime_name or not scope_ok)):
             msg = (
@@ -1793,9 +1854,11 @@ class ExecutorFSM:
         if not map_id:
             try:
                 scope_name = self._resolve_expected_map_name(plan)
+                scope_revision_id = self._resolve_expected_map_revision_id(plan)
                 zm = self.loader.get_zone_meta(
                     str(plan.zone_id),
                     map_name=str(scope_name or ""),
+                    map_revision_id=str(scope_revision_id or ""),
                 ) or {}
                 map_id = str(zm.get("map_id") or "").strip()
             except Exception:
@@ -1808,20 +1871,40 @@ class ExecutorFSM:
             self._publish_state("ERROR_CONSTRAINT_VERSION_MISMATCH")
             return False
 
-        current = str(self.loader.get_active_constraint_version(map_id) or "").strip()
+        scope_revision_id = self._resolve_expected_map_revision_id(plan)
+        current = str(
+            self.loader.get_active_constraint_version(
+                map_id,
+                scope_revision_id,
+            ) or ""
+        ).strip()
         if not current:
-            msg = "constraint_version_check_missing_active_version: map_id=%s expected=%s" % (map_id, expected)
+            msg = "constraint_version_check_missing_active_version: map_id=%s revision=%s expected=%s" % (
+                map_id,
+                scope_revision_id or "-",
+                expected,
+            )
             rospy.logerr("[EXEC] %s", msg)
             self._emit(f"ERROR:CONSTRAINT_VERSION_MISMATCH:{msg}")
-            self._set_error(code="CONSTRAINT_VERSION_MISMATCH", msg=msg, data={"plan_id": str(plan.plan_id), "zone_id": str(plan.zone_id), "map_id": map_id})
+            self._set_error(
+                code="CONSTRAINT_VERSION_MISMATCH",
+                msg=msg,
+                data={
+                    "plan_id": str(plan.plan_id),
+                    "zone_id": str(plan.zone_id),
+                    "map_id": map_id,
+                    "map_revision_id": scope_revision_id,
+                },
+            )
             self._publish_state("ERROR_CONSTRAINT_VERSION_MISMATCH")
             return False
 
         if current != expected:
-            msg = "constraint_version_mismatch: expected=%s active=%s map_id=%s plan_id=%s zone=%s" % (
+            msg = "constraint_version_mismatch: expected=%s active=%s map_id=%s revision=%s plan_id=%s zone=%s" % (
                 expected,
                 current,
                 map_id,
+                scope_revision_id or "-",
                 str(plan.plan_id),
                 str(plan.zone_id),
             )
@@ -1834,6 +1917,7 @@ class ExecutorFSM:
                     "expected": expected,
                     "active": current,
                     "map_id": map_id,
+                    "map_revision_id": scope_revision_id,
                     "plan_id": str(plan.plan_id),
                     "zone_id": str(plan.zone_id),
                 },
@@ -1848,11 +1932,16 @@ class ExecutorFSM:
         self._publish_state("LOADING_PLAN")
         with self._lock:
             prof_req = (self._plan_profile_override or "").strip()
-        map_name = self._resolve_plan_lookup_map_name()
+        if not prof_req:
+            self._set_error(code="ERROR_MISSING_PLAN_PROFILE", msg="plan_profile is required for start")
+            self._publish_state("ERROR_MISSING_PLAN_PROFILE")
+            return
+        map_name, map_revision_id = self._resolve_plan_lookup_scope()
         plan = self.loader.load_for_zone(
             zone_id,
-            profile_name=(prof_req or None),
+            plan_profile_name=(prof_req or None),
             map_name=str(map_name or ""),
+            map_revision_id=str(map_revision_id or ""),
         )
         # rebuild progress prefix sums
         self._rebuild_progress_index(plan)
@@ -1879,10 +1968,14 @@ class ExecutorFSM:
         except Exception:
             pass
 
-        sys_prof_eff = self._effective_sys_profile_for_actuator(plan.profile_name)
+        sys_prof_eff = self._effective_sys_profile_for_actuator(plan.plan_profile_name)
         sys_name, controller_name, actuator_profile_name, _default_mode = self._resolve_sys_profile_spec(sys_prof_eff)
-        if prof_req and plan.profile_name and str(plan.profile_name) != prof_req:
-            rospy.logwarn("[EXEC] requested profile=%s but loaded plan.profile_name=%s (fallback plan selection?)", prof_req, plan.profile_name)
+        if prof_req and plan.plan_profile_name and str(plan.plan_profile_name) != prof_req:
+            rospy.logwarn(
+                "[EXEC] requested plan_profile=%s but loaded plan_profile_name=%s (fallback plan selection?)",
+                prof_req,
+                plan.plan_profile_name,
+            )
 
         self._publish_state("APPLY_PROFILE")
         self._apply_sys_profile_runtime(sys_prof_eff, water_off_latched=False)
@@ -1901,17 +1994,13 @@ class ExecutorFSM:
         self._execute_from_checkpoint(zone_id, plan, ckpt=None)
 
     def _run_resume(self, zone_id: Optional[str], run_id: str):
-        # Load checkpoint by run_id preferred; fallback by zone_id.
-        ckpt = self._load_checkpoint(run_id=run_id, zone_id=zone_id or "")
+        ckpt = self._load_checkpoint(run_id=run_id)
         if not ckpt:
-            if zone_id:
-                rospy.logwarn("[EXEC] no checkpoint; fallback to start")
-                return self._run_start(zone_id)
             rospy.logwarn("[EXEC] no checkpoint for run=%s", str(run_id))
             self._publish_state("IDLE")
             return
 
-        # Ensure we lock onto the checkpoint's run_id/zone_id (supports: resume run=<id>)
+        # Ensure we lock onto the checkpoint's run_id/zone_id (supports: resume run_id=<id>)
         with self._lock:
             if ckpt.get("run_id"):
                 self._run_id = str(ckpt["run_id"])
@@ -1927,11 +2016,16 @@ class ExecutorFSM:
         self._publish_state("LOADING_PLAN")
         with self._lock:
             prof_req = (self._plan_profile_override or "").strip()
-        map_name = self._resolve_plan_lookup_map_name()
+        if not prof_req:
+            self._set_error(code="ERROR_MISSING_PLAN_PROFILE", msg="plan_profile is required for resume")
+            self._publish_state("ERROR_MISSING_PLAN_PROFILE")
+            return
+        map_name, map_revision_id = self._resolve_plan_lookup_scope()
         plan = self.loader.load_for_zone(
             zone_id,
-            profile_name=(prof_req or None),
+            plan_profile_name=(prof_req or None),
             map_name=str(map_name or ""),
+            map_revision_id=str(map_revision_id or ""),
         )
         self._rebuild_progress_index(plan)
         if not self._check_zone_consistency_or_abort(plan):
@@ -1946,12 +2040,8 @@ class ExecutorFSM:
             msg = f"ckpt_plan_mismatch: ckpt.plan_id={ckpt['plan_id']} loaded.plan_id={plan.plan_id} zone={zone_id}"
             rospy.logerr("[EXEC] %s", msg)
             self._emit(f"ERROR:PLAN_MISMATCH:{msg}")
-            if self.strict_resume_plan_id_check:
-                self._publish_state("ERROR_PLAN_MISMATCH")
-                return
-            # legacy behavior: fallback start (NOT recommended for production)
-            rospy.logwarn("[EXEC] strict_resume_plan_id_check=0 -> fallback to start")
-            return self._run_start(zone_id)
+            self._publish_state("ERROR_PLAN_MISMATCH")
+            return
 
         self._exec_index = ckpt["exec_index"]
         self._block_id = ckpt["block_id"]
@@ -1966,10 +2056,14 @@ class ExecutorFSM:
         except Exception:
             pass
 
-        sys_prof_eff = self._effective_sys_profile_for_actuator(plan.profile_name)
+        sys_prof_eff = self._effective_sys_profile_for_actuator(plan.plan_profile_name)
         sys_name, controller_name, actuator_profile_name, _default_mode = self._resolve_sys_profile_spec(sys_prof_eff)
-        if prof_req and plan.profile_name and str(plan.profile_name) != prof_req:
-            rospy.logwarn("[EXEC] requested profile=%s but loaded plan.profile_name=%s (fallback plan selection?)", prof_req, plan.profile_name)
+        if prof_req and plan.plan_profile_name and str(plan.plan_profile_name) != prof_req:
+            rospy.logwarn(
+                "[EXEC] requested plan_profile=%s but loaded plan_profile_name=%s (fallback plan selection?)",
+                prof_req,
+                plan.plan_profile_name,
+            )
 
         self._publish_state("APPLY_PROFILE")
         # resume/回充回来的“通行段”期间也不清洁，进入 FOLLOW 再开

@@ -24,7 +24,8 @@
 
   <depend>coverage_msgs</depend>
   <depend>coverage_planner</depend>
-  <depend>my_msg_srv</depend>
+  <depend>cleanrobot_app_msgs</depend>
+  <depend>robot_platform_msgs</depend>
 
   <exec_depend>python3</exec_depend>
 </package>

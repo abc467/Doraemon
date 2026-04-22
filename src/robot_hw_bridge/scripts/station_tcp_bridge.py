@@ -9,7 +9,7 @@ from typing import Optional
 
 import rospy
 from std_msgs.msg import Bool
-from my_msg_srv.msg import StationStatus, ControlStation
+from robot_platform_msgs.msg import StationStatus, ControlStation
 
 
 def sum_check_list(data_list, length: int) -> int:

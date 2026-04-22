@@ -59,8 +59,8 @@ public:
 
     // ★ 地面稳定化：平面低通 + 滞回双阈值（用于分类）
     p.param("plane_alpha", plane_alpha_, 0.1f);  // 0.05~0.2 越小越稳
-    p.param("dist_lo",     dist_lo_,     0.03f);
-    p.param("dist_hi",     dist_hi_,     0.05f);
+    p.param("dist_lo",     dist_lo_,     0.04f);
+    p.param("dist_hi",     dist_hi_,     0.15f);
     p.param("self_filter_enabled", self_filter_enabled_, true);
     p.param("self_x_min", self_x_min_, -0.65f);
     p.param("self_x_max", self_x_max_,  0.65f);
@@ -68,9 +68,9 @@ public:
     p.param("self_y_max", self_y_max_,  0.55f);
     p.param("cluster_filter_enabled", cluster_filter_enabled_, true);
     p.param("cluster_tolerance", cluster_tolerance_, 0.10f);
-    p.param("min_cluster_size", min_cluster_size_, 12);
+    p.param("min_cluster_size", min_cluster_size_, 18);
     p.param("max_cluster_size", max_cluster_size_, 10000);
-    p.param("min_obstacle_points", min_obstacle_points_, 12);
+    p.param("min_obstacle_points", min_obstacle_points_, 18);
 
     // ---------------- 订阅/发布 ----------------
     sub_ = nh.subscribe(input_topic_, queue_size_, &Node::cb, this);
@@ -312,4 +312,3 @@ int main(int argc, char** argv) {
   ros::spin();
   return 0;
 }
-

@@ -1,0 +1,25 @@
+string map_name
+string map_revision_id
+string alignment_version
+PolygonRegion region
+string profile_name
+bool debug_publish_markers
+---
+bool success
+string message
+bool valid
+string error_code
+string error_message
+string map_revision_id
+string alignment_version
+string display_frame
+string storage_frame
+PolygonRegion display_region
+PolygonRegion map_region
+PolygonRing preview_path
+PolygonRing display_preview_path
+geometry_msgs/Pose2D entry_pose
+geometry_msgs/Pose2D display_entry_pose
+float64 estimated_length_m
+float64 estimated_duration_s
+string[] warnings

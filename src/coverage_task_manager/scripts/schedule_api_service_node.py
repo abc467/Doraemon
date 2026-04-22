@@ -3,44 +3,83 @@
 
 import rospy
 
-from my_msg_srv.msg import CleanSchedule
-from my_msg_srv.srv import OperateSchedule, OperateScheduleRequest, OperateScheduleResponse
+from cleanrobot_app_msgs.msg import CleanSchedule as AppCleanSchedule
+from cleanrobot_app_msgs.srv import (
+    OperateSchedule as AppOperateSchedule,
+    OperateScheduleRequest as AppOperateScheduleRequest,
+    OperateScheduleResponse as AppOperateScheduleResponse,
+)
 
+from coverage_planner.map_asset_status import map_asset_verification_error
 from coverage_planner.ops_store.store import OperationsStore, ScheduleRecord
 from coverage_planner.plan_store.store import PlanStore
 from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
+from coverage_planner.service_mode import publish_contract_param
 from coverage_task_manager.scheduler import Scheduler
 
+# Preserve module-level symbols for existing tests/tools.
+CleanSchedule = AppCleanSchedule
+OperateSchedule = AppOperateSchedule
+OperateScheduleRequest = AppOperateScheduleRequest
+OperateScheduleResponse = AppOperateScheduleResponse
 
 class ScheduleApiServiceNode:
     def __init__(self):
         self.plan_db_path = rospy.get_param("~plan_db_path", "/data/coverage/planning.db")
         self.ops_db_path = rospy.get_param("~ops_db_path", "/data/coverage/operations.db")
         self.robot_id = str(rospy.get_param("~robot_id", "local_robot"))
-        self.service_name = str(rospy.get_param("~service_name", "/database_server/clean_schedule_service"))
-        self.contract_param_ns = str(
-            rospy.get_param("~contract_param_ns", "/database_server/contracts/clean_schedule_service")
-        ).strip()
-        self._contract_report = self._prepare_contract_report()
+        self.app_service_name = str(
+            rospy.get_param("~app_service_name", "/database_server/app/clean_schedule_service")
+        ).strip() or "/database_server/app/clean_schedule_service"
+        self.app_contract_param_ns = str(
+            rospy.get_param(
+                "~app_contract_param_ns",
+                "/database_server/contracts/app/clean_schedule_service",
+            )
+        ).strip() or "/database_server/contracts/app/clean_schedule_service"
+        self._app_contract_report = self._prepare_contract_report(
+            schedule_cls=AppCleanSchedule,
+            service_cls=AppOperateSchedule,
+            request_cls=AppOperateScheduleRequest,
+            response_cls=AppOperateScheduleResponse,
+            service_name=self.app_service_name,
+            contract_name="clean_schedule_service_app",
+            validate_label_prefix="App",
+            features=[
+                "CleanSchedule.repeat_after_full_charge",
+                "schedule_read_only_inherits_task_repeat_after_full_charge",
+                "cleanrobot_app_msgs_parallel",
+            ],
+        )
         self.ops = OperationsStore(self.ops_db_path)
         self.plan_store = PlanStore(self.plan_db_path)
-        self.srv = rospy.Service(self.service_name, OperateSchedule, self._handle)
-        if self.contract_param_ns:
-            rospy.set_param(self.contract_param_ns, self._contract_report)
+        self.srv = None
+        self.app_srv = rospy.Service(self.app_service_name, AppOperateSchedule, self._handle_app)
+        publish_contract_param(rospy, self.app_contract_param_ns, self._app_contract_report, enabled=True)
         rospy.loginfo(
-            "[schedule_api_service] ready service=%s md5=%s schedule_md5=%s plan_db=%s ops_db=%s contract_param=%s",
-            self.service_name,
-            self._contract_report["service"]["md5"],
-            self._contract_report["dependencies"]["schedule"]["md5"],
+            "[schedule_api_service] ready app_service=%s app_md5=%s plan_db=%s ops_db=%s app_contract=%s",
+            self.app_service_name,
+            self._app_contract_report["service"]["md5"],
             self.plan_db_path,
             self.ops_db_path,
-            self.contract_param_ns or "-",
+            self.app_contract_param_ns or "-",
         )
 
-    def _prepare_contract_report(self):
+    def _prepare_contract_report(
+        self,
+        *,
+        schedule_cls,
+        service_cls,
+        request_cls,
+        response_cls,
+        service_name: str,
+        contract_name: str,
+        validate_label_prefix: str,
+        features,
+    ):
         validate_ros_contract(
-            "CleanSchedule",
-            CleanSchedule,
+            "%sCleanSchedule" % str(validate_label_prefix or ""),
+            schedule_cls,
             required_fields=[
                 "schedule_id",
                 "task_id",
@@ -54,6 +93,7 @@ class ScheduleApiServiceNode:
                 "start_date",
                 "end_date",
                 "map_name",
+                "map_revision_id",
                 "zone_id",
                 "loops",
                 "plan_profile_name",
@@ -67,8 +107,8 @@ class ScheduleApiServiceNode:
             ],
         )
         validate_ros_contract(
-            "OperateScheduleRequest",
-            OperateScheduleRequest,
+            "%sOperateScheduleRequest" % str(validate_label_prefix or ""),
+            request_cls,
             required_fields=[
                 "operation",
                 "schedule_id",
@@ -88,20 +128,24 @@ class ScheduleApiServiceNode:
             ],
         )
         return build_contract_report(
-            service_name=self.service_name,
-            contract_name="clean_schedule_service",
-            service_cls=OperateSchedule,
-            request_cls=OperateScheduleRequest,
-            response_cls=OperateScheduleResponse,
-            dependencies={"schedule": CleanSchedule},
-            features=[
-                "CleanSchedule.repeat_after_full_charge",
-                "schedule_read_only_inherits_task_repeat_after_full_charge",
-            ],
+            service_name=service_name,
+            contract_name=contract_name,
+            service_cls=service_cls,
+            request_cls=request_cls,
+            response_cls=response_cls,
+            dependencies={"schedule": schedule_cls},
+            features=list(features or []),
         )
 
-    def _empty_resp(self, *, success: bool, message: str) -> OperateScheduleResponse:
-        return OperateScheduleResponse(success=bool(success), message=str(message or ""), schedule=CleanSchedule(), schedules=[])
+    def _empty_resp(
+        self,
+        *,
+        response_cls=AppOperateScheduleResponse,
+        schedule_cls=AppCleanSchedule,
+        success: bool,
+        message: str,
+    ):
+        return response_cls(success=bool(success), message=str(message or ""), schedule=schedule_cls(), schedules=[])
 
     def _req_schedule_id(self, req) -> str:
         value = str(getattr(req, "schedule_id", "") or "").strip()
@@ -118,6 +162,14 @@ class ScheduleApiServiceNode:
         except Exception:
             return 0
 
+    def _req_schedule_map_filters(self, req):
+        schedule = getattr(req, "schedule", None)
+        map_name = str(getattr(schedule, "map_name", "") or "").strip()
+        if map_name.endswith(".pbstream"):
+            map_name = map_name[:-len(".pbstream")]
+        map_revision_id = str(getattr(schedule, "map_revision_id", "") or "").strip()
+        return map_name, map_revision_id
+
     def _enabled_from_request(self, req, *, current_enabled: bool, default_enabled: bool) -> bool:
         enabled_state = int(getattr(req, "enabled_state", int(req.ENABLE_KEEP)))
         if enabled_state == int(req.ENABLE_ENABLE):
@@ -126,7 +178,26 @@ class ScheduleApiServiceNode:
             return False
         return bool(default_enabled if current_enabled is None else current_enabled)
 
-    def _ensure_zone_plan_ready(self, *, map_name: str, zone_id: str, plan_profile_name: str) -> None:
+    def _resolve_job_map_asset(self, job):
+        map_name = str(getattr(job, "map_name", "") or "")
+        map_revision_id = str(getattr(job, "map_revision_id", "") or "")
+        if map_revision_id:
+            asset = self.plan_store.resolve_map_asset(
+                map_name=map_name,
+                revision_id=map_revision_id,
+                robot_id=self.robot_id,
+            )
+        else:
+            asset = self.plan_store.resolve_map_revision(
+                map_name=map_name,
+                robot_id=self.robot_id,
+            )
+        error = map_asset_verification_error(asset, label="task map asset")
+        if error:
+            raise ValueError(error)
+        return asset
+
+    def _ensure_zone_plan_ready(self, *, map_name: str, map_revision_id: str = "", zone_id: str, plan_profile_name: str) -> None:
         zone_id = str(zone_id or "").strip()
         if not zone_id:
             raise ValueError("zone_id is required")
@@ -134,14 +205,19 @@ class ScheduleApiServiceNode:
         if not map_name:
             raise ValueError("map_name is required")
 
-        zone = self.plan_store.get_zone_meta(zone_id, map_name=map_name)
+        zone = self.plan_store.get_zone_meta(zone_id, map_name=map_name, map_revision_id=map_revision_id)
         if not zone:
             raise ValueError("zone not found on selected map")
         if not bool(zone.get("enabled", True)):
             raise ValueError("zone is disabled")
 
         profile = str(plan_profile_name or "").strip() or "cover_standard"
-        plan_id = self.plan_store.get_active_plan_id(zone_id, profile, map_name=map_name)
+        plan_id = self.plan_store.get_active_plan_id(
+            zone_id,
+            profile,
+            map_name=map_name,
+            map_revision_id=map_revision_id,
+        )
         if not plan_id:
             raise ValueError("active plan not found for zone/profile")
         try:
@@ -149,9 +225,12 @@ class ScheduleApiServiceNode:
         except Exception:
             raise ValueError("active plan metadata is unavailable")
 
+        plan_map_revision_id = str(plan_meta.get("map_revision_id") or "").strip()
         plan_map_name = str(plan_meta.get("map_name") or "").strip()
         plan_zone_id = str(plan_meta.get("zone_id") or "").strip()
-        plan_profile = str(plan_meta.get("plan_profile_name") or plan_meta.get("profile_name") or "").strip()
+        plan_profile = str(plan_meta.get("plan_profile_name") or "").strip()
+        if map_revision_id and plan_map_revision_id and plan_map_revision_id != str(map_revision_id or "").strip():
+            raise ValueError("active plan revision does not match selected map revision")
         if plan_map_name != map_name:
             raise ValueError("active plan map does not match selected map")
         if plan_zone_id != zone_id:
@@ -159,8 +238,8 @@ class ScheduleApiServiceNode:
         if plan_profile and plan_profile != profile:
             raise ValueError("active plan profile does not match task profile")
 
-    def _schedule_to_msg(self, rec: ScheduleRecord) -> CleanSchedule:
-        msg = CleanSchedule()
+    def _schedule_to_msg(self, rec: ScheduleRecord, *, schedule_cls=AppCleanSchedule):
+        msg = schedule_cls()
         msg.schedule_id = str(rec.schedule_id or "")
         try:
             msg.task_id = int(str(rec.job_id or "0"), 10)
@@ -180,6 +259,7 @@ class ScheduleApiServiceNode:
         else:
             msg.at = ""
         msg.map_name = str(rec.map_name or "")
+        msg.map_revision_id = str(getattr(rec, "map_revision_id", "") or "")
         msg.zone_id = str(rec.zone_id or "")
         msg.loops = int(rec.default_loops or 1)
         msg.plan_profile_name = str(rec.plan_profile_name or "")
@@ -235,7 +315,7 @@ class ScheduleApiServiceNode:
             spec["at"] = str(at or "").strip()
         Scheduler.from_param([spec], defaults={})
 
-    def _upsert_schedule(self, req, *, allow_create: bool) -> CleanSchedule:
+    def _upsert_schedule(self, req, *, allow_create: bool, schedule_cls=AppCleanSchedule):
         schedule = req.schedule
         schedule_id = self._req_schedule_id(req)
         if not schedule_id:
@@ -255,8 +335,10 @@ class ScheduleApiServiceNode:
         if job is None:
             raise ValueError("task not found")
 
+        self._resolve_job_map_asset(job)
         self._ensure_zone_plan_ready(
             map_name=str(job.map_name or ""),
+            map_revision_id=str(getattr(job, "map_revision_id", "") or ""),
             zone_id=str(job.zone_id or ""),
             plan_profile_name=str(job.plan_profile_name or ""),
         )
@@ -330,55 +412,102 @@ class ScheduleApiServiceNode:
         saved = self.ops.get_schedule(schedule_id)
         if saved is None:
             raise RuntimeError("failed to persist schedule")
-        return self._schedule_to_msg(saved)
+        return self._schedule_to_msg(saved, schedule_cls=schedule_cls)
 
-    def _handle(self, req):
+    def _handle(self, req, *, response_cls=AppOperateScheduleResponse, schedule_cls=AppCleanSchedule):
         op = int(req.operation)
 
         if op == int(req.getAll):
             task_id = self._req_task_id(req)
-            items = [self._schedule_to_msg(rec) for rec in self.ops.list_schedules(include_disabled=True, job_id=(str(task_id) if task_id > 0 else ""))]
-            return OperateScheduleResponse(success=True, message="ok", schedule=CleanSchedule(), schedules=items)
+            req_map_name, req_map_revision_id = self._req_schedule_map_filters(req)
+            items = []
+            for rec in self.ops.list_schedules(include_disabled=True, job_id=(str(task_id) if task_id > 0 else "")):
+                rec_map_name = str(rec.map_name or "").strip()
+                rec_map_revision_id = str(getattr(rec, "map_revision_id", "") or "").strip()
+                if req_map_name and rec_map_name != req_map_name:
+                    continue
+                if req_map_revision_id and rec_map_revision_id != req_map_revision_id:
+                    continue
+                items.append(self._schedule_to_msg(rec, schedule_cls=schedule_cls))
+            return response_cls(success=True, message="ok", schedule=schedule_cls(), schedules=items)
 
         if op == int(req.get):
             schedule_id = self._req_schedule_id(req)
             if not schedule_id:
-                return self._empty_resp(success=False, message="schedule_id is required")
+                return self._empty_resp(
+                    response_cls=response_cls,
+                    schedule_cls=schedule_cls,
+                    success=False,
+                    message="schedule_id is required",
+                )
             rec = self.ops.get_schedule(schedule_id)
             if rec is None:
-                return self._empty_resp(success=False, message="schedule not found")
-            return OperateScheduleResponse(success=True, message="ok", schedule=self._schedule_to_msg(rec), schedules=[])
+                return self._empty_resp(
+                    response_cls=response_cls,
+                    schedule_cls=schedule_cls,
+                    success=False,
+                    message="schedule not found",
+                )
+            return response_cls(
+                success=True,
+                message="ok",
+                schedule=self._schedule_to_msg(rec, schedule_cls=schedule_cls),
+                schedules=[],
+            )
 
         if op == int(req.add):
             try:
-                msg = self._upsert_schedule(req, allow_create=True)
-                return OperateScheduleResponse(success=True, message="created", schedule=msg, schedules=[])
+                msg = self._upsert_schedule(req, allow_create=True, schedule_cls=schedule_cls)
+                return response_cls(success=True, message="created", schedule=msg, schedules=[])
             except Exception as e:
-                return self._empty_resp(success=False, message=str(e))
+                return self._empty_resp(response_cls=response_cls, schedule_cls=schedule_cls, success=False, message=str(e))
 
         if op == int(req.modify):
             try:
-                msg = self._upsert_schedule(req, allow_create=False)
-                return OperateScheduleResponse(success=True, message="updated", schedule=msg, schedules=[])
+                msg = self._upsert_schedule(req, allow_create=False, schedule_cls=schedule_cls)
+                return response_cls(success=True, message="updated", schedule=msg, schedules=[])
             except Exception as e:
-                return self._empty_resp(success=False, message=str(e))
+                return self._empty_resp(response_cls=response_cls, schedule_cls=schedule_cls, success=False, message=str(e))
 
         if op == int(req.Delete):
             schedule_id = self._req_schedule_id(req)
             if not schedule_id:
-                return self._empty_resp(success=False, message="schedule_id is required")
+                return self._empty_resp(
+                    response_cls=response_cls,
+                    schedule_cls=schedule_cls,
+                    success=False,
+                    message="schedule_id is required",
+                )
             rec = self.ops.get_schedule(schedule_id)
             if rec is None:
-                return self._empty_resp(success=False, message="schedule not found")
+                return self._empty_resp(
+                    response_cls=response_cls,
+                    schedule_cls=schedule_cls,
+                    success=False,
+                    message="schedule not found",
+                )
             try:
                 self.ops.set_schedule_enabled(schedule_id, False)
                 self.ops.clear_schedule_state(schedule_id)
                 saved = self.ops.get_schedule(schedule_id)
-                return OperateScheduleResponse(success=True, message="disabled", schedule=self._schedule_to_msg(saved or rec), schedules=[])
+                return response_cls(
+                    success=True,
+                    message="disabled",
+                    schedule=self._schedule_to_msg(saved or rec, schedule_cls=schedule_cls),
+                    schedules=[],
+                )
             except Exception as e:
-                return self._empty_resp(success=False, message=str(e))
+                return self._empty_resp(response_cls=response_cls, schedule_cls=schedule_cls, success=False, message=str(e))
 
-        return self._empty_resp(success=False, message="unsupported operation")
+        return self._empty_resp(
+            response_cls=response_cls,
+            schedule_cls=schedule_cls,
+            success=False,
+            message="unsupported operation",
+        )
+
+    def _handle_app(self, req):
+        return self._handle(req, response_cls=AppOperateScheduleResponse, schedule_cls=AppCleanSchedule)
 
 
 def main():

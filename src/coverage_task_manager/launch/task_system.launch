@@ -1,7 +1,8 @@
 <launch>
   <!--
     Task+Execute quick bringup:
-      - Executor executes stored plans (DB) and keeps dev cmd topic.
+      - Executor executes stored plans (DB).
+      - Task manager owns `/coverage_task_manager/app/exe_task_server` and still keeps a dev cmd topic.
       - Task manager monitors battery and orchestrates auto-charge.
 
     用法（默认推荐：Task 层负责回充，Executor 关闭回充）：
@@ -13,7 +14,7 @@
 
   <arg name="task_auto_charge_enable" default="false"/>
   <arg name="executor_auto_charge_enable" default="false"/>
-  <arg name="default_return_to_dock_on_finish" default="true"/>
+  <arg name="default_return_to_dock_on_finish" default="false"/>
   <arg name="scheduler_enable" default="true"/>
   <arg name="load_schedules_yaml" default="false"/>
   <arg name="schedules_yaml" default="$(find coverage_task_manager)/config/schedules_monday_0810.yaml"/>
@@ -28,9 +29,12 @@
   <arg name="dock_supply_enable" default="true"/>
   <arg name="dock_supply_set_defer_exit_service" default="/dock_supply/set_defer_exit"/>
   <arg name="dock_supply_exit_service" default="/dock_supply/exit"/>
-  <arg name="restart_localization_service" default="/cartographer/runtime/restart_localization"/>
+  <arg name="app_restart_localization_service" default="/cartographer/runtime/app/restart_localization"/>
+  <arg name="app_slam_submit_command_service" default="/clean_robot_server/app/submit_slam_command"/>
+  <arg name="app_slam_get_job_service" default="/clean_robot_server/app/get_slam_job"/>
+  <arg name="manual_assist_pose_param_ns" default="/localization/manual_assist_pose"/>
   <arg name="start_localization_lifecycle_manager" default="true"/>
-  <arg name="restart_localization_contract_param_ns" default="/cartographer/runtime/contracts/restart_localization"/>
+  <arg name="restart_localization_app_contract_param_ns" default="/cartographer/runtime/contracts/app/restart_localization"/>
   <arg name="cartographer_runtime_ns" default="/cartographer/runtime"/>
   <arg name="runtime_map_topic" default="/map"/>
   <arg name="tracked_pose_topic" default="/tracked_pose"/>
@@ -43,36 +47,70 @@
   <arg name="ops_db_path" default="/data/coverage/operations.db"/>
   <arg name="maps_root" default="/data/maps"/>
   <arg name="robot_id" default="local_robot"/>
-  <!-- legacy only: formal product flow does not auto-activate maps from task_system -->
-  <arg name="activate_map_service" default="/map_assets/activate"/>
-  <arg name="activate_map_timeout_s" default="10.0"/>
   <arg name="require_managed_map_asset" default="true"/>
   <arg name="require_runtime_localized_before_start" default="false"/>
   <arg name="require_runtime_map_match" default="false"/>
+  <arg name="require_odometry_healthy_before_start" default="true"/>
+  <arg name="odometry_state_topic" default="/clean_robot_server/odometry_state"/>
+  <arg name="odometry_state_stale_timeout_s" default="5.0"/>
+  <arg name="slam_state_topic" default="/clean_robot_server/slam_state"/>
+  <arg name="slam_state_stale_timeout_s" default="5.0"/>
+  <arg name="start_odometry_health" default="true"/>
+  <arg name="odometry_status_app_service_name" default="/clean_robot_server/app/get_odometry_status"/>
+  <arg name="odometry_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_odometry_status"/>
+  <arg name="app_readiness_service_name" default="/coverage_task_manager/app/get_system_readiness"/>
+  <arg name="app_readiness_contract_param_ns" default="/coverage_task_manager/contracts/app/get_system_readiness"/>
+  <arg name="readiness_timeout_s" default="3.0"/>
+  <arg name="app_exe_task_service_name" default="/coverage_task_manager/app/exe_task_server"/>
+  <arg name="app_exe_task_contract_param_ns" default="/coverage_task_manager/contracts/app/exe_task_server"/>
+  <arg name="app_clean_task_service_name" default="/database_server/app/clean_task_service"/>
+  <arg name="app_clean_task_contract_param_ns" default="/database_server/contracts/app/clean_task_service"/>
+  <arg name="app_clean_schedule_service_name" default="/database_server/app/clean_schedule_service"/>
+  <arg name="app_clean_schedule_contract_param_ns" default="/database_server/contracts/app/clean_schedule_service"/>
   <arg name="task_restore_enable" default="false"/>
-  <arg name="allow_map_activation" default="false"/>
-  <arg name="allow_legacy_zone_start" default="false"/>
   <arg name="run_map_migration" default="false"/>
-  <arg name="legacy_map_src_glob" default=""/>
 
   <group if="$(arg run_map_migration)">
     <node pkg="coverage_planner" type="migrate_map_assets.py" name="map_asset_migration" output="screen"
-          args="--plan-db-path $(arg plan_db_path) --ops-db-path $(arg ops_db_path) --maps-root $(arg maps_root) --src-glob $(arg legacy_map_src_glob) --robot-id $(arg robot_id) --set-active-if-missing"/>
+          args="--plan-db-path $(arg plan_db_path) --ops-db-path $(arg ops_db_path) --maps-root $(arg maps_root) --robot-id $(arg robot_id) --set-active-if-missing"/>
   </group>
 
   <node if="$(arg start_localization_lifecycle_manager)"
         pkg="coverage_planner"
         type="localization_lifecycle_manager_node.py"
         name="localization_lifecycle_manager"
-        output="screen">
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
     <param name="plan_db_path" value="$(arg plan_db_path)"/>
     <param name="ops_db_path" value="$(arg ops_db_path)"/>
     <param name="robot_id" value="$(arg robot_id)"/>
     <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
-    <param name="service_name" value="$(arg restart_localization_service)"/>
-    <param name="contract_param_ns" value="$(arg restart_localization_contract_param_ns)"/>
+    <param name="app_service_name" value="$(arg app_restart_localization_service)"/>
+    <param name="app_contract_param_ns" value="$(arg restart_localization_app_contract_param_ns)"/>
     <param name="map_topic" value="$(arg runtime_map_topic)"/>
     <param name="tracked_pose_topic" value="$(arg tracked_pose_topic)"/>
+    <param name="manual_assist_pose_param_ns" value="$(arg manual_assist_pose_param_ns)"/>
+  </node>
+
+  <node if="$(arg start_odometry_health)"
+        pkg="coverage_planner"
+        type="odometry_health_node.py"
+        name="odometry_health"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="validation_mode" value="odom_stream"/>
+    <param name="require_odom_frame_ids" value="true"/>
+    <param name="emit_auxiliary_diagnostics" value="false"/>
+    <param name="raw_odom_topic" value="/odom_raw"/>
+    <param name="odom_topic" value="/odom"/>
+    <param name="imu_topic" value="/imu_corrected"/>
+    <param name="ekf_node_name" value="/wheel_speed_odom_ekf"/>
+    <param name="state_topic_name" value="$(arg odometry_state_topic)"/>
+    <param name="app_service_name" value="$(arg odometry_status_app_service_name)"/>
+    <param name="app_contract_param_ns" value="$(arg odometry_status_app_contract_param_ns)"/>
   </node>
 
   <include file="$(find coverage_executor)/launch/executor.launch">
@@ -107,16 +145,29 @@
     <arg name="low_soc" value="$(arg low_soc)"/>
     <arg name="resume_soc" value="$(arg resume_soc)"/>
     <arg name="rearm_soc" value="$(arg rearm_soc)"/>
-    <arg name="restart_localization_service" value="$(arg restart_localization_service)"/>
+    <arg name="app_restart_localization_service" value="$(arg app_restart_localization_service)"/>
+    <arg name="app_slam_submit_command_service" value="$(arg app_slam_submit_command_service)"/>
+    <arg name="app_slam_get_job_service" value="$(arg app_slam_get_job_service)"/>
+    <arg name="manual_assist_pose_param_ns" value="$(arg manual_assist_pose_param_ns)"/>
     <arg name="restart_localization_timeout_s" value="$(arg restart_localization_timeout_s)"/>
     <arg name="clear_costmaps_service" value="$(arg clear_costmaps_service)"/>
-    <arg name="activate_map_service" value="$(arg activate_map_service)"/>
-    <arg name="activate_map_timeout_s" value="$(arg activate_map_timeout_s)"/>
     <arg name="require_managed_map_asset" value="$(arg require_managed_map_asset)"/>
     <arg name="require_runtime_localized_before_start" value="$(arg require_runtime_localized_before_start)"/>
     <arg name="require_runtime_map_match" value="$(arg require_runtime_map_match)"/>
+    <arg name="require_odometry_healthy_before_start" value="$(arg require_odometry_healthy_before_start)"/>
+    <arg name="odometry_state_topic" value="$(arg odometry_state_topic)"/>
+    <arg name="odometry_state_stale_timeout_s" value="$(arg odometry_state_stale_timeout_s)"/>
+    <arg name="slam_state_topic" value="$(arg slam_state_topic)"/>
+    <arg name="slam_state_stale_timeout_s" value="$(arg slam_state_stale_timeout_s)"/>
+    <arg name="app_readiness_service_name" value="$(arg app_readiness_service_name)"/>
+    <arg name="app_readiness_contract_param_ns" value="$(arg app_readiness_contract_param_ns)"/>
+    <arg name="readiness_timeout_s" value="$(arg readiness_timeout_s)"/>
+    <arg name="app_exe_task_service_name" value="$(arg app_exe_task_service_name)"/>
+    <arg name="app_exe_task_contract_param_ns" value="$(arg app_exe_task_contract_param_ns)"/>
+    <arg name="app_clean_task_service_name" value="$(arg app_clean_task_service_name)"/>
+    <arg name="app_clean_task_contract_param_ns" value="$(arg app_clean_task_contract_param_ns)"/>
+    <arg name="app_clean_schedule_service_name" value="$(arg app_clean_schedule_service_name)"/>
+    <arg name="app_clean_schedule_contract_param_ns" value="$(arg app_clean_schedule_contract_param_ns)"/>
     <arg name="task_restore_enable" value="$(arg task_restore_enable)"/>
-    <arg name="allow_map_activation" value="$(arg allow_map_activation)"/>
-    <arg name="allow_legacy_zone_start" value="$(arg allow_legacy_zone_start)"/>
   </include>
 </launch>

@@ -1,9 +1,11 @@
 <launch>
   <arg name="plan_db_path" default="/data/coverage/planning.db"/>
+  <arg name="ops_db_path" default="/data/coverage/operations.db"/>
   <arg name="robot_id" default="local_robot"/>
   <arg name="maps_root" default="/data/maps"/>
-  <arg name="external_maps_root" default="/home/sunnybaer/Doraemon/map"/>
+  <arg name="external_maps_root" default="/data/maps/imports"/>
   <arg name="map_topic" default="/map"/>
+  <arg name="map_asset_app_service_name" default="/clean_robot_server/app/map_server"/>
 
   <arg name="start_rosbridge" default="true"/>
   <arg name="rosbridge_address" default="0.0.0.0"/>
@@ -12,6 +14,33 @@
   <arg name="start_map_asset_service" default="true"/>
   <arg name="enable_site_editor_service" default="true"/>
   <arg name="enable_rect_zone_planner" default="false"/>
+  <arg name="enable_odometry_health" default="true"/>
+  <arg name="profile_catalog_app_service_name" default="/database_server/app/profile_catalog_service"/>
+  <arg name="alignment_app_service_name" default="/database_server/app/map_alignment_service"/>
+  <arg name="alignment_site_service_name" default="/database_server/site/map_alignment_service"/>
+  <arg name="alignment_points_app_service_name" default="/database_server/app/map_alignment_by_points_service"/>
+  <arg name="alignment_points_site_service_name" default="/database_server/site/map_alignment_by_points_service"/>
+  <arg name="rect_preview_app_service_name" default="/database_server/app/rect_zone_preview_service"/>
+  <arg name="rect_preview_site_service_name" default="/database_server/site/rect_zone_preview_service"/>
+  <arg name="plan_preview_app_service_name" default="/database_server/app/coverage_preview_service"/>
+  <arg name="plan_preview_site_service_name" default="/database_server/site/coverage_preview_service"/>
+  <arg name="plan_commit_app_service_name" default="/database_server/app/coverage_commit_service"/>
+  <arg name="plan_commit_site_service_name" default="/database_server/site/coverage_commit_service"/>
+  <arg name="zone_query_app_service_name" default="/database_server/app/coverage_zone_service"/>
+  <arg name="zone_plan_path_app_service_name" default="/database_server/app/zone_plan_path_service"/>
+  <arg name="no_go_area_app_service_name" default="/database_server/app/no_go_area_service"/>
+  <arg name="no_go_area_site_service_name" default="/database_server/site/no_go_area_service"/>
+  <arg name="virtual_wall_app_service_name" default="/database_server/app/virtual_wall_service"/>
+  <arg name="virtual_wall_site_service_name" default="/database_server/site/virtual_wall_service"/>
+  <arg name="slam_status_app_service_name" default="/clean_robot_server/app/get_slam_status"/>
+  <arg name="odometry_status_app_service_name" default="/clean_robot_server/app/get_odometry_status"/>
+  <arg name="slam_submit_command_app_service_name" default="/clean_robot_server/app/submit_slam_command"/>
+  <arg name="slam_get_job_app_service_name" default="/clean_robot_server/app/get_slam_job"/>
+  <arg name="profile_catalog_app_contract_param_ns" default="/database_server/contracts/app/profile_catalog_service"/>
+  <arg name="slam_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_slam_status"/>
+  <arg name="odometry_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_odometry_status"/>
+  <arg name="slam_submit_command_app_contract_param_ns" default="/clean_robot_server/contracts/app/submit_slam_command"/>
+  <arg name="slam_get_job_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_slam_job"/>
 
   <include if="$(arg start_rosbridge)" file="$(find rosbridge_server)/launch/rosbridge_websocket.launch">
     <arg name="address" value="$(arg rosbridge_address)"/>
@@ -30,13 +59,42 @@
     <param name="maps_root" value="$(arg maps_root)"/>
     <param name="external_maps_root" value="$(arg external_maps_root)"/>
     <param name="map_topic" value="$(arg map_topic)"/>
-    <param name="service_name" value="/clean_robot_server/map_server"/>
+    <param name="app_service_name" value="$(arg map_asset_app_service_name)"/>
   </node>
 
   <include file="$(find coverage_planner)/launch/planner_server.launch">
     <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+    <arg name="ops_db_path" value="$(arg ops_db_path)"/>
+    <arg name="maps_root" value="$(arg maps_root)"/>
     <arg name="robot_id" value="$(arg robot_id)"/>
     <arg name="enable_rect_zone_planner" value="$(arg enable_rect_zone_planner)"/>
     <arg name="enable_site_editor_service" value="$(arg enable_site_editor_service)"/>
+    <arg name="enable_odometry_health" value="$(arg enable_odometry_health)"/>
+    <arg name="profile_catalog_app_service_name" value="$(arg profile_catalog_app_service_name)"/>
+    <arg name="alignment_app_service_name" value="$(arg alignment_app_service_name)"/>
+    <arg name="alignment_site_service_name" value="$(arg alignment_site_service_name)"/>
+    <arg name="alignment_points_app_service_name" value="$(arg alignment_points_app_service_name)"/>
+    <arg name="alignment_points_site_service_name" value="$(arg alignment_points_site_service_name)"/>
+    <arg name="rect_preview_app_service_name" value="$(arg rect_preview_app_service_name)"/>
+    <arg name="rect_preview_site_service_name" value="$(arg rect_preview_site_service_name)"/>
+    <arg name="plan_preview_app_service_name" value="$(arg plan_preview_app_service_name)"/>
+    <arg name="plan_preview_site_service_name" value="$(arg plan_preview_site_service_name)"/>
+    <arg name="plan_commit_app_service_name" value="$(arg plan_commit_app_service_name)"/>
+    <arg name="plan_commit_site_service_name" value="$(arg plan_commit_site_service_name)"/>
+    <arg name="zone_query_app_service_name" value="$(arg zone_query_app_service_name)"/>
+    <arg name="zone_plan_path_app_service_name" value="$(arg zone_plan_path_app_service_name)"/>
+    <arg name="no_go_area_app_service_name" value="$(arg no_go_area_app_service_name)"/>
+    <arg name="no_go_area_site_service_name" value="$(arg no_go_area_site_service_name)"/>
+    <arg name="virtual_wall_app_service_name" value="$(arg virtual_wall_app_service_name)"/>
+    <arg name="virtual_wall_site_service_name" value="$(arg virtual_wall_site_service_name)"/>
+    <arg name="slam_status_app_service_name" value="$(arg slam_status_app_service_name)"/>
+    <arg name="odometry_status_app_service_name" value="$(arg odometry_status_app_service_name)"/>
+    <arg name="slam_submit_command_app_service_name" value="$(arg slam_submit_command_app_service_name)"/>
+    <arg name="slam_get_job_app_service_name" value="$(arg slam_get_job_app_service_name)"/>
+    <arg name="profile_catalog_app_contract_param_ns" value="$(arg profile_catalog_app_contract_param_ns)"/>
+    <arg name="slam_status_app_contract_param_ns" value="$(arg slam_status_app_contract_param_ns)"/>
+    <arg name="odometry_status_app_contract_param_ns" value="$(arg odometry_status_app_contract_param_ns)"/>
+    <arg name="slam_submit_command_app_contract_param_ns" value="$(arg slam_submit_command_app_contract_param_ns)"/>
+    <arg name="slam_get_job_app_contract_param_ns" value="$(arg slam_get_job_app_contract_param_ns)"/>
   </include>
 </launch>

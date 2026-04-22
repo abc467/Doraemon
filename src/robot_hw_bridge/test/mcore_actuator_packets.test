@@ -1,0 +1,7 @@
+<launch>
+  <test
+    test-name="mcore_actuator_packets"
+    pkg="robot_hw_bridge"
+    type="test_mcore_actuator_packets.py"
+    time-limit="30.0" />
+</launch>

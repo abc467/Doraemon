@@ -106,7 +106,7 @@ class EkfCovarianceOverrideNode {
  public:
   EkfCovarianceOverrideNode() : nh_(), pnh_("~") {
     pnh_.param<std::string>("input_imu_topic", input_imu_topic_, "/imu");
-    pnh_.param<std::string>("output_imu_topic", output_imu_topic_, "/imu_for_ekf");
+    pnh_.param<std::string>("output_imu_topic", output_imu_topic_, "/imu_corrected");
     pnh_.param<int>("imu_queue_size", imu_queue_size_, 100);
     pnh_.param<bool>("override_imu_orientation_covariance",
                      override_imu_orientation_covariance_, false);
@@ -286,7 +286,7 @@ class EkfCovarianceOverrideNode {
   ros::Subscriber imu_sub_;
 
   std::string input_imu_topic_ = "/imu";
-  std::string output_imu_topic_ = "/imu_for_ekf";
+  std::string output_imu_topic_ = "/imu_corrected";
   int imu_queue_size_ = 100;
 
   bool override_imu_orientation_covariance_ = false;

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import rospy
 from std_msgs.msg import Bool
 
-from my_msg_srv.msg import CombinedStatus
+from robot_platform_msgs.msg import CombinedStatus
 
 
 @dataclass

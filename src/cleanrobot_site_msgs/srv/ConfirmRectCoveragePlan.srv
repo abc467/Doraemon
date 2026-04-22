@@ -1,0 +1,7 @@
+string zone_id
+string profile_name # Wire field name remains `profile_name`; semantic meaning is `plan_profile_name`
+bool debug_publish_markers
+---
+bool success
+string message
+string plan_id

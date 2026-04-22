@@ -5,8 +5,10 @@ from dataclasses import dataclass
 import rospy
 from geometry_msgs.msg import Twist
 
-from my_msg_srv.msg import CleaningParams, ControlCleanTools, ControlMotor, ControlWaterTap
+from robot_platform_msgs.msg import CleaningParams, ControlCleanTools, ControlMotor, ControlWaterTap
 from coverage_planner.ops_store.store import OperationsStore
+
+MCORE_ACTUATOR_MAX = 100
 
 
 def _clamp_u8(val: int, lo: int = 0, hi: int = 255) -> int:
@@ -50,6 +52,7 @@ class CleaningActuator:
 
         self._clean_tool_cmd_interval_s = float(rospy.get_param("~clean_tool_cmd_interval_s", 0.05))
         self._water_tap_cmd_interval_s = float(rospy.get_param("~water_tap_cmd_interval_s", 0.20))
+        self._vacuum_off_repeat = max(1, int(rospy.get_param("~vacuum_off_repeat", 3)))
         self._lower_brush_on_enable = bool(rospy.get_param("~lower_brush_on_enable", True))
         self._lower_scraper_on_enable = bool(rospy.get_param("~lower_scraper_on_enable", True))
         self._raise_brush_on_disable = bool(rospy.get_param("~raise_brush_on_disable", True))
@@ -77,9 +80,9 @@ class CleaningActuator:
         raw_profiles = rospy.get_param("~actuator_profiles", {})
         defaults = CleaningProfile(
             profile_name=str(profile_name or rospy.get_param("~profile_name", "standard") or "standard"),
-            vel_water_pump=_clamp_u8(rospy.get_param("~vel_water_pump", 28), 0, 64),
-            suction_machine_pwm=_clamp_u8(rospy.get_param("~vel_water_suction", 36), 0, 64),
-            vacuum_motor_pwm=_clamp_u8(rospy.get_param("~vel_water_suction", 36), 0, 64),
+            vel_water_pump=_clamp_u8(rospy.get_param("~vel_water_pump", 28), 0, MCORE_ACTUATOR_MAX),
+            suction_machine_pwm=_clamp_u8(rospy.get_param("~vel_water_suction", 36), 0, MCORE_ACTUATOR_MAX),
+            vacuum_motor_pwm=_clamp_u8(rospy.get_param("~vel_water_suction", 36), 0, MCORE_ACTUATOR_MAX),
             height_scrub=_clamp_u8(rospy.get_param("~height_scrub", 38)),
         )
 
@@ -91,9 +94,9 @@ class CleaningActuator:
             if row is not None:
                 return CleaningProfile(
                     profile_name=str(row.actuator_profile_name or defaults.profile_name),
-                    vel_water_pump=_clamp_u8(row.water_pump_pwm, 0, 64),
-                    suction_machine_pwm=_clamp_u8(row.suction_machine_pwm, 0, 64),
-                    vacuum_motor_pwm=_clamp_u8(row.vacuum_motor_pwm, 0, 64),
+                    vel_water_pump=_clamp_u8(row.water_pump_pwm, 0, MCORE_ACTUATOR_MAX),
+                    suction_machine_pwm=_clamp_u8(row.suction_machine_pwm, 0, MCORE_ACTUATOR_MAX),
+                    vacuum_motor_pwm=_clamp_u8(row.vacuum_motor_pwm, 0, MCORE_ACTUATOR_MAX),
                     height_scrub=_clamp_u8(row.height_scrub),
                 )
 
@@ -106,16 +109,16 @@ class CleaningActuator:
 
         return CleaningProfile(
             profile_name=str(profile_name or defaults.profile_name),
-            vel_water_pump=_clamp_u8(cfg.get("vel_water_pump", defaults.vel_water_pump), 0, 64),
+            vel_water_pump=_clamp_u8(cfg.get("vel_water_pump", defaults.vel_water_pump), 0, MCORE_ACTUATOR_MAX),
             suction_machine_pwm=_clamp_u8(
                 cfg.get("suction_machine_pwm", cfg.get("vel_water_suction", defaults.suction_machine_pwm)),
                 0,
-                64,
+                MCORE_ACTUATOR_MAX,
             ),
             vacuum_motor_pwm=_clamp_u8(
                 cfg.get("vacuum_motor_pwm", cfg.get("vel_water_suction", defaults.vacuum_motor_pwm)),
                 0,
-                64,
+                MCORE_ACTUATOR_MAX,
             ),
             height_scrub=_clamp_u8(cfg.get("height_scrub", defaults.height_scrub)),
         )
@@ -162,7 +165,7 @@ class CleaningActuator:
 
     def _send_vacuum_motor(self, vel: int):
         msg = ControlMotor()
-        msg.vel = int(_clamp_u8(vel, 0, 64))
+        msg.vel = int(_clamp_u8(vel, 0, MCORE_ACTUATOR_MAX))
         self._vacuum_motor_pub.publish(msg)
 
     def _pause_between_tool_cmds(self):
@@ -210,8 +213,17 @@ class CleaningActuator:
         self._send_vacuum_motor(vacuum_motor_pwm)
 
     def vacuum_off(self):
-        self._send_tap(self._suction_tap_id, 0)
-        self._send_vacuum_motor(0)
+        repeats = max(1, int(self._vacuum_off_repeat))
+        for idx in range(repeats):
+            self._send_tap(self._suction_tap_id, 0)
+            self._send_vacuum_motor(0)
+            if idx + 1 < repeats:
+                self._pause_between_water_cmds()
+        rospy.loginfo(
+            "[ACT] vacuum_off suction_tap=%d vacuum_motor=0 repeat=%d",
+            self._suction_tap_id,
+            repeats,
+        )
 
     def water_on(self):
         with self._lock:
@@ -235,17 +247,6 @@ class CleaningActuator:
             self._water_pump_tap_id,
             self._clean_water_valve_tap_id,
         )
-
-    # ---------- compatibility wrappers ----------
-    def cleaning_on(self):
-        self.scraper_on()
-        self._pause_between_tool_cmds()
-        self.brush_on()
-
-    def cleaning_off(self):
-        self.brush_off()
-        self._pause_between_tool_cmds()
-        self.scraper_off()
 
     def hard_stop_once(self):
         t = Twist()

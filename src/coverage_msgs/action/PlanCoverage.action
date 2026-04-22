@@ -9,7 +9,7 @@ coverage_msgs/ZoneGeometry geom
 # {"frame_id":"map","outer":[[x,y],...],"holes":[[[x,y],...],...],"prec":3}
 string polygon_json
 
-# Execution profile (meta for task layer; planning may not use it)
+# Execution profile. Wire field name remains `profile_name`; semantic meaning is `plan_profile_name`.
 string profile_name
 
 # Debug

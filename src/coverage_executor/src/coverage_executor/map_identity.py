@@ -96,6 +96,18 @@ def get_runtime_map_scope() -> Tuple[str, str]:
     return map_name, map_name
 
 
+def get_runtime_map_revision_id(runtime_ns: str = "/cartographer/runtime") -> str:
+    prefix = str(runtime_ns or "/cartographer/runtime").rstrip("/")
+    return _get_param_first(
+        [
+            "~map_revision_id",
+            "/map_revision_id",
+            prefix + "/current_map_revision_id",
+            prefix + "/map_revision_id",
+        ]
+    )
+
+
 def ensure_map_identity(
     *,
     map_topic: str = "/map",

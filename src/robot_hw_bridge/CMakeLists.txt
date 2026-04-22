@@ -9,7 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_srvs
   actionlib
   actionlib_msgs
-  my_msg_srv
+  robot_platform_msgs
   my_docking_controller
 )
 
@@ -25,3 +25,8 @@ catkin_install_python(PROGRAMS
 install(DIRECTORY launch
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
+
+if(CATKIN_ENABLE_TESTING)
+  find_package(rostest REQUIRED)
+  add_rostest(test/mcore_actuator_packets.test)
+endif()

@@ -49,7 +49,7 @@
   <depend>libpcl-all-dev</depend>
   <depend>message_runtime</depend>
   <depend>nav_msgs</depend>
-  <depend>param_space</depend>
+  <depend>robot_runtime_flags_msgs</depend>
   <depend>pcl_conversions</depend>
   <depend>robot_state_publisher</depend>
   <depend>rosbag</depend>
@@ -66,7 +66,5 @@
 
   <test_depend>rosunit</test_depend>
 
-  <export>
-      <rviz plugin="${prefix}/rviz_plugin_description.xml" />
-  </export>
+  <export/>
 </package>

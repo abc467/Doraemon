@@ -175,7 +175,7 @@ class AutoChargeManager:
                     self._phase = "DOCKING"
 
                     # 1) pause job
-                    self.fsm.apply_cmd("pause")
+                    self.fsm.enqueue_cmd("pause")
                     # pause hold 会硬停 cmd_vel，回桩前必须关掉
                     self.fsm.set_pause_hold(False)
 
@@ -231,7 +231,14 @@ class AutoChargeManager:
                         rospy.logwarn("[PWR] undock success -> resume job")
                         # 强制下一次 resume 的 CONNECT 走 transit（不清洁），到 FOLLOW 再开
                         self.fsm.set_force_resume_transit_once(True)
-                        self.fsm.apply_cmd(f"resume {self.zone_id}")
+                        run_id = str(self.fsm.get_active_run_id() or "").strip()
+                        if not run_id:
+                            rospy.logerr("[PWR] undock resume blocked: missing active run_id")
+                            self.fsm.publish_state_external("PWR_RESUME_CONTEXT_MISSING")
+                            self._phase = "IDLE"
+                            rate.sleep()
+                            continue
+                        self.fsm.enqueue_cmd(f"resume run_id={run_id}")
                         self.fsm.publish_state_external("PWR_RESUMING")
                         self._phase = "RESUMING"
 

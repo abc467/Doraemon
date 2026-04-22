@@ -16,6 +16,7 @@
 #include <sensor_msgs/NavSatFix.h>
 #include <geometry_msgs/Pose2D.h>
 #include <boost/thread.hpp>
+#include <cstdint>
 #include <string>
 #include <ros/package.h>
 #include <crc_table.h>
@@ -52,7 +53,23 @@ public:
   ros::NodeHandle nh_;
 
 private:
+  struct DeviceTimestampState
+  {
+    bool initialized = false;
+    int64_t last_raw = 0;
+    double offset_sec = 0.0;
+    ros::Time last_stamp;
+    int resync_count = 0;
+  };
+
+  ros::Time resolveDeviceTimestamp(int64_t sensor_timestamp_raw, const ros::Time& host_stamp,
+                                   DeviceTimestampState* state, const std::string& stream_name);
+
   bool if_debug_;
+  bool enable_ned_odom_publish_ = true;
+  bool use_device_timestamp_ = true;
+  double timestamp_unit_to_sec_ = 1e-6;
+  double timestamp_resync_threshold_sec_ = 0.5;
   //sum info
   int sn_lost_ = 0;
   int crc_error_ = 0;
@@ -90,7 +107,8 @@ private:
   ros::Publisher twist_pub_;
   ros::Publisher NED_odom_pub_;
 
-
+  DeviceTimestampState imu_time_state_;
+  DeviceTimestampState insgps_time_state_;
 }; //ahrsBringup
 } // namespace FDILink
 

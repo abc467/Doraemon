@@ -1,0 +1,6 @@
+string robot_id
+bool refresh_map_identity
+---
+bool success
+string message
+SlamState state

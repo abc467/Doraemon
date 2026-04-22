@@ -22,6 +22,7 @@ class LoadedPlan:
     zone_version: int
     frame_id: str
     map_name: str
+    map_revision_id: str
     plan_profile_name: str
     constraint_version: str
     exec_order: List[int]
@@ -31,21 +32,15 @@ class LoadedPlan:
     map_md5: str = ""
     planner_version: str = ""
 
-    @property
-    def profile_name(self) -> str:
-        return self.plan_profile_name
-
 
 class PlanLoader:
     """Load a persisted plan from SQLite.
 
     Notes:
       - The planner stores `plan_profile_name` in the `plans` table.
-      - For product stability, Task layer may request a specific `plan_profile_name` for execution.
-        We support profile-aware lookup without changing zones.active_plan_id schema:
-          1) If plan_profile_name provided: load latest plan for (zone_id, plan_profile_name) (optionally zone_version).
-          2) Then: load zone_active_plans binding for the same profile
-          3) Only when plan_profile_name is omitted: fallback to latest plan for zone_id (optionally zone_version)
+      - Commercial execution only supports explicit `plan_profile_name`.
+        The loader resolves plans inside that profile scope and does not silently
+        fall back to "latest plan for zone".
     """
 
     def __init__(self, db_path: str):
@@ -54,16 +49,29 @@ class PlanLoader:
     def close(self):
         self.store.close()
 
-    def get_zone_meta(self, zone_id: str, *, map_name: str = "") -> Optional[Dict[str, Any]]:
+    def get_zone_meta(
+        self,
+        zone_id: str,
+        *,
+        map_name: str = "",
+        map_revision_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
         """Expose zones table meta for executor-side consistency checks."""
         try:
-            return self.store.get_zone_meta(str(zone_id), map_name=str(map_name or ""))
+            return self.store.get_zone_meta(
+                str(zone_id),
+                map_name=str(map_name or ""),
+                map_revision_id=str(map_revision_id or ""),
+            )
         except Exception:
             return None
 
-    def get_active_constraint_version(self, map_id: str) -> Optional[str]:
+    def get_active_constraint_version(self, map_id: str, map_revision_id: str = "") -> Optional[str]:
         try:
-            return self.store.get_active_constraint_version(str(map_id))
+            return self.store.get_active_constraint_version(
+                str(map_id),
+                str(map_revision_id or ""),
+            )
         except Exception:
             return None
 
@@ -71,22 +79,29 @@ class PlanLoader:
         self,
         zone_id: str,
         zone_version: Optional[int] = None,
-        profile_name: Optional[str] = None,
+        plan_profile_name: Optional[str] = None,
         *,
         map_name: str = "",
+        map_revision_id: str = "",
     ) -> LoadedPlan:
         zone_id = str(zone_id)
         map_name = str(map_name or "").strip()
+        map_revision_id = str(map_revision_id or "").strip()
 
         plan_id: Optional[str] = None
 
-        prof = (profile_name or "").strip()
+        prof = (plan_profile_name or "").strip()
+        if not prof:
+            scope = f" map={map_name}" if map_name else ""
+            raise RuntimeError(f"plan_profile_name is required for zone_id={zone_id}{scope}")
+
         if prof:
             plan_id = self.store.get_latest_plan_id_by_profile(
                 zone_id,
                 prof,
                 zone_version=zone_version,
                 map_name=map_name,
+                map_revision_id=map_revision_id,
             )
 
         if not plan_id:
@@ -94,23 +109,17 @@ class PlanLoader:
                 zone_id,
                 plan_profile_name=(prof or None),
                 map_name=map_name,
-            )
-
-        if not plan_id and not prof:
-            plan_id = self.store.get_latest_plan_id(
-                zone_id,
-                zone_version=zone_version,
-                map_name=map_name,
+                map_revision_id=map_revision_id,
             )
 
         if not plan_id:
             scope = f" map={map_name}" if map_name else ""
-            raise RuntimeError(f"No plan found for zone_id={zone_id} profile={prof or '*'}{scope}")
+            raise RuntimeError(f"No plan found for zone_id={zone_id} profile={prof}{scope}")
 
         meta = self.store.load_plan_meta(plan_id)
         exec_order = meta.get("exec_order_json") or list(range(int(meta["blocks"])))
         frame_id = meta.get("frame_id") or "map"
-        plan_profile_name_loaded = meta.get("plan_profile_name") or meta.get("profile_name") or "cover_standard"
+        plan_profile_name_loaded = meta.get("plan_profile_name") or "cover_standard"
 
         blocks: List[LoadedBlock] = []
         # 按 block_id 全量读出，然后按 exec_order 排序
@@ -143,6 +152,7 @@ class PlanLoader:
             zone_version=int(meta["zone_version"]),
             frame_id=str(frame_id),
             map_name=str(meta.get("map_name") or ""),
+            map_revision_id=str(meta.get("map_revision_id") or ""),
             plan_profile_name=str(plan_profile_name_loaded),
             constraint_version=str(meta.get("constraint_version") or ""),
             exec_order=[int(x) for x in exec_order],

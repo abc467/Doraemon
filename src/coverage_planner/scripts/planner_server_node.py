@@ -20,7 +20,12 @@ from coverage_planner.constraints import (
 )
 
 from coverage_planner.plan_store.store import PlanStore
-from coverage_planner.map_identity import ensure_map_identity, get_runtime_map_identity, get_runtime_map_scope
+from coverage_planner.map_identity import (
+    ensure_map_identity,
+    get_runtime_map_identity,
+    get_runtime_map_revision_id,
+    get_runtime_map_scope,
+)
 
 # Viz is optional (don't break server if viz module is not ready)
 try:
@@ -81,8 +86,7 @@ def _positive_int(value, default):
 class CoveragePlannerActionServer:
     def __init__(self):
         # ---- params ----
-        legacy_db_path = rospy.get_param("~db_path", "/data/coverage/planning.db")
-        self.plan_db_path = rospy.get_param("~plan_db_path", legacy_db_path)
+        self.plan_db_path = rospy.get_param("~plan_db_path", "/data/coverage/planning.db")
         self.default_frame_id = rospy.get_param("~frame_id", "map")
         self.topic_ns = rospy.get_param("~topic_ns", "/f2c").rstrip("/")
 
@@ -92,7 +96,6 @@ class CoveragePlannerActionServer:
         self.map_identity_timeout_s = float(rospy.get_param("~map_identity_timeout_s", 2.0))
         self.planner_version = str(rospy.get_param("~planner_version", "coverage_planner_v1"))
         self.robot_id = str(rospy.get_param("~robot_id", "local_robot"))
-        self.allow_legacy_unscoped_plan = bool(rospy.get_param("~allow_legacy_unscoped_plan", False))
         self.default_virtual_wall_buffer_m = float(
             rospy.get_param("~default_virtual_wall_buffer_m", DEFAULT_VIRTUAL_WALL_BUFFER_M)
         )
@@ -133,6 +136,29 @@ class CoveragePlannerActionServer:
         rospy.loginfo("[planner_server] robot_defaults=%s", json.dumps(self.default_robot_spec.__dict__, ensure_ascii=False, sort_keys=True))
         rospy.loginfo("[planner_server] planner_defaults=%s", json.dumps(self.default_planner_params.__dict__, ensure_ascii=False, sort_keys=True))
 
+    def _active_asset_runtime_scope_error(self, active_asset, *, map_id: str, map_md5: str) -> str:
+        active_name = str((active_asset or {}).get("map_name") or "").strip()
+        active_revision_id = str((active_asset or {}).get("revision_id") or "").strip()
+        active_id = str((active_asset or {}).get("map_id") or "").strip()
+        active_md5 = str((active_asset or {}).get("map_md5") or "").strip()
+        runtime_revision_id = str(get_runtime_map_revision_id("/cartographer/runtime") or "").strip()
+        if active_revision_id and runtime_revision_id and active_revision_id != runtime_revision_id:
+            return (
+                "current /map does not match selected map asset: selected=%s runtime_revision=%s asset_revision=%s"
+                % (active_name or "-", runtime_revision_id, active_revision_id)
+            )
+        if (not runtime_revision_id) and active_md5 and map_md5 and active_md5 != map_md5:
+            return (
+                "current /map does not match selected map asset: selected=%s runtime_md5=%s asset_md5=%s"
+                % (active_name or "-", map_md5, active_md5)
+            )
+        if (not runtime_revision_id) and active_id and map_id and active_id != map_id:
+            return (
+                "current /map does not match selected map asset: selected=%s runtime_id=%s asset_id=%s"
+                % (active_name or "-", map_id, active_id)
+            )
+        return ""
+
     def _param_dict(self, name: str):
         raw = rospy.get_param("~" + str(name), {})
         return raw if isinstance(raw, dict) else {}
@@ -140,11 +166,9 @@ class CoveragePlannerActionServer:
     def _private_param(self, key: str, default):
         return rospy.get_param("~" + str(key), default)
 
-    def _cfg_value(self, cfg: dict, key: str, fallback, aliases=None):
-        aliases = list(aliases or [])
-        for cand in [key] + aliases:
-            if cand in cfg:
-                return cfg[cand]
+    def _cfg_value(self, cfg: dict, key: str, fallback):
+        if key in cfg:
+            return cfg[key]
         return fallback
 
     def load_robot_spec(self) -> RobotSpec:
@@ -154,7 +178,7 @@ class CoveragePlannerActionServer:
         """
         cfg = self._param_dict("robot")
         cov_width = _positive_float(
-            self._cfg_value(cfg, "cov_width", self._private_param("robot/cov_width", 1.0), aliases=["coverage_width"]),
+            self._cfg_value(cfg, "cov_width", self._private_param("robot/cov_width", 1.0)),
             1.0,
         )
         width = _positive_float(
@@ -166,7 +190,6 @@ class CoveragePlannerActionServer:
                 cfg,
                 "min_turning_radius",
                 self._private_param("robot/min_turning_radius", 0.8),
-                aliases=["turning_radius", "R"],
             ),
             0.8,
         )
@@ -209,7 +232,6 @@ class CoveragePlannerActionServer:
                     cfg,
                     "line_w",
                     self._private_param("line_w", PlannerParams.line_w),
-                    aliases=["viz_line_width"],
                 ),
                 PlannerParams.line_w,
             ),
@@ -378,29 +400,27 @@ class CoveragePlannerActionServer:
             except Exception:
                 active_asset = None
 
-            if (active_asset is None) and (not self.allow_legacy_unscoped_plan):
+            if active_asset is None:
                 return abort("MAP_SCOPE_MISSING", "planner requires a selected current map before saving plans")
             if active_asset is not None:
                 active_name = str(active_asset.get("map_name") or "").strip()
-                active_id = str(active_asset.get("map_id") or "").strip()
-                active_md5 = str(active_asset.get("map_md5") or "").strip()
+                active_revision_id = str(active_asset.get("revision_id") or "").strip()
                 if active_name:
                     rospy.set_param("/map_name", active_name)
-                if active_md5 and map_md5 and active_md5 != map_md5:
+                scope_error = self._active_asset_runtime_scope_error(
+                    active_asset,
+                    map_id=map_id,
+                    map_md5=map_md5,
+                )
+                if scope_error:
                     return abort(
                         "MAP_ASSET_RUNTIME_MISMATCH",
-                        "current /map does not match selected map asset: selected=%s runtime_md5=%s asset_md5=%s"
-                        % (active_name or "-", map_md5, active_md5),
-                    )
-                if active_id and map_id and active_id != map_id:
-                    return abort(
-                        "MAP_ASSET_RUNTIME_MISMATCH",
-                        "current /map does not match selected map asset: selected=%s runtime_id=%s asset_id=%s"
-                        % (active_name or "-", map_id, active_id),
+                        scope_error,
                     )
 
             raw_constraints = self.store.load_map_constraints(
                 map_id=map_id,
+                map_revision_id=active_revision_id if active_asset is not None else "",
                 map_md5_hint=map_md5,
                 create_if_missing=False,
             )
@@ -422,13 +442,15 @@ class CoveragePlannerActionServer:
             if not compiled_zone_constraints.effective_regions:
                 return abort("NO_EFFECTIVE_REGION", "constraints leave no reachable cleaning area in zone")
 
+            plan_profile_name = str(goal.profile_name or "").strip()
+
             # ---- 2) Planner params ----
             params = self.resolve_planner_params(goal)
             robot = self.default_robot_spec
             rospy.loginfo(
-                "[planner_server] plan request zone=%s profile=%s robot=%s planner=%s",
+                "[planner_server] plan request zone=%s plan_profile_name=%s robot=%s planner=%s",
                 str(goal.zone_id or ""),
-                str(goal.profile_name or ""),
+                plan_profile_name,
                 json.dumps(robot.__dict__, ensure_ascii=False, sort_keys=True),
                 json.dumps(params.__dict__, ensure_ascii=False, sort_keys=True),
             )
@@ -464,13 +486,14 @@ class CoveragePlannerActionServer:
                 zone_id=str(goal.zone_id),
                 zone_version=int(goal.zone_version),
                 frame_id=frame_id,
-                plan_profile_name=str(goal.profile_name or ""),
+                plan_profile_name=plan_profile_name,
                 params=params.__dict__,
                 robot_spec=robot.__dict__,
                 outer=outer_u,
                 holes=compiled_zone_constraints.keepout_snapshot_rings,
                 plan_result=plan_res,
                 map_name=str((active_asset or {}).get("map_name") or ""),
+                map_revision_id=str((active_asset or {}).get("revision_id") or ""),
                 map_id=str(map_id or ""),
                 map_md5=str(map_md5 or ""),
                 constraint_version=str(compiled_zone_constraints.constraint_version or ""),
@@ -483,11 +506,12 @@ class CoveragePlannerActionServer:
                     str(goal.zone_id),
                     int(goal.zone_version),
                     plan_id,
-                    plan_profile_name=str(goal.profile_name or ""),
+                    plan_profile_name=plan_profile_name,
                     frame_id=frame_id,
                     outer=outer_u,
                     holes=compiled_zone_constraints.keepout_snapshot_rings,
                     map_name=str((active_asset or {}).get("map_name") or ""),
+                    map_revision_id=str((active_asset or {}).get("revision_id") or ""),
                     map_id=str(map_id or ""),
                     map_md5=str(map_md5 or ""),
                 )

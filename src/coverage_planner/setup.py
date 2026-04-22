@@ -8,6 +8,7 @@ d = generate_distutils_setup(
         'coverage_planner.ops_store',
         'coverage_planner.plan_store',
         'coverage_planner.coverage_planner_ros',
+        'coverage_planner.slam_workflow',
     ],
     package_dir={'': 'src'},
 )

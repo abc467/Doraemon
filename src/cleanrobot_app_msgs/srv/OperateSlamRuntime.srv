@@ -1,0 +1,23 @@
+uint8 restart_localization = 1
+uint8 start_mapping = 2
+uint8 save_mapping = 3
+uint8 stop_mapping = 4
+uint8 verify_map_revision = 21
+uint8 activate_map_revision = 22
+
+uint8 operation
+string robot_id
+string map_name
+string map_revision_id
+bool set_active
+string description
+
+---
+bool success
+string message
+string error_code
+uint8 operation
+string map_name
+string map_revision_id
+string localization_state
+string current_mode

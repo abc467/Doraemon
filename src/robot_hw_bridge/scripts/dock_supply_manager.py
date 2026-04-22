@@ -32,16 +32,16 @@ Interfaces:
 
 Dependencies:
   - /battery_state     (sensor_msgs/BatteryState) published by mcore_tcp_bridge
-  - /combined_status   (my_msg_srv/CombinedStatus) for water levels
-  - /station_status    (my_msg_srv/StationStatus) for IR/(legacy rod) states
-  - /station/control   (my_msg_srv/ControlStation) command to station_tcp_bridge
-  - /mcore/control_water_tap (my_msg_srv/ControlWaterTap) command to mcore_tcp_bridge
+  - /combined_status   (robot_platform_msgs/CombinedStatus) for water levels
+  - /station_status    (robot_platform_msgs/StationStatus) for IR/(legacy rod) states
+  - /station/control   (robot_platform_msgs/ControlStation) command to station_tcp_bridge
+  - /mcore/control_water_tap (robot_platform_msgs/ControlWaterTap) command to mcore_tcp_bridge
   - /mcore/charge_enable (std_msgs/Bool) command to mcore_tcp_bridge
 
 NOTE:
   Task layer (coverage_task_manager) is expected to:
     - navigate to pre-dock pose using MBF
-    - on DOCK_OK, call /dock_supply/start
+    - on DOCK_SUCCEEDED, call /dock_supply/start
     - wait /dock_supply/state==READY_TO_EXIT if task layer wants to hold the robot docked
     - call /dock_supply/exit when task layer decides it is safe to back out
 """
@@ -59,7 +59,7 @@ from std_srvs.srv import Trigger, TriggerResponse, SetBool, SetBoolResponse
 from sensor_msgs.msg import BatteryState
 from geometry_msgs.msg import Twist, PoseStamped
 
-from my_msg_srv.msg import CombinedStatus, StationStatus, ControlStation, ControlWaterTap
+from robot_platform_msgs.msg import CombinedStatus, StationStatus, ControlStation, ControlWaterTap
 from my_docking_controller.msg import AutoDockingAction, AutoDockingGoal
 
 

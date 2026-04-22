@@ -1,34 +1,64 @@
+# planner_server.launch 加载到
+# coverage_planner_server 和 site_editor_service 的默认参数。
+
+# 规划路径和调试可视化默认使用的输出坐标系。
 frame_id: "map"
+# 规划调试可视化话题使用的命名空间。
 topic_ns: "/f2c"
 
+# 是否自动从 /map 读取当前运行时地图标识（map_id / map_md5）。
 auto_map_identity_enable: true
+# 用于识别当前运行时地图的 OccupancyGrid 话题。
 map_topic: "/map"
+# 等待运行时地图标识的超时时间，单位秒。
 map_identity_timeout_s: 2.0
+# 存入规划数据库的规划器版本字符串。
 planner_version: "coverage_planner_v1"
+# 当虚拟墙没有单独配置 buffer 时使用的默认缓冲距离，单位米。
 default_virtual_wall_buffer_m: 0.575
-allow_legacy_unscoped_plan: false
-
 robot:
-  cov_width: 0.50
+  # Fields2Cover 使用的覆盖条带宽度；它更接近相邻清扫路径间距，而不是路径点间距，单位米。
+  cov_width: 0.90
+  # 机器人物理宽度，单位米。
   width: 0.50
-  min_turning_radius: 0.30
+  # 机器人最小转弯半径，单位米。
+  min_turning_radius: 0.50
+  # 曲率变化约束上限；值越小，转弯通常越平滑。
   max_diff_curv: 0.20
 
 planner:
+  # Boustrophedon 分解时使用的分割角，单位度。
   split_angle_deg: 0.0
+  # 相邻条带之间的转弯模型，可选 dubins、dubinscc、reeds_shepp（前提是绑定支持）。
   turn_model: "dubins"
+  # 仅用于调试 / RViz 显示的重采样步长，单位米。
   viz_step_m: 0.05
+  # 最终输出路径的点间距，单位米。
   path_step_m: 0.05
+  # 转弯段离散化采样步长，单位米。
   turn_step_m: 0.05
+  # 调试可视化 marker 的线宽。
   line_w: 0.05
+  # 是否抑制 Fields2Cover 原生调用输出的 stderr 噪声。
   mute_stderr: true
-  wall_margin_m: 0.50
+  # 生成覆盖路径前，相对墙体 / 边界的收缩安全距离，单位米。
+  # 过大的值在狭窄区域会让底层 Fields2Cover 绑定不稳定；后端还会在运行时继续做安全收敛。
+  wall_margin_m: 0.30
+  # 在插入转弯前，从每条覆盖条带两端裁掉的预留距离，单位米。
   turn_margin_m: 1.20
+  # 边缘收边环路使用的圆角半径；实际生效值不会小于 min_turning_radius。
   edge_corner_radius_m: 0.50
+  # 边缘收边圆角的 Bezier 拉伸系数；会影响圆角看起来更紧还是更舒展。
   edge_corner_pull: 0.10
+  # 每个圆角最少采样点数。
   edge_corner_min_pts: 36
+  # 在蛇形主路径上选择预连接点时，前向投影窗口的起点，单位米。
   pre_proj_min: 0.50
+  # 在蛇形主路径上选择预连接点时，前向投影窗口的终点，单位米。
   pre_proj_max: 0.60
+  # 在蛇形主路径前缀上搜索预连接点时允许搜索的最大弧长，单位米。
   pre_prefix_max: 1.00
+  # 在边缘收边环路上选择回接点时，弧长窗口的起点，单位米。
   e_pre_min: 0.40
+  # 在边缘收边环路上选择回接点时，弧长窗口的终点，单位米。
   e_pre_max: 0.50

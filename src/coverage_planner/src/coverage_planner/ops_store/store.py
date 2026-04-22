@@ -124,6 +124,7 @@ class JobRecord:
     job_id: str
     job_name: str = ""
     map_name: str = ""
+    map_revision_id: str = ""
     zone_id: str = ""
     plan_profile_name: str = ""
     sys_profile_name: str = ""
@@ -159,6 +160,7 @@ class ScheduleRecord:
     end_date: str = ""
     job_name: str = ""
     map_name: str = ""
+    map_revision_id: str = ""
     zone_id: str = ""
     plan_profile_name: str = ""
     sys_profile_name: str = ""
@@ -177,6 +179,7 @@ class MissionRunRecord:
     run_id: str
     job_id: str = ""
     map_name: str = ""
+    map_revision_id: str = ""
     zone_id: str = ""
     plan_profile_name: str = ""
     plan_id: str = ""
@@ -211,6 +214,7 @@ class MissionCheckpointRecord:
     path_s: float = 0.0
     state: str = ""
     water_off_latched: bool = False
+    map_revision_id: str = ""
     map_id: str = ""
     map_md5: str = ""
     updated_ts: float = 0.0
@@ -223,6 +227,7 @@ class RobotRuntimeStateRecord:
     active_job_id: str = ""
     active_schedule_id: str = ""
     map_name: str = ""
+    map_revision_id: str = ""
     localization_state: Optional[str] = None
     localization_valid: Optional[bool] = None
     mission_state: str = "IDLE"
@@ -240,8 +245,35 @@ class RobotRuntimeStateRecord:
     updated_ts: float = 0.0
 
 
+@dataclass
+class SlamJobRecord:
+    job_id: str
+    robot_id: str = "local_robot"
+    operation: int = 0
+    operation_name: str = ""
+    requested_map_name: str = ""
+    requested_map_revision_id: str = ""
+    resolved_map_name: str = ""
+    resolved_map_revision_id: str = ""
+    set_active: bool = False
+    description: str = ""
+    status: str = ""
+    phase: str = ""
+    progress_0_1: float = 0.0
+    done: bool = False
+    success: bool = False
+    error_code: str = ""
+    message: str = ""
+    current_mode: str = ""
+    localization_state: str = ""
+    created_ts: float = 0.0
+    started_ts: float = 0.0
+    finished_ts: float = 0.0
+    updated_ts: float = 0.0
+
+
 class OperationsStore:
-    _MIGRATED_TABLES = (
+    _SCHEMA_UPGRADE_TABLES = (
         "sys_profiles",
         "actuator_profiles",
         "jobs",
@@ -250,6 +282,7 @@ class OperationsStore:
         "mission_runs",
         "mission_checkpoints",
         "robot_runtime_state",
+        "slam_jobs",
         "robot_events",
     )
 
@@ -282,24 +315,38 @@ class OperationsStore:
         except Exception:
             return []
 
-    def _needs_schema_migration(self, conn: sqlite3.Connection) -> bool:
-        return (
-            "map_version" in self._table_columns(conn, "jobs")
-            or "map_version" in self._table_columns(conn, "mission_runs")
-            or "map_version" in self._table_columns(conn, "robot_runtime_state")
-        )
+    def _schema_upgrade_reasons(self, conn: sqlite3.Connection) -> List[str]:
+        reasons: List[str] = []
+        if "map_version" in self._table_columns(conn, "jobs"):
+            reasons.append("jobs still expose map_version")
+        if "map_version" in self._table_columns(conn, "mission_runs"):
+            reasons.append("mission_runs still expose map_version")
+        if "map_version" in self._table_columns(conn, "robot_runtime_state"):
+            reasons.append("robot_runtime_state still exposes map_version")
+        return reasons
 
     def ensure_schema(self):
         conn = self._connect()
         try:
-            if self._needs_schema_migration(conn):
-                self._migrate_legacy_schema(conn)
+            upgrade_reasons = self._schema_upgrade_reasons(conn)
+            if upgrade_reasons:
+                self._upgrade_pre_scoped_map_schema(conn, upgrade_reasons)
             self._create_schema(conn)
+            self._record_schema_meta(conn, upgrade_reasons=upgrade_reasons)
         finally:
             conn.close()
 
     def _create_schema(self, conn: sqlite3.Connection):
         cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_meta(
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_ts REAL NOT NULL
+            );
+            """
+        )
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS sys_profiles(
@@ -331,6 +378,7 @@ class OperationsStore:
               job_id TEXT PRIMARY KEY,
               job_name TEXT,
               map_name TEXT,
+              map_revision_id TEXT,
               zone_id TEXT,
               plan_profile_name TEXT,
               sys_profile_name TEXT,
@@ -379,6 +427,7 @@ class OperationsStore:
               run_id TEXT PRIMARY KEY,
               job_id TEXT,
               map_name TEXT,
+              map_revision_id TEXT,
               zone_id TEXT,
               plan_profile_name TEXT,
               plan_id TEXT,
@@ -417,6 +466,7 @@ class OperationsStore:
               path_s REAL NOT NULL DEFAULT 0.0,
               state TEXT,
               water_off_latched INTEGER NOT NULL DEFAULT 0,
+              map_revision_id TEXT,
               map_id TEXT,
               map_md5 TEXT,
               updated_ts REAL NOT NULL
@@ -432,6 +482,7 @@ class OperationsStore:
               active_job_id TEXT,
               active_schedule_id TEXT,
               map_name TEXT,
+              map_revision_id TEXT,
               localization_state TEXT,
               localization_valid INTEGER NOT NULL DEFAULT 0,
               mission_state TEXT,
@@ -469,10 +520,69 @@ class OperationsStore:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_robot_events_run_ts ON robot_events(run_id, ts);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_robot_events_zone_ts ON robot_events(zone_id, ts);")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS slam_jobs(
+              job_id TEXT PRIMARY KEY,
+              robot_id TEXT NOT NULL,
+              operation INTEGER NOT NULL DEFAULT 0,
+              operation_name TEXT,
+              requested_map_name TEXT,
+              requested_map_revision_id TEXT,
+              resolved_map_name TEXT,
+              resolved_map_revision_id TEXT,
+              set_active INTEGER NOT NULL DEFAULT 0,
+              description TEXT,
+              status TEXT,
+              phase TEXT,
+              progress_0_1 REAL NOT NULL DEFAULT 0.0,
+              done INTEGER NOT NULL DEFAULT 0,
+              success INTEGER NOT NULL DEFAULT 0,
+              error_code TEXT,
+              message TEXT,
+              current_mode TEXT,
+              localization_state TEXT,
+              created_ts REAL NOT NULL,
+              started_ts REAL NOT NULL DEFAULT 0.0,
+              finished_ts REAL NOT NULL DEFAULT 0.0,
+              updated_ts REAL NOT NULL
+            );
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_slam_jobs_robot_ts ON slam_jobs(robot_id, updated_ts);")
         self._ensure_column(conn, "jobs", "return_to_dock_on_finish", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column(conn, "jobs", "repeat_after_full_charge", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column(conn, "jobs", "map_revision_id", "TEXT")
+        self._ensure_column(conn, "mission_runs", "map_revision_id", "TEXT")
+        self._ensure_column(conn, "mission_checkpoints", "map_revision_id", "TEXT")
+        self._ensure_column(conn, "robot_runtime_state", "map_revision_id", "TEXT")
+        self._ensure_column(conn, "slam_jobs", "requested_map_revision_id", "TEXT")
+        self._ensure_column(conn, "slam_jobs", "resolved_map_revision_id", "TEXT")
         self._ensure_column(conn, "robot_runtime_state", "return_to_dock_on_finish", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column(conn, "robot_runtime_state", "repeat_after_full_charge", "INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
+    def _set_meta_value(self, conn: sqlite3.Connection, key: str, value: Any) -> None:
+        conn.execute(
+            """
+            INSERT INTO schema_meta(key, value, updated_ts)
+            VALUES(?,?,?)
+            ON CONFLICT(key) DO UPDATE SET
+              value=excluded.value,
+              updated_ts=excluded.updated_ts;
+            """,
+            (
+                str(key or "").strip(),
+                str(value if value is not None else ""),
+                _now_ts(),
+            ),
+        )
+
+    def _record_schema_meta(self, conn: sqlite3.Connection, *, upgrade_reasons: Optional[List[str]] = None) -> None:
+        self._set_meta_value(conn, "schema_generation", "ops_store_v2_scoped_maps")
+        if upgrade_reasons:
+            self._set_meta_value(conn, "last_schema_upgrade_reasons", _json_dumps(list(upgrade_reasons)))
+            self._set_meta_value(conn, "last_schema_upgrade_ts", str(_now_ts()))
         conn.commit()
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
@@ -481,7 +591,7 @@ class OperationsStore:
             return
         conn.execute("ALTER TABLE %s ADD COLUMN %s %s;" % (str(table_name), str(column_name), str(column_sql)))
 
-    def _migrate_legacy_schema(self, conn: sqlite3.Connection):
+    def _upgrade_pre_scoped_map_schema(self, conn: sqlite3.Connection, upgrade_reasons: Optional[List[str]] = None):
         sys_profiles = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM sys_profiles;")] if self._table_exists(conn, "sys_profiles") else []
         actuator_profiles = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM actuator_profiles;")] if self._table_exists(conn, "actuator_profiles") else []
         jobs = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM jobs;")] if self._table_exists(conn, "jobs") else []
@@ -490,12 +600,13 @@ class OperationsStore:
         mission_runs = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM mission_runs;")] if self._table_exists(conn, "mission_runs") else []
         mission_checkpoints = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM mission_checkpoints;")] if self._table_exists(conn, "mission_checkpoints") else []
         runtime_rows = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM robot_runtime_state;")] if self._table_exists(conn, "robot_runtime_state") else []
+        slam_jobs = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM slam_jobs;")] if self._table_exists(conn, "slam_jobs") else []
         robot_events = [dict(r) for r in self._fetch_rows(conn, "SELECT * FROM robot_events;")] if self._table_exists(conn, "robot_events") else []
 
         cur = conn.cursor()
         try:
             cur.execute("BEGIN IMMEDIATE;")
-            for table_name in self._MIGRATED_TABLES:
+            for table_name in self._SCHEMA_UPGRADE_TABLES:
                 cur.execute("DROP TABLE IF EXISTS %s;" % str(table_name))
             conn.commit()
         except Exception:
@@ -544,14 +655,15 @@ class OperationsStore:
                 cur.execute(
                     """
                     INSERT OR REPLACE INTO jobs(
-                      job_id, job_name, map_name, zone_id, plan_profile_name, sys_profile_name, default_clean_mode,
+                      job_id, job_name, map_name, map_revision_id, zone_id, plan_profile_name, sys_profile_name, default_clean_mode,
                       return_to_dock_on_finish, repeat_after_full_charge, default_loops, enabled, priority, created_ts, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("job_id") or ""),
                         str(row.get("job_name") or ""),
                         map_name,
+                        str(row.get("map_revision_id") or ""),
                         str(row.get("zone_id") or ""),
                         str(row.get("plan_profile_name") or ""),
                         str(row.get("sys_profile_name") or ""),
@@ -604,15 +716,16 @@ class OperationsStore:
                 cur.execute(
                     """
                     INSERT OR REPLACE INTO mission_runs(
-                      run_id, job_id, map_name, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
+                      run_id, job_id, map_name, map_revision_id, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
                       mbf_controller_name, actuator_profile_name, clean_mode, loops_total, loop_index,
                       trigger_source, state, reason, map_id, map_md5, created_ts, start_ts, end_ts, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("run_id") or ""),
                         str(row.get("job_id") or ""),
                         map_name,
+                        str(row.get("map_revision_id") or ""),
                         str(row.get("zone_id") or ""),
                         str(row.get("plan_profile_name") or ""),
                         str(row.get("plan_id") or ""),
@@ -640,8 +753,8 @@ class OperationsStore:
                     """
                     INSERT OR REPLACE INTO mission_checkpoints(
                       run_id, zone_id, plan_id, zone_version, exec_index, block_id, path_index, path_s,
-                      state, water_off_latched, map_id, map_md5, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);
+                      state, water_off_latched, map_revision_id, map_id, map_md5, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("run_id") or ""),
@@ -654,6 +767,7 @@ class OperationsStore:
                         float(row.get("path_s") or 0.0),
                         str(row.get("state") or ""),
                         int(row.get("water_off_latched", 0) or 0),
+                        str(row.get("map_revision_id") or ""),
                         str(row.get("map_id") or ""),
                         str(row.get("map_md5") or ""),
                         float(row.get("updated_ts") or _now_ts()),
@@ -664,10 +778,10 @@ class OperationsStore:
                 cur.execute(
                     """
                     INSERT OR REPLACE INTO robot_runtime_state(
-                      robot_id, active_run_id, active_job_id, active_schedule_id, map_name, localization_state, localization_valid,
+                      robot_id, active_run_id, active_job_id, active_schedule_id, map_name, map_revision_id, localization_state, localization_valid,
                       mission_state, phase, public_state, return_to_dock_on_finish, repeat_after_full_charge, armed, dock_state, battery_soc, battery_valid,
                       executor_state, last_error_code, last_error_msg, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("robot_id") or "local_robot"),
@@ -675,6 +789,7 @@ class OperationsStore:
                         str(row.get("active_job_id") or ""),
                         str(row.get("active_schedule_id") or ""),
                         map_name,
+                        str(row.get("map_revision_id") or ""),
                         str(row.get("localization_state") or ""),
                         int(row.get("localization_valid", 0) or 0),
                         str(row.get("mission_state") or "IDLE"),
@@ -689,6 +804,42 @@ class OperationsStore:
                         str(row.get("executor_state") or ""),
                         str(row.get("last_error_code") or ""),
                         str(row.get("last_error_msg") or ""),
+                        float(row.get("updated_ts") or _now_ts()),
+                    ),
+                )
+            for row in slam_jobs:
+                cur.execute(
+                    """
+                    INSERT OR REPLACE INTO slam_jobs(
+                      job_id, robot_id, operation, operation_name, requested_map_name, requested_map_revision_id,
+                      resolved_map_name, resolved_map_revision_id, set_active, description,
+                      status, phase, progress_0_1, done, success, error_code, message, current_mode, localization_state,
+                      created_ts, started_ts, finished_ts, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                    """,
+                    (
+                        str(row.get("job_id") or ""),
+                        str(row.get("robot_id") or "local_robot"),
+                        int(row.get("operation") or 0),
+                        str(row.get("operation_name") or ""),
+                        _normalize_map_name(row.get("requested_map_name") or ""),
+                        str(row.get("requested_map_revision_id") or ""),
+                        _normalize_map_name(row.get("resolved_map_name") or ""),
+                        str(row.get("resolved_map_revision_id") or ""),
+                        int(row.get("set_active", 0) or 0),
+                        str(row.get("description") or ""),
+                        str(row.get("status") or ""),
+                        str(row.get("phase") or ""),
+                        float(row.get("progress_0_1") or 0.0),
+                        int(row.get("done", 0) or 0),
+                        int(row.get("success", 0) or 0),
+                        str(row.get("error_code") or ""),
+                        str(row.get("message") or ""),
+                        str(row.get("current_mode") or ""),
+                        str(row.get("localization_state") or ""),
+                        float(row.get("created_ts") or _now_ts()),
+                        float(row.get("started_ts") or 0.0),
+                        float(row.get("finished_ts") or 0.0),
                         float(row.get("updated_ts") or _now_ts()),
                     ),
                 )
@@ -717,6 +868,7 @@ class OperationsStore:
         except Exception:
             conn.rollback()
             raise
+        self._record_schema_meta(conn, upgrade_reasons=list(upgrade_reasons or []))
 
     def upsert_sys_profile(
         self,
@@ -871,6 +1023,7 @@ class OperationsStore:
         job_id: str,
         job_name: str,
         map_name: str = "",
+        map_revision_id: str = "",
         zone_id: str,
         plan_profile_name: str,
         sys_profile_name: str,
@@ -891,12 +1044,13 @@ class OperationsStore:
             conn.execute(
                 """
                 INSERT INTO jobs(
-                  job_id, job_name, map_name, zone_id, plan_profile_name, sys_profile_name, default_clean_mode,
+                  job_id, job_name, map_name, map_revision_id, zone_id, plan_profile_name, sys_profile_name, default_clean_mode,
                   return_to_dock_on_finish, repeat_after_full_charge, default_loops, enabled, priority, created_ts, updated_ts
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(job_id) DO UPDATE SET
                   job_name=excluded.job_name,
                   map_name=excluded.map_name,
+                  map_revision_id=excluded.map_revision_id,
                   zone_id=excluded.zone_id,
                   plan_profile_name=excluded.plan_profile_name,
                   sys_profile_name=excluded.sys_profile_name,
@@ -912,6 +1066,7 @@ class OperationsStore:
                     str(job_id or "").strip(),
                     str(job_name or "").strip(),
                     _normalize_map_name(map_name),
+                    str(map_revision_id or "").strip(),
                     str(zone_id or "").strip(),
                     str(plan_profile_name or "").strip(),
                     str(sys_profile_name or "").strip(),
@@ -991,6 +1146,7 @@ class OperationsStore:
             end_date=str(row["end_date"] or ""),
             job_name=str(row["job_name"] or ""),
             map_name=str(row["map_name"] or ""),
+            map_revision_id=str(row["map_revision_id"] or ""),
             zone_id=str(row["zone_id"] or ""),
             plan_profile_name=str(row["plan_profile_name"] or ""),
             sys_profile_name=str(row["sys_profile_name"] or ""),
@@ -1012,7 +1168,7 @@ class OperationsStore:
                 SELECT
                   s.schedule_id, s.job_id, s.enabled AS schedule_enabled, s.schedule_type, s.dow_mask,
                   s.time_local, s.timezone, s.start_date, s.end_date, s.updated_ts,
-                  j.job_name, j.map_name, j.zone_id, j.plan_profile_name, j.sys_profile_name,
+                  j.job_name, j.map_name, j.map_revision_id, j.zone_id, j.plan_profile_name, j.sys_profile_name,
                   j.default_clean_mode, j.return_to_dock_on_finish, j.repeat_after_full_charge, j.default_loops,
                   COALESCE(ss.last_fire_ts, 0.0) AS last_fire_ts,
                   COALESCE(ss.last_done_ts, 0.0) AS last_done_ts,
@@ -1035,7 +1191,7 @@ class OperationsStore:
                 SELECT
                   s.schedule_id, s.job_id, s.enabled AS schedule_enabled, s.schedule_type, s.dow_mask,
                   s.time_local, s.timezone, s.start_date, s.end_date, s.updated_ts,
-                  j.job_name, j.map_name, j.zone_id, j.plan_profile_name, j.sys_profile_name,
+                  j.job_name, j.map_name, j.map_revision_id, j.zone_id, j.plan_profile_name, j.sys_profile_name,
                   j.default_clean_mode, j.return_to_dock_on_finish, j.repeat_after_full_charge, j.default_loops,
                   COALESCE(ss.last_fire_ts, 0.0) AS last_fire_ts,
                   COALESCE(ss.last_done_ts, 0.0) AS last_done_ts,
@@ -1089,7 +1245,7 @@ class OperationsStore:
                 SELECT
                   s.schedule_id, s.job_id, s.enabled AS schedule_enabled, s.schedule_type, s.dow_mask,
                   s.time_local, s.timezone, s.start_date, s.end_date,
-                  j.job_name, j.map_name, j.zone_id, j.plan_profile_name, j.sys_profile_name,
+                  j.job_name, j.map_name, j.map_revision_id, j.zone_id, j.plan_profile_name, j.sys_profile_name,
                   j.default_clean_mode, j.return_to_dock_on_finish, j.repeat_after_full_charge, j.default_loops, j.enabled AS job_enabled
                 FROM job_schedules s
                 JOIN jobs j ON j.job_id=s.job_id
@@ -1111,6 +1267,7 @@ class OperationsStore:
                     "end_date": str(row["end_date"] or "").strip(),
                     "task": {
                         "map_name": str(row["map_name"] or ""),
+                        "map_revision_id": str(row["map_revision_id"] or ""),
                         "zone_id": str(row["zone_id"] or ""),
                         "loops": int(row["default_loops"] or 1),
                         "plan_profile_name": str(row["plan_profile_name"] or ""),
@@ -1141,6 +1298,7 @@ class OperationsStore:
             job_id=str(row["job_id"] or ""),
             job_name=str(row["job_name"] or ""),
             map_name=map_name,
+            map_revision_id=str(row["map_revision_id"] or ""),
             zone_id=str(row["zone_id"] or ""),
             plan_profile_name=str(row["plan_profile_name"] or ""),
             sys_profile_name=str(row["sys_profile_name"] or ""),
@@ -1256,6 +1414,7 @@ class OperationsStore:
         run_id: str,
         job_id: str = "",
         map_name: str = "",
+        map_revision_id: str = "",
         zone_id: str = "",
         plan_profile_name: str = "",
         plan_id: str = "",
@@ -1283,15 +1442,16 @@ class OperationsStore:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO mission_runs(
-                  run_id, job_id, map_name, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
+                  run_id, job_id, map_name, map_revision_id, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
                   mbf_controller_name, actuator_profile_name, clean_mode, loops_total, loop_index,
                   trigger_source, state, reason, map_id, map_md5, created_ts, start_ts, end_ts, updated_ts
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                 """,
                 (
                     str(run_id or "").strip(),
                     str(job_id or "").strip(),
                     _normalize_map_name(map_name),
+                    str(map_revision_id or "").strip(),
                     str(zone_id or "").strip(),
                     str(plan_profile_name or "").strip(),
                     str(plan_id or "").strip(),
@@ -1324,6 +1484,7 @@ class OperationsStore:
         run_id: str,
         zone_id: str,
         map_name: str = "",
+        map_revision_id: str = "",
         plan_profile_name: str,
         sys_profile_name: str,
         clean_mode: str,
@@ -1335,6 +1496,7 @@ class OperationsStore:
             run_id=str(run_id or "").strip(),
             job_id="",
             map_name=str(map_name or "").strip(),
+            map_revision_id=str(map_revision_id or "").strip(),
             zone_id=str(zone_id or "").strip(),
             plan_profile_name=str(plan_profile_name or "").strip(),
             sys_profile_name=str(sys_profile_name or "").strip(),
@@ -1368,6 +1530,7 @@ class OperationsStore:
         run_id: str,
         *,
         map_name: Optional[str] = None,
+        map_revision_id: Optional[str] = None,
         zone_id: Optional[str] = None,
         plan_profile_name: Optional[str] = None,
         plan_id: Optional[str] = None,
@@ -1389,13 +1552,14 @@ class OperationsStore:
             conn.execute(
                 """
                 UPDATE mission_runs
-                SET map_name=?, zone_id=?, plan_profile_name=?, plan_id=?, zone_version=?, constraint_version=?, sys_profile_name=?,
+                SET map_name=?, map_revision_id=?, zone_id=?, plan_profile_name=?, plan_id=?, zone_version=?, constraint_version=?, sys_profile_name=?,
                     mbf_controller_name=?, actuator_profile_name=?, clean_mode=?,
                     map_id=?, map_md5=?, updated_ts=?
                 WHERE run_id=?;
                 """,
                 (
                     _normalize_map_name(map_name if map_name is not None else run.map_name),
+                    str(map_revision_id if map_revision_id is not None else run.map_revision_id),
                     str(zone_id if zone_id is not None else run.zone_id),
                     str(plan_profile_name if plan_profile_name is not None else run.plan_profile_name),
                     str(plan_id if plan_id is not None else run.plan_id),
@@ -1424,6 +1588,7 @@ class OperationsStore:
             run_id=str(row["run_id"] or ""),
             job_id=str(row["job_id"] or ""),
             map_name=map_name,
+            map_revision_id=str(row["map_revision_id"] or ""),
             zone_id=str(row["zone_id"] or ""),
             plan_profile_name=str(row["plan_profile_name"] or ""),
             plan_id=str(row["plan_id"] or ""),
@@ -1494,8 +1659,8 @@ class OperationsStore:
                 """
                 INSERT INTO mission_checkpoints(
                   run_id, zone_id, plan_id, zone_version, exec_index, block_id, path_index, path_s,
-                  state, water_off_latched, map_id, map_md5, updated_ts
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  state, water_off_latched, map_revision_id, map_id, map_md5, updated_ts
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(run_id) DO UPDATE SET
                   zone_id=excluded.zone_id,
                   plan_id=excluded.plan_id,
@@ -1506,6 +1671,7 @@ class OperationsStore:
                   path_s=excluded.path_s,
                   state=excluded.state,
                   water_off_latched=excluded.water_off_latched,
+                  map_revision_id=excluded.map_revision_id,
                   map_id=excluded.map_id,
                   map_md5=excluded.map_md5,
                   updated_ts=excluded.updated_ts;
@@ -1521,6 +1687,7 @@ class OperationsStore:
                     float(cp.path_s or 0.0),
                     str(cp.state or "").strip(),
                     _bool_int(cp.water_off_latched),
+                    str(cp.map_revision_id or "").strip(),
                     str(cp.map_id or "").strip(),
                     str(cp.map_md5 or "").strip(),
                     now,
@@ -1547,6 +1714,7 @@ class OperationsStore:
                 path_s=float(row["path_s"] or 0.0),
                 state=str(row["state"] or ""),
                 water_off_latched=bool(int(row["water_off_latched"] or 0)),
+                map_revision_id=str(row["map_revision_id"] or ""),
                 map_id=str(row["map_id"] or ""),
                 map_md5=str(row["map_md5"] or ""),
                 updated_ts=float(row["updated_ts"] or 0.0),
@@ -1608,15 +1776,16 @@ class OperationsStore:
             conn.execute(
                 """
                 INSERT INTO robot_runtime_state(
-                  robot_id, active_run_id, active_job_id, active_schedule_id, map_name, localization_state, localization_valid, mission_state, phase, public_state,
+                  robot_id, active_run_id, active_job_id, active_schedule_id, map_name, map_revision_id, localization_state, localization_valid, mission_state, phase, public_state,
                   return_to_dock_on_finish, repeat_after_full_charge, armed, dock_state, battery_soc, battery_valid, executor_state,
                   last_error_code, last_error_msg, updated_ts
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(robot_id) DO UPDATE SET
                   active_run_id=excluded.active_run_id,
                   active_job_id=excluded.active_job_id,
                   active_schedule_id=excluded.active_schedule_id,
                   map_name=excluded.map_name,
+                  map_revision_id=excluded.map_revision_id,
                   localization_state=excluded.localization_state,
                   localization_valid=excluded.localization_valid,
                   mission_state=excluded.mission_state,
@@ -1639,6 +1808,7 @@ class OperationsStore:
                     str(state.active_job_id or ""),
                     str(state.active_schedule_id or ""),
                     _normalize_map_name(state.map_name or ""),
+                    str(state.map_revision_id or "").strip(),
                     str(localization_state or ""),
                     _bool_int(localization_valid),
                     str(state.mission_state or "IDLE"),
@@ -1673,6 +1843,7 @@ class OperationsStore:
                 active_job_id=str(row["active_job_id"] or ""),
                 active_schedule_id=str(row["active_schedule_id"] or ""),
                 map_name=map_name,
+                map_revision_id=str(row["map_revision_id"] or ""),
                 localization_state=str(row["localization_state"] or ""),
                 localization_valid=bool(int(row["localization_valid"] or 0)),
                 mission_state=str(row["mission_state"] or "IDLE"),
@@ -1691,6 +1862,122 @@ class OperationsStore:
             )
         finally:
             conn.close()
+
+    def upsert_slam_job(self, job: SlamJobRecord):
+        ts = float(job.updated_ts or _now_ts())
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO slam_jobs(
+                  job_id, robot_id, operation, operation_name, requested_map_name, requested_map_revision_id,
+                  resolved_map_name, resolved_map_revision_id, set_active, description,
+                  status, phase, progress_0_1, done, success, error_code, message, current_mode, localization_state,
+                  created_ts, started_ts, finished_ts, updated_ts
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                  robot_id=excluded.robot_id,
+                  operation=excluded.operation,
+                  operation_name=excluded.operation_name,
+                  requested_map_name=excluded.requested_map_name,
+                  requested_map_revision_id=excluded.requested_map_revision_id,
+                  resolved_map_name=excluded.resolved_map_name,
+                  resolved_map_revision_id=excluded.resolved_map_revision_id,
+                  set_active=excluded.set_active,
+                  description=excluded.description,
+                  status=excluded.status,
+                  phase=excluded.phase,
+                  progress_0_1=excluded.progress_0_1,
+                  done=excluded.done,
+                  success=excluded.success,
+                  error_code=excluded.error_code,
+                  message=excluded.message,
+                  current_mode=excluded.current_mode,
+                  localization_state=excluded.localization_state,
+                  created_ts=excluded.created_ts,
+                  started_ts=excluded.started_ts,
+                  finished_ts=excluded.finished_ts,
+                  updated_ts=excluded.updated_ts;
+                """,
+                (
+                    str(job.job_id or "").strip(),
+                    str(job.robot_id or "local_robot").strip(),
+                    int(job.operation or 0),
+                    str(job.operation_name or "").strip(),
+                    _normalize_map_name(job.requested_map_name or ""),
+                    str(job.requested_map_revision_id or "").strip(),
+                    _normalize_map_name(job.resolved_map_name or ""),
+                    str(job.resolved_map_revision_id or "").strip(),
+                    _bool_int(job.set_active),
+                    str(job.description or "").strip(),
+                    str(job.status or "").strip(),
+                    str(job.phase or "").strip(),
+                    float(job.progress_0_1 or 0.0),
+                    _bool_int(job.done),
+                    _bool_int(job.success),
+                    str(job.error_code or "").strip(),
+                    str(job.message or "").strip(),
+                    str(job.current_mode or "").strip(),
+                    str(job.localization_state or "").strip(),
+                    float(job.created_ts or _now_ts()),
+                    float(job.started_ts or 0.0),
+                    float(job.finished_ts or 0.0),
+                    ts,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _slam_job_row_to_record(self, row: sqlite3.Row) -> SlamJobRecord:
+        return SlamJobRecord(
+            job_id=str(row["job_id"] or ""),
+            robot_id=str(row["robot_id"] or "local_robot"),
+            operation=int(row["operation"] or 0),
+            operation_name=str(row["operation_name"] or ""),
+            requested_map_name=_normalize_map_name(row["requested_map_name"] or ""),
+            requested_map_revision_id=str(row["requested_map_revision_id"] or ""),
+            resolved_map_name=_normalize_map_name(row["resolved_map_name"] or ""),
+            resolved_map_revision_id=str(row["resolved_map_revision_id"] or ""),
+            set_active=bool(int(row["set_active"] or 0)),
+            description=str(row["description"] or ""),
+            status=str(row["status"] or ""),
+            phase=str(row["phase"] or ""),
+            progress_0_1=float(row["progress_0_1"] or 0.0),
+            done=bool(int(row["done"] or 0)),
+            success=bool(int(row["success"] or 0)),
+            error_code=str(row["error_code"] or ""),
+            message=str(row["message"] or ""),
+            current_mode=str(row["current_mode"] or ""),
+            localization_state=str(row["localization_state"] or ""),
+            created_ts=float(row["created_ts"] or 0.0),
+            started_ts=float(row["started_ts"] or 0.0),
+            finished_ts=float(row["finished_ts"] or 0.0),
+            updated_ts=float(row["updated_ts"] or 0.0),
+        )
+
+    def get_slam_job(self, job_id: str) -> Optional[SlamJobRecord]:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM slam_jobs WHERE job_id=?;", (str(job_id or "").strip(),)).fetchone()
+            return self._slam_job_row_to_record(row) if row else None
+        finally:
+            conn.close()
+
+    def list_recent_slam_jobs(self, *, robot_id: str = "local_robot", limit: int = 20) -> List[SlamJobRecord]:
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM slam_jobs WHERE robot_id=? ORDER BY updated_ts DESC LIMIT ?;",
+                (str(robot_id or "local_robot").strip(), max(1, int(limit))),
+            ).fetchall()
+            return [self._slam_job_row_to_record(row) for row in (rows or [])]
+        finally:
+            conn.close()
+
+    def get_latest_slam_job(self, *, robot_id: str = "local_robot") -> Optional[SlamJobRecord]:
+        jobs = self.list_recent_slam_jobs(robot_id=robot_id, limit=1)
+        return jobs[0] if jobs else None
 
     def add_robot_event(
         self,

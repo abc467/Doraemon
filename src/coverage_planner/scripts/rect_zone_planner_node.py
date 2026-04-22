@@ -9,6 +9,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import actionlib
 import rospy
 import tf2_ros
+from cleanrobot_site_msgs.srv import (
+    ConfirmRectCoveragePlan as SiteConfirmRectCoveragePlan,
+    ConfirmRectCoveragePlanResponse as SiteConfirmRectCoveragePlanResponse,
+)
 from geometry_msgs.msg import Point32, PointStamped
 from std_srvs.srv import Trigger, TriggerResponse
 from tf2_geometry_msgs.tf2_geometry_msgs import do_transform_point
@@ -22,9 +26,9 @@ from coverage_planner.constraints import (
 )
 from coverage_planner.coverage_planner_core.geom_norm import normalize_polygon
 from coverage_planner.coverage_planner_ros.ros_viz_publisher import make_deleteall, make_line_strip, make_sphere
-from coverage_planner.map_identity import ensure_map_identity
+from coverage_planner.map_identity import ensure_map_identity, get_runtime_map_revision_id
 from coverage_planner.plan_store.store import PlanStore
-from my_msg_srv.srv import ConfirmRectCoveragePlan, ConfirmRectCoveragePlanResponse
+from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
 
 try:
     from shapely.geometry import GeometryCollection, Polygon
@@ -39,6 +43,8 @@ except Exception:
 
 
 XY = Tuple[float, float]
+_CONFIRM_RECT_REQUEST_FIELDS = ["zone_id", "profile_name", "debug_publish_markers"]
+_CONFIRM_RECT_RESPONSE_FIELDS = ["success", "message", "plan_id"]
 
 
 def _clamp_positive(value: float, default: float) -> float:
@@ -88,7 +94,7 @@ class RectZonePlannerNode:
         self.selection_inset_m = max(0.0, float(rospy.get_param("~selection_inset_m", 0.05)))
         self.hole_outset_m = max(0.0, float(rospy.get_param("~hole_outset_m", 0.05)))
         self.min_effective_side_m = _clamp_positive(rospy.get_param("~min_effective_side_m", 0.10), 0.10)
-        self.default_profile_name = str(rospy.get_param("~default_profile_name", "cover_standard")).strip() or "cover_standard"
+        self.default_plan_profile_name = str(rospy.get_param("~default_plan_profile_name", "cover_standard")).strip() or "cover_standard"
         self.plan_action_name = str(rospy.get_param("~plan_action_name", "/coverage_planner_server/plan_coverage")).strip()
         self.action_connect_timeout_s = _clamp_positive(rospy.get_param("~action_connect_timeout_s", 3.0), 3.0)
         self.plan_timeout_s = _clamp_positive(rospy.get_param("~plan_timeout_s", 120.0), 120.0)
@@ -97,28 +103,68 @@ class RectZonePlannerNode:
         self.default_virtual_wall_buffer_m = float(
             rospy.get_param("~default_virtual_wall_buffer_m", DEFAULT_VIRTUAL_WALL_BUFFER_M)
         )
+        self.site_confirm_service_name = str(
+            rospy.get_param("~site_confirm_service_name", "~site/confirm_rect_plan")
+        ).strip() or "~site/confirm_rect_plan"
+        self.site_confirm_contract_param_ns = str(
+            rospy.get_param(
+                "~site_confirm_contract_param_ns",
+                "/rect_zone_planner/contracts/site/confirm_rect_plan",
+            )
+        ).strip() or "/rect_zone_planner/contracts/site/confirm_rect_plan"
 
         self.store = PlanStore(self.plan_db_path)
         self.tf_buffer = tf2_ros.Buffer(cache_time=rospy.Duration(10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
         self.plan_client = actionlib.SimpleActionClient(self.plan_action_name, PlanCoverageAction)
+        self._site_contract_report = self._prepare_site_contract_report()
 
         self.first_point: Optional[XY] = None
         self.preview: Optional[Dict[str, object]] = None
 
         self.marker_pub = rospy.Publisher("~preview_markers", MarkerArray, queue_size=1, latch=True)
         self.click_sub = rospy.Subscriber(self.clicked_topic, PointStamped, self._on_click, queue_size=10)
-        self.confirm_srv = rospy.Service("~confirm_rect_plan", ConfirmRectCoveragePlan, self._handle_confirm)
+        self.confirm_srv = None
+        self.site_confirm_srv = rospy.Service(
+            self.site_confirm_service_name,
+            SiteConfirmRectCoveragePlan,
+            self._handle_confirm_site,
+        )
         self.cancel_srv = rospy.Service("~cancel_rect_plan", Trigger, self._handle_cancel)
+        if self.site_confirm_contract_param_ns:
+            rospy.set_param(self.site_confirm_contract_param_ns, self._site_contract_report)
 
         self._publish_markers()
         rospy.loginfo(
-            "[rect_zone_planner] ready clicked_topic=%s action=%s db=%s inset=%.3f min_effective=%.3f",
+            "[rect_zone_planner] ready clicked_topic=%s action=%s db=%s site_confirm=%s site_contract=%s inset=%.3f min_effective=%.3f",
             self.clicked_topic,
             self.plan_action_name,
             self.plan_db_path,
+            self.site_confirm_service_name,
+            self.site_confirm_contract_param_ns or "-",
             self.selection_inset_m,
             self.min_effective_side_m,
+        )
+
+    def _prepare_site_contract_report(self):
+        validate_ros_contract(
+            "SiteConfirmRectCoveragePlanRequest",
+            SiteConfirmRectCoveragePlan._request_class,
+            required_fields=_CONFIRM_RECT_REQUEST_FIELDS,
+        )
+        validate_ros_contract(
+            "SiteConfirmRectCoveragePlanResponse",
+            SiteConfirmRectCoveragePlanResponse,
+            required_fields=_CONFIRM_RECT_RESPONSE_FIELDS,
+        )
+        return build_contract_report(
+            service_name=rospy.resolve_name(self.site_confirm_service_name),
+            contract_name="rect_confirm_plan_service_site",
+            service_cls=SiteConfirmRectCoveragePlan,
+            request_cls=SiteConfirmRectCoveragePlan._request_class,
+            response_cls=SiteConfirmRectCoveragePlanResponse,
+            dependencies={},
+            features=["rviz_rect_plan_confirm", "cleanrobot_site_msgs_canonical"],
         )
 
     def _handle_cancel(self, _req) -> TriggerResponse:
@@ -173,7 +219,7 @@ class RectZonePlannerNode:
                 "Raw: %.2fm x %.2fm" % (raw_w, raw_h),
                 "Clean: %.2fm x %.2fm" % (eff_w, eff_h),
                 "Holes: %d  outset=%.2fm" % (holes, self.hole_outset_m),
-                "Confirm: rosservice call /rect_zone_planner/confirm_rect_plan ...",
+                "Confirm: rosservice call /rect_zone_planner/site/confirm_rect_plan ...",
             ]
         if self.first_point is not None:
             return [
@@ -186,16 +232,18 @@ class RectZonePlannerNode:
             "Rect Zone Preview [IDLE]",
             "Use RViz Publish Point tool",
             "Click A then B to create a rectangle",
-            "Confirm: /rect_zone_planner/confirm_rect_plan",
+            "Confirm: /rect_zone_planner/site/confirm_rect_plan",
         ]
 
     def _constraint_holes_for_outer(self, outer: Sequence[XY], *, active_map: Dict[str, object], prec: int = 3) -> List[List[XY]]:
         map_id = str(active_map.get("map_id") or "").strip()
         map_md5 = str(active_map.get("map_md5") or "").strip()
+        map_revision_id = str(active_map.get("revision_id") or "").strip()
         if not map_id:
             return []
         raw = self.store.load_map_constraints(
             map_id=map_id,
+            map_revision_id=map_revision_id,
             map_md5_hint=map_md5,
             create_if_missing=False,
         )
@@ -286,6 +334,7 @@ class RectZonePlannerNode:
             "raw_width_m": raw_w,
             "raw_height_m": raw_h,
             "map_name": str(active_map.get("map_name") or ""),
+            "map_revision_id": str(active_map.get("revision_id") or ""),
             "valid": False,
             "message": "",
         }
@@ -324,9 +373,10 @@ class RectZonePlannerNode:
                 preview["geom_holes"] = geom_holes
                 preview["hole_count"] = int(len(geom_holes))
                 map_id = str(active_map.get("map_id") or "").strip()
+                map_revision_id = str(active_map.get("revision_id") or "").strip()
                 if map_id:
                     preview["constraint_version"] = str(
-                        self.store.get_active_constraint_version(map_id) or ""
+                        self.store.get_active_constraint_version(map_id, map_revision_id) or ""
                     )
             except Exception as e:
                 rospy.logwarn("[rect_zone_planner] failed to derive holes from constraints: %s", str(e))
@@ -525,16 +575,17 @@ class RectZonePlannerNode:
         rospy.loginfo("[rect_zone_planner] %s", str(self.preview.get("message") or "preview updated"))
         self._publish_markers()
 
-    def _handle_confirm(self, req) -> ConfirmRectCoveragePlanResponse:
+    def _handle_confirm(self, req) -> SiteConfirmRectCoveragePlanResponse:
         zone_id = str(req.zone_id or "").strip()
-        profile_name = str(req.profile_name or "").strip() or self.default_profile_name
+        # ConfirmRectCoveragePlan keeps the wire field name `profile_name`.
+        plan_profile_name = str(req.profile_name or "").strip() or self.default_plan_profile_name
         if not zone_id:
-            return ConfirmRectCoveragePlanResponse(success=False, message="zone_id is required", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="zone_id is required", plan_id="")
 
         if not self.preview:
-            return ConfirmRectCoveragePlanResponse(success=False, message="no rectangle preview to confirm", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="no rectangle preview to confirm", plan_id="")
         if not bool(self.preview.get("valid")):
-            return ConfirmRectCoveragePlanResponse(
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message=str(self.preview.get("message") or "preview is not valid"),
                 plan_id="",
@@ -542,34 +593,50 @@ class RectZonePlannerNode:
 
         active_asset = self.store.get_active_map(robot_id=self.robot_id) or {}
         active_name = str(active_asset.get("map_name") or "").strip()
+        active_revision_id = str(active_asset.get("revision_id") or "").strip()
         if not active_name:
-            return ConfirmRectCoveragePlanResponse(success=False, message="current map is not selected", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="current map is not selected", plan_id="")
 
         preview_map_name = str(self.preview.get("map_name") or "").strip()
+        preview_map_revision_id = str(self.preview.get("map_revision_id") or "").strip()
         if preview_map_name and preview_map_name != active_name:
-            return ConfirmRectCoveragePlanResponse(
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message="selected map changed after preview: preview=%s current=%s" % (preview_map_name, active_name),
+                plan_id="",
+            )
+        if preview_map_revision_id and active_revision_id and preview_map_revision_id != active_revision_id:
+            return SiteConfirmRectCoveragePlanResponse(
+                success=False,
+                message="selected map revision changed after preview: preview=%s current=%s" % (
+                    preview_map_revision_id,
+                    active_revision_id,
+                ),
                 plan_id="",
             )
 
         p0 = tuple(self.preview.get("first_point") or ())
         p1 = tuple(self.preview.get("second_point") or ())
         if len(p0) != 2 or len(p1) != 2:
-            return ConfirmRectCoveragePlanResponse(success=False, message="preview is missing corner points", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="preview is missing corner points", plan_id="")
         current_preview = self._build_preview((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1])))
         current_preview["map_name"] = active_name
+        current_preview["map_revision_id"] = active_revision_id
         self.preview = current_preview
         self._publish_markers()
         if not bool(current_preview.get("valid")):
-            return ConfirmRectCoveragePlanResponse(
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message=str(current_preview.get("message") or "preview is not valid"),
                 plan_id="",
             )
 
-        if self.store.get_zone_meta(zone_id, map_name=active_name) is not None:
-            return ConfirmRectCoveragePlanResponse(
+        if self.store.get_zone_meta(
+            zone_id,
+            map_name=active_name,
+            map_revision_id=active_revision_id,
+        ) is not None:
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message="zone_id already exists on current map: %s" % zone_id,
                 plan_id="",
@@ -583,25 +650,32 @@ class RectZonePlannerNode:
             refresh=True,
         )
         if not ok or not map_id:
-            return ConfirmRectCoveragePlanResponse(success=False, message="failed to refresh runtime map identity", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="failed to refresh runtime map identity", plan_id="")
 
+        runtime_revision_id = str(get_runtime_map_revision_id("/cartographer/runtime") or "").strip()
         asset_id = str(active_asset.get("map_id") or "").strip()
         asset_md5 = str(active_asset.get("map_md5") or "").strip()
-        if asset_md5 and map_md5 and asset_md5 != map_md5:
-            return ConfirmRectCoveragePlanResponse(
+        if active_revision_id and runtime_revision_id and active_revision_id != runtime_revision_id:
+            return SiteConfirmRectCoveragePlanResponse(
+                success=False,
+                message="runtime /map revision does not match selected map asset",
+                plan_id="",
+            )
+        if (not runtime_revision_id) and asset_md5 and map_md5 and asset_md5 != map_md5:
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message="runtime /map md5 does not match selected map asset",
                 plan_id="",
             )
-        if asset_id and map_id and asset_id != map_id:
-            return ConfirmRectCoveragePlanResponse(
+        if (not runtime_revision_id) and asset_id and map_id and asset_id != map_id:
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message="runtime /map id does not match selected map asset",
                 plan_id="",
             )
 
         if not self.plan_client.wait_for_server(rospy.Duration(self.action_connect_timeout_s)):
-            return ConfirmRectCoveragePlanResponse(
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message="planner action not available: %s" % self.plan_action_name,
                 plan_id="",
@@ -625,15 +699,15 @@ class RectZonePlannerNode:
         goal.zone_version = 1
         goal.geom = geom
         goal.polygon_json = ""
-        goal.profile_name = profile_name
+        goal.profile_name = plan_profile_name
         goal.debug_publish_markers = bool(req.debug_publish_markers)
         goal.export_input = False
 
         rospy.loginfo(
-            "[rect_zone_planner] confirm zone=%s map=%s profile=%s holes=%d",
+            "[rect_zone_planner] confirm zone=%s map=%s plan_profile_name=%s holes=%d",
             zone_id,
             active_name,
-            profile_name,
+            plan_profile_name,
             len(holes),
         )
         self.plan_client.send_goal(goal)
@@ -643,13 +717,13 @@ class RectZonePlannerNode:
                 self.plan_client.cancel_goal()
             except Exception:
                 pass
-            return ConfirmRectCoveragePlanResponse(success=False, message="planner action timed out", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="planner action timed out", plan_id="")
 
         result = self.plan_client.get_result()
         if result is None:
-            return ConfirmRectCoveragePlanResponse(success=False, message="planner returned no result", plan_id="")
+            return SiteConfirmRectCoveragePlanResponse(success=False, message="planner returned no result", plan_id="")
         if not bool(getattr(result, "ok", False)):
-            return ConfirmRectCoveragePlanResponse(
+            return SiteConfirmRectCoveragePlanResponse(
                 success=False,
                 message=str(getattr(result, "error_message", "") or getattr(result, "error_code", "planning failed")),
                 plan_id="",
@@ -658,11 +732,14 @@ class RectZonePlannerNode:
         plan_id = str(getattr(result, "plan_id", "") or "")
         rospy.loginfo("[rect_zone_planner] plan created zone=%s plan_id=%s", zone_id, plan_id)
         self._clear_selection()
-        return ConfirmRectCoveragePlanResponse(
+        return SiteConfirmRectCoveragePlanResponse(
             success=True,
-            message="planned zone=%s map=%s profile=%s holes=%d" % (zone_id, active_name, profile_name, len(holes)),
+            message="planned zone=%s map=%s plan_profile_name=%s holes=%d" % (zone_id, active_name, plan_profile_name, len(holes)),
             plan_id=plan_id,
         )
+
+    def _handle_confirm_site(self, req) -> SiteConfirmRectCoveragePlanResponse:
+        return self._handle_confirm(req)
 
 
 def main():

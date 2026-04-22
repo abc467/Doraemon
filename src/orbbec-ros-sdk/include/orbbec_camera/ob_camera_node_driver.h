@@ -1,18 +1,29 @@
+/*******************************************************************************
+ * Copyright (c) 2023 Orbbec 3D Technology, Inc
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *******************************************************************************/
+
 #pragma once
 #include "ob_camera_node.h"
 #include <thread>
 #include <mutex>
 #include <semaphore.h>
-
+#include <pthread.h>
+#define BACKWARD_HAS_DW 1
+#include <backward-cpp/backward.hpp>
 
 namespace orbbec_camera {
-enum DeviceConnectionEvent {
-  kDeviceConnected = 0,
-  kDeviceDisconnected,
-  kOtherDeviceConnected,
-  kOtherDeviceDisconnected,
-  kDeviceCountUpdate,
-};
 
 class OBCameraNodeDriver {
  public:
@@ -23,19 +34,20 @@ class OBCameraNodeDriver {
  private:
   void init();
 
-  void releaseDeviceSemaphore(sem_t* device_sem, int& num_devices_connected);
-
-  static void updateConnectedDeviceCount(int& num_devices_connected,
-                                  DeviceConnectionEvent connection_event);
-
   std::shared_ptr<ob::Device> selectDevice(const std::shared_ptr<ob::DeviceList>& list);
+
+  bool rebootDeviceServiceCallback(std_srvs::EmptyRequest& req, std_srvs::EmptyResponse& res);
 
   std::shared_ptr<ob::Device> selectDeviceBySerialNumber(
       const std::shared_ptr<ob::DeviceList>& list, const std::string& serial_number);
+  std::shared_ptr<ob::Device> selectDeviceByUSBPort(const std::shared_ptr<ob::DeviceList>& list,
+                                                    const std::string& usb_port);
 
   void initializeDevice(const std::shared_ptr<ob::Device>& device);
 
-  void startDevice(const std::shared_ptr<ob::DeviceList>& list);
+  void deviceConnectCallback(const std::shared_ptr<ob::DeviceList>& list);
+
+  void connectNetDevice(const std::string& ip_address, int port);
 
   void checkConnectionTimer();
 
@@ -45,9 +57,10 @@ class OBCameraNodeDriver {
 
   void queryDevice();
 
-  void deviceCountUpdate();
+  void resetDeviceThread();
 
- private:
+  static std::string parseUsbPort(const std::string& line);
+
   ros::NodeHandle nh_;
   ros::NodeHandle nh_private_;
   std::string config_path_;
@@ -61,11 +74,26 @@ class OBCameraNodeDriver {
   std::string serial_number_;
   std::string device_uid_;
   std::string log_level_;
+  std::string usb_port_;
   int connection_delay_ = 1.0;
   std::shared_ptr<std::thread> query_thread_ = nullptr;
-  std::shared_ptr<std::thread> device_count_update_thread_ = nullptr;
   std::recursive_mutex device_lock_;
   int device_num_ = 1;
-  int num_devices_connected_ = 0;
+  bool enumerate_net_device_ = false;
+  std::shared_ptr<std::thread> reset_device_thread_ = nullptr;
+  std::condition_variable reset_device_cv_;
+  std::atomic_bool reset_device_{false};
+  std::mutex reset_device_lock_;
+  pthread_mutex_t* orb_device_lock_ = nullptr;
+  pthread_mutexattr_t orb_device_lock_attr_;
+  uint8_t* orb_device_lock_shm_addr_ = nullptr;
+  int orb_device_lock_shm_fd_ = -1;
+  // net work config
+  std::string ip_address_;
+  int port_ = 0;
+  ros::ServiceServer reboot_service_srv_;
+  static backward::SignalHandling sh;
+  bool enable_hardware_reset_ = false;
+  bool hardware_reset_done_ = false;
 };
 }  // namespace orbbec_camera

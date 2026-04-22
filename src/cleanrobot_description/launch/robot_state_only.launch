@@ -1,0 +1,13 @@
+<launch>
+  <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/clean_robot.urdf"/>
+  <arg name="publish_frequency" default="30.0"/>
+
+  <param name="robot_description" textfile="$(arg robot_description_path)"/>
+
+  <node name="robot_state_publisher"
+        pkg="robot_state_publisher"
+        type="robot_state_publisher"
+        output="screen">
+    <param name="publish_frequency" value="$(arg publish_frequency)"/>
+  </node>
+</launch>

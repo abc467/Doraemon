@@ -24,8 +24,6 @@
 #include "gflags/gflags.h"
 #include "tf2_ros/transform_listener.h"
 
-#include "keydog.h"
-
 // DEFINE_bool(collect_metrics, false,
 //             "Activates the collection of runtime metrics. If activated, the "
 //             "metrics can be accessed via a ROS service.");
@@ -50,16 +48,6 @@
 
 int main(int argc, char **argv)
 {
-  // if (!keydog::validate_key())
-  // {
-  //   std::cout << "Verification Failed." << std::endl;
-  //   std::exit(0);
-  // }
-  // else
-  // {
-  //   std::cout << "Verification Passed." << std::endl;
-  // }
-
   google::InitGoogleLogging(argv[0]);
   ::ros::init(argc, argv, "cartographer_node");
   ::ros::start();

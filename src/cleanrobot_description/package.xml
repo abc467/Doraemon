@@ -1,0 +1,19 @@
+<package format="2">
+  <name>cleanrobot_description</name>
+  <version>1.0.0</version>
+  <description>
+    Canonical robot description package for the cleanrobot platform.
+    This package contains the robot model assets, meshes, URDF files,
+    and robot_state_publisher display entrypoints used by the current runtime.
+  </description>
+  <author>sunnybaer</author>
+  <maintainer email="sunnybaer@todo.todo">sunnybaer</maintainer>
+  <license>BSD</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>roslaunch</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>joint_state_publisher</depend>
+  <export>
+    <architecture_independent />
+  </export>
+</package>

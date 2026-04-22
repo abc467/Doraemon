@@ -13,19 +13,31 @@
   <arg name="plan_db_path" default="/data/coverage/planning.db"/>
   <arg name="ops_db_path" default="/data/coverage/operations.db"/>
   <arg name="maps_root" default="/data/maps"/>
-  <arg name="external_maps_root" default="/home/sunnybaer/Doraemon/map"/>
+  <arg name="external_maps_root" default="/data/maps/imports"/>
   <arg name="robot_id" default="local_robot"/>
   <arg name="map_name" default=""/>
-  <arg name="legacy_map_src_glob" default=""/>
   <arg name="cartographer_mode" default="localization"/>
   <arg name="cartographer_runtime_ns" default="/cartographer/runtime"/>
-  <arg name="cartographer_config_root" default="$(find cleanrobot)/config/cartographer"/>
+  <arg name="cartographer_config_root" default=""/>
+  <arg name="start_odometry_runtime" default="true"/>
   <arg name="start_planner_server" default="true"/>
   <arg name="enable_rect_zone_planner" default="true"/>
-  <arg name="start_legacy_mapping_service" default="false"/>
+  <arg name="enable_depth_obstacle_tracking" default="true"/>
+  <arg name="start_depth_camera_runtime" default="true"/>
+  <arg name="publish_robot_tf_for_depth_cameras" default="true"/>
+  <arg name="enable_depth_left_cam" default="true"/>
+  <arg name="enable_depth_right_cam" default="true"/>
+  <arg name="enable_depth_up_cam" default="false"/>
+  <arg name="depth_left_points_topic" default="/gemini_cf/depth/points"/>
+  <arg name="depth_right_points_topic" default="/gemini_nj/depth/points"/>
+  <arg name="depth_left_obstacle_topic" default="obstacle_2d"/>
+  <arg name="depth_right_obstacle_topic" default="obstacle_2d"/>
+  <arg name="camera1_bind_by_usb_port" default="false"/>
+  <arg name="camera2_bind_by_usb_port" default="false"/>
   <arg name="mechanical_connect_enable" default="false"/>
   <arg name="dock_pose_score_thresh" default="0.00012"/>
-  <arg name="restart_localization_contract_param_ns" default="/cartographer/runtime/contracts/restart_localization"/>
+  <arg name="restart_localization_app_service_name" default="/cartographer/runtime/app/restart_localization"/>
+  <arg name="restart_localization_app_contract_param_ns" default="/cartographer/runtime/contracts/app/restart_localization"/>
 
   <!-- start TCP bridges + supply manager -->
   <include file="$(find robot_hw_bridge)/launch/hardware_bridges.launch">
@@ -34,67 +46,63 @@
   </include>
 
   <group if="$(arg start_navigation)">
-    <include file="$(find cleanrobot)/launch/cartographer_localization.launch">
-      <arg name="config_root" value="$(arg cartographer_config_root)"/>
-      <arg name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
-      <arg name="map_name" value="$(arg map_name)"/>
-      <arg name="auto_start" value="false"/>
-    </include>
+    <group if="$(arg start_odometry_runtime)">
+      <include file="$(find wheel_speed_odom_bridge)/launch/imu_bias_correction.launch"/>
+      <include file="$(find wheel_speed_odom_bridge)/launch/wheel_speed_odom.launch"/>
+    </group>
 
-    <node pkg="coverage_planner" type="cartographer_runtime_manager_node.py" name="cartographer_runtime_manager" output="screen">
-      <param name="plan_db_path" value="$(arg plan_db_path)"/>
-      <param name="ops_db_path" value="$(arg ops_db_path)"/>
-      <param name="robot_id" value="$(arg robot_id)"/>
-      <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
-      <param name="map_name" value="$(arg map_name)"/>
-      <param name="startup_activate_map" value="false"/>
-      <param name="activate_service" value="/map_assets/activate"/>
-      <param name="relocalize_service" value="/map_assets/relocalize"/>
-      <param name="reload_service" value="/cartographer/runtime/reload"/>
-      <param name="map_topic" value="/map"/>
-    </node>
+    <group if="$(arg enable_depth_obstacle_tracking)">
+      <group if="$(arg start_depth_camera_runtime)">
+        <include file="$(find cleanrobot)/launch/depth_obstacle_runtime.launch">
+          <arg name="start_robot_state_publisher" value="$(arg publish_robot_tf_for_depth_cameras)"/>
+          <arg name="start_depth_cameras" value="true"/>
+          <arg name="camera1_bind_by_usb_port" value="$(arg camera1_bind_by_usb_port)"/>
+          <arg name="camera2_bind_by_usb_port" value="$(arg camera2_bind_by_usb_port)"/>
+        </include>
+      </group>
+    </group>
 
-    <node pkg="coverage_planner" type="localization_lifecycle_manager_node.py" name="localization_lifecycle_manager" output="screen">
-      <param name="plan_db_path" value="$(arg plan_db_path)"/>
-      <param name="ops_db_path" value="$(arg ops_db_path)"/>
-      <param name="robot_id" value="$(arg robot_id)"/>
-      <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
-      <param name="service_name" value="/cartographer/runtime/restart_localization"/>
-      <param name="contract_param_ns" value="$(arg restart_localization_contract_param_ns)"/>
-      <param name="map_topic" value="/map"/>
-      <param name="tracked_pose_topic" value="/tracked_pose"/>
-    </node>
-
-    <include file="$(find clean_robot_description)/launch/mbf_nav.launch">
+    <include file="$(find cleanrobot)/launch/mbf_nav.launch">
       <arg name="plan_db_path" value="$(arg plan_db_path)"/>
       <arg name="ops_db_path" value="$(arg ops_db_path)"/>
       <arg name="robot_id" value="$(arg robot_id)"/>
       <arg name="map_name" value="$(arg map_name)"/>
       <arg name="external_maps_root" value="$(arg external_maps_root)"/>
-      <arg name="start_static_map_manager" value="false"/>
+      <arg name="enable_depth_obstacle_tracking" value="$(arg enable_depth_obstacle_tracking)"/>
+      <arg name="enable_depth_left_cam" value="$(arg enable_depth_left_cam)"/>
+      <arg name="enable_depth_right_cam" value="$(arg enable_depth_right_cam)"/>
+      <arg name="enable_depth_up_cam" value="$(arg enable_depth_up_cam)"/>
+      <arg name="depth_left_points_topic" value="$(arg depth_left_points_topic)"/>
+      <arg name="depth_right_points_topic" value="$(arg depth_right_points_topic)"/>
+      <arg name="depth_left_obstacle_topic" value="$(arg depth_left_obstacle_topic)"/>
+      <arg name="depth_right_obstacle_topic" value="$(arg depth_right_obstacle_topic)"/>
     </include>
 
+    <!-- Official runtime owner chain:
+         planner_server.launch -> slam_runtime_manager/slam_api_service.
+         Do not start cleanrobot/cartographer_supervisor in formal bringup. -->
     <group if="$(arg start_planner_server)">
+      <node pkg="coverage_planner" type="localization_lifecycle_manager_node.py" name="localization_lifecycle_manager" output="screen" respawn="true" respawn_delay="2.0">
+        <param name="plan_db_path" value="$(arg plan_db_path)"/>
+        <param name="ops_db_path" value="$(arg ops_db_path)"/>
+        <param name="robot_id" value="$(arg robot_id)"/>
+        <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
+        <param name="app_service_name" value="$(arg restart_localization_app_service_name)"/>
+        <param name="app_contract_param_ns" value="$(arg restart_localization_app_contract_param_ns)"/>
+        <param name="map_topic" value="/map"/>
+        <param name="tracked_pose_topic" value="/tracked_pose"/>
+      </node>
+
       <include file="$(find coverage_planner)/launch/planner_server.launch">
         <arg name="plan_db_path" value="$(arg plan_db_path)"/>
+        <arg name="ops_db_path" value="$(arg ops_db_path)"/>
+        <arg name="maps_root" value="$(arg maps_root)"/>
         <arg name="robot_id" value="$(arg robot_id)"/>
         <arg name="map_topic" value="/map"/>
         <arg name="enable_rect_zone_planner" value="$(arg enable_rect_zone_planner)"/>
+        <arg name="enable_odometry_health" value="false"/>
       </include>
     </group>
-  </group>
-
-  <group if="$(arg start_legacy_mapping_service)">
-    <node pkg="coverage_planner" type="map_asset_manager_node.py" name="map_asset_manager" output="screen">
-      <param name="plan_db_path" value="$(arg plan_db_path)"/>
-      <param name="maps_root" value="$(arg maps_root)"/>
-      <param name="robot_id" value="$(arg robot_id)"/>
-      <param name="map_topic" value="/map"/>
-      <param name="runtime_ns" value="$(arg cartographer_runtime_ns)"/>
-      <param name="cartographer_save_state_service" value="/cartographer/runtime/save_state"/>
-      <param name="set_active_on_save" value="true"/>
-      <param name="service_name" value="/clean_robot_server/mapping_server"/>
-    </node>
   </group>
 
   <!-- task+executor system (task manager owns auto charge) -->
@@ -106,8 +114,9 @@
     <arg name="ops_db_path" value="$(arg ops_db_path)"/>
     <arg name="maps_root" value="$(arg maps_root)"/>
     <arg name="robot_id" value="$(arg robot_id)"/>
+    <arg name="start_odometry_health" value="true"/>
+    <arg name="start_localization_lifecycle_manager" value="false"/>
     <arg name="run_map_migration" value="false"/>
-    <arg name="legacy_map_src_glob" value="$(arg legacy_map_src_glob)"/>
   </include>
 
 </launch>

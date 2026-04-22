@@ -1,0 +1,5 @@
+string[] keys
+---
+int32 opcode
+string msg
+string[] vals

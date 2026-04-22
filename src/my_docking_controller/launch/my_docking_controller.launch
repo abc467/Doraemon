@@ -1,5 +1,4 @@
 <launch>
-    <arg name="use_rviz" default="false" />
     <arg name="start_dock_tracker" default="true" />
     <arg name="base_frame" default="base_link" />
     <arg name="scan_topic" default="/scan" />
@@ -46,11 +45,4 @@
         <param name="v_angular_max" value="0.5" />
         <param name="slowdown_radius" value="1.2" /> 
     </node>
-
-
-    <!-- <group if="$(arg use_rviz)">
-        <node pkg="rviz" type="rviz" name="docking_rviz" 
-              args="-d $(find dock_tracker)/rviz/docking.rviz" />
-    </group> -->
-
 </launch>

@@ -21,7 +21,7 @@ set(PACKAGE_DEPENDENCIES
   geometry_msgs
   message_runtime
   nav_msgs
-  param_space
+  robot_runtime_flags_msgs
   pcl_conversions
   rosbag
   roscpp
@@ -107,12 +107,6 @@ add_subdirectory("cartographer_ros")
 
 target_link_libraries(${PROJECT_NAME} PUBLIC cartographer)
 
-# Link ViKey dog
-target_link_libraries(${PROJECT_NAME} PUBLIC vikey)
-
-# Modified: ssl and crypto
-target_link_libraries(${PROJECT_NAME} PUBLIC ssl crypto)
-
 # Lua
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC ${LUA_INCLUDE_DIR})
 
@@ -175,14 +169,6 @@ if (CATKIN_ENABLE_TESTING)
     endif()
   endforeach()
 endif()
-
-install(DIRECTORY launch urdf configuration_files
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
-
-install(PROGRAMS scripts/tf_remove_frames.py
-  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
 
 install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}

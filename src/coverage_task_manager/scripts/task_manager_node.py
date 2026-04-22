@@ -15,9 +15,9 @@ def main():
     zone_id_default = rospy.get_param("~zone_id_default", "zone_demo")
 
     # Task intent defaults
-    # - plan_profile: selects which coverage plan to load (DB key, plans.profile_name)
+    # - plan_profile: selects which coverage plan to load (DB key, plans.plan_profile_name)
     # - sys_profile : selects which nav/controller + actuator param set to use (heavy/standard/eco)
-    default_plan_profile_name = rospy.get_param("~default_plan_profile_name", rospy.get_param("~default_profile_name", "cover_standard"))
+    default_plan_profile_name = rospy.get_param("~default_plan_profile_name", "cover_standard")
     default_sys_profile_name = rospy.get_param("~default_sys_profile_name", "standard")
 
     default_clean_mode = rospy.get_param("~default_clean_mode", "scrub")
@@ -32,28 +32,33 @@ def main():
     inspect_sys_profile_name = rospy.get_param("~inspect_sys_profile_name", "eco")
 
     # persistence (same DB as executor by default)
-    legacy_db_path = rospy.get_param("~db_path", "/data/coverage/operations.db")
     plan_db_path = rospy.get_param("~plan_db_path", "/data/coverage/planning.db")
-    ops_db_path = rospy.get_param("~ops_db_path", legacy_db_path)
+    ops_db_path = rospy.get_param("~ops_db_path", "/data/coverage/operations.db")
     robot_id = rospy.get_param("~robot_id", "local_robot")
-    activate_map_service = rospy.get_param("~activate_map_service", "/map_assets/activate")
-    activate_map_timeout_s = rospy.get_param("~activate_map_timeout_s", 10.0)
-    relocalize_map_service = rospy.get_param("~relocalize_map_service", "/map_assets/relocalize")
-    relocalize_map_timeout_s = rospy.get_param("~relocalize_map_timeout_s", 10.0)
     require_managed_map_asset = rospy.get_param("~require_managed_map_asset", True)
     require_runtime_localized_before_start = rospy.get_param(
         "~require_runtime_localized_before_start", False
     )
     require_runtime_map_match = rospy.get_param("~require_runtime_map_match", False)
-    allow_map_activation = rospy.get_param("~allow_map_activation", False)
-    allow_legacy_zone_start = rospy.get_param("~allow_legacy_zone_start", False)
     runtime_localization_state_param = rospy.get_param(
         "~runtime_localization_state_param", "/cartographer/runtime/localization_state"
     )
     runtime_localization_valid_param = rospy.get_param(
         "~runtime_localization_valid_param", "/cartographer/runtime/localization_valid"
     )
+    require_odometry_healthy_before_start = rospy.get_param(
+        "~require_odometry_healthy_before_start", True
+    )
+    odometry_state_topic = rospy.get_param("~odometry_state_topic", "/clean_robot_server/odometry_state")
+    odometry_state_stale_timeout_s = rospy.get_param("~odometry_state_stale_timeout_s", 5.0)
     readiness_publish_hz = rospy.get_param("~readiness_publish_hz", 1.0)
+    app_readiness_service_name = rospy.get_param(
+        "~app_readiness_service_name", "/coverage_task_manager/app/get_system_readiness"
+    )
+    app_readiness_contract_param_ns = rospy.get_param(
+        "~app_readiness_contract_param_ns",
+        "/coverage_task_manager/contracts/app/get_system_readiness",
+    )
     runtime_map_topic = rospy.get_param("~runtime_map_topic", "/map")
     combined_status_topic = rospy.get_param("~combined_status_topic", "/combined_status")
     combined_status_stale_timeout_s = rospy.get_param("~combined_status_stale_timeout_s", 5.0)
@@ -62,6 +67,13 @@ def main():
     mcore_connected_topic = rospy.get_param("~mcore_connected_topic", "/mcore_tcp_bridge/connected")
     station_connected_topic = rospy.get_param("~station_connected_topic", "/station_tcp_bridge/connected")
     connected_stale_timeout_s = rospy.get_param("~connected_stale_timeout_s", 5.0)
+    app_exe_task_service_name = rospy.get_param(
+        "~app_exe_task_service_name", "/coverage_task_manager/app/exe_task_server"
+    )
+    app_exe_task_contract_param_ns = rospy.get_param(
+        "~app_exe_task_contract_param_ns",
+        "/coverage_task_manager/contracts/app/exe_task_server",
+    )
     # Map identity injection (system-wide). Does not block if /map not available.
     auto_map_identity_enable = rospy.get_param("~auto_map_identity_enable", True)
     map_topic = rospy.get_param("~map_topic", "/map")
@@ -76,7 +88,7 @@ def main():
     task_restore_enable = rospy.get_param("~task_restore_enable", False)
     task_state_max_age_s = rospy.get_param("~task_state_max_age_s", 7 * 24 * 3600)
 
-    # executor interface (keeps executor's String cmd for dev/debug)
+    # executor interface; String cmd stays only for internal/dev/debug control
     executor_cmd_topic = rospy.get_param("~executor_cmd_topic", "/coverage_executor/cmd")
     executor_state_topic = rospy.get_param("~executor_state_topic", "/coverage_executor/state")
     executor_progress_topic = rospy.get_param("~executor_progress_topic", "/coverage_executor/run_progress")
@@ -117,11 +129,20 @@ def main():
         "~dock_supply_set_defer_exit_service", "/dock_supply/set_defer_exit"
     )
     dock_supply_exit_service = rospy.get_param("~dock_supply_exit_service", "/dock_supply/exit")
-    restart_localization_service = rospy.get_param(
-        "~restart_localization_service", "/cartographer/runtime/restart_localization"
+    app_restart_localization_service = rospy.get_param(
+        "~app_restart_localization_service", "/cartographer/runtime/app/restart_localization"
+    )
+    app_slam_submit_command_service = rospy.get_param(
+        "~app_slam_submit_command_service", "/clean_robot_server/app/submit_slam_command"
+    )
+    app_slam_get_job_service = rospy.get_param(
+        "~app_slam_get_job_service", "/clean_robot_server/app/get_slam_job"
     )
     restart_localization_timeout_s = rospy.get_param("~restart_localization_timeout_s", 180.0)
     clear_costmaps_service = rospy.get_param("~clear_costmaps_service", "/move_base_flex/clear_costmaps")
+    manual_assist_pose_param_ns = rospy.get_param(
+        "~manual_assist_pose_param_ns", "/localization/manual_assist_pose"
+    )
 
     # MBF MoveBase client (for docking)
     mbf_move_base_action = rospy.get_param("~mbf_move_base_action", "/move_base_flex/move_base")
@@ -187,7 +208,7 @@ def main():
     schedules = ops_store.list_schedule_specs()
 
     tm = TaskManager(
-        db_path=ops_db_path,
+        ops_db_path=ops_db_path,
         plan_db_path=plan_db_path,
         robot_id=str(robot_id),
         task_persist_enable=bool(task_persist_enable),
@@ -212,6 +233,8 @@ def main():
         sys_profile_switch_policy=str(sys_profile_switch_policy),
         sys_profile_switch_wait_s=float(sys_profile_switch_wait_s),
         cmd_topic="~cmd",
+        app_exe_task_service_name=str(app_exe_task_service_name),
+        app_exe_task_contract_param_ns=str(app_exe_task_contract_param_ns),
         battery_topic=battery_topic,
         battery_stale_timeout_s=float(battery_stale_timeout_s),
         auto_charge_enable=bool(auto_charge_enable),
@@ -236,21 +259,23 @@ def main():
         dock_supply_state_topic=str(dock_supply_state_topic),
         dock_supply_set_defer_exit_service=str(dock_supply_set_defer_exit_service),
         dock_supply_exit_service=str(dock_supply_exit_service),
-        restart_localization_service=str(restart_localization_service),
+        app_restart_localization_service=str(app_restart_localization_service),
+        app_slam_submit_command_service=str(app_slam_submit_command_service),
+        app_slam_get_job_service=str(app_slam_get_job_service),
         restart_localization_timeout_s=float(restart_localization_timeout_s),
         clear_costmaps_service=str(clear_costmaps_service),
-        activate_map_service=str(activate_map_service),
-        activate_map_timeout_s=float(activate_map_timeout_s),
-        relocalize_map_service=str(relocalize_map_service),
-        relocalize_map_timeout_s=float(relocalize_map_timeout_s),
+        manual_assist_pose_param_ns=str(manual_assist_pose_param_ns),
         require_managed_map_asset=bool(require_managed_map_asset),
         require_runtime_localized_before_start=bool(require_runtime_localized_before_start),
         require_runtime_map_match=bool(require_runtime_map_match),
-        allow_map_activation=bool(allow_map_activation),
-        allow_legacy_zone_start=bool(allow_legacy_zone_start),
         runtime_localization_state_param=str(runtime_localization_state_param),
         runtime_localization_valid_param=str(runtime_localization_valid_param),
+        require_odometry_healthy_before_start=bool(require_odometry_healthy_before_start),
+        odometry_state_topic=str(odometry_state_topic),
+        odometry_state_stale_timeout_s=float(odometry_state_stale_timeout_s),
         readiness_publish_hz=float(readiness_publish_hz),
+        app_readiness_service_name=str(app_readiness_service_name),
+        app_readiness_contract_param_ns=str(app_readiness_contract_param_ns),
         runtime_map_topic=str(runtime_map_topic),
         combined_status_topic=str(combined_status_topic),
         combined_status_stale_timeout_s=float(combined_status_stale_timeout_s),

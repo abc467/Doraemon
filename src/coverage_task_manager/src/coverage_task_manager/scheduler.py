@@ -124,14 +124,14 @@ def _parse_at_local(at: str, tz_name: str = "") -> float:
     return float(time.mktime((tt.tm_year, tt.tm_mon, tt.tm_mday, tt.tm_hour, tt.tm_min, 0, 0, 0, -1)))
 
 
-def _require_no_legacy_keys(d: Dict[str, Any], where: str) -> None:
-    legacy = []
+def _require_no_old_format_schedule_keys(d: Dict[str, Any], where: str) -> None:
+    old_format_keys = []
     for k in ("mode", "plan_profile", "sys_profile", "profile", "profile_name"):
         if k in d:
-            legacy.append(k)
-    if legacy:
+            old_format_keys.append(k)
+    if old_format_keys:
         raise ValueError(
-            f"{where} contains legacy keys {legacy}. "
+            f"{where} contains unsupported old-format keys {old_format_keys}. "
             f"use clean_mode / plan_profile_name / sys_profile_name"
         )
 
@@ -232,10 +232,10 @@ class Scheduler:
             if not isinstance(item, dict):
                 raise ValueError(f"schedules[{i}] must be dict, got {type(item)}")
 
-            # Reject legacy format explicitly to avoid silent “没触发”
+            # Reject old non-canonical schedule forms explicitly to avoid silent “没触发”
             if any(k in item for k in ("action", "hhmm", "args")):
                 raise ValueError(
-                    f"schedules[{i}] uses legacy keys (action/hhmm/args). "
+                    f"schedules[{i}] uses unsupported old-format keys (action/hhmm/args). "
                     f"Use canonical keys: type/time/task (or once: type/at/task)."
                 )
 
@@ -298,7 +298,7 @@ class Scheduler:
             if not isinstance(task_raw, dict):
                 raise ValueError(f"schedules[{i}].task must be dict, got {type(task_raw)}")
 
-            _require_no_legacy_keys(task_raw, where=f"schedules[{i}].task")
+            _require_no_old_format_schedule_keys(task_raw, where=f"schedules[{i}].task")
 
             # apply defaults: plan_profile_name/sys_profile_name/clean_mode
             merged = dict(defaults)

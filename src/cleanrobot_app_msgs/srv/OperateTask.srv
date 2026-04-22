@@ -1,0 +1,28 @@
+uint8 get = 0
+uint8 add = 1
+uint8 modify = 2
+uint8 Delete = 3
+uint8 getAll = 4
+int8 ENABLE_KEEP = 0
+int8 ENABLE_DISABLE = 1
+int8 ENABLE_ENABLE = 2
+int8 RETURN_TO_DOCK_KEEP = 0
+int8 RETURN_TO_DOCK_DISABLE = 1
+int8 RETURN_TO_DOCK_ENABLE = 2
+int8 REPEAT_AFTER_FULL_CHARGE_KEEP = 0
+int8 REPEAT_AFTER_FULL_CHARGE_DISABLE = 1
+int8 REPEAT_AFTER_FULL_CHARGE_ENABLE = 2
+
+uint8 operation # get; add; modify; Delete; getAll
+int32 task_id
+CleanTask task
+string map_name # getAll 过滤或 add/modify 的 map_name 兜底来源
+int8 enabled_state # 0: 保持不变 1: 禁用 2: 启用
+int8 return_to_dock_state # 0: 保持不变 1: 任务结束后不回桩 2: 任务结束后回桩补给
+int8 repeat_after_full_charge_state # 0: 保持不变 1: 关闭充满后自动再执行 2: 开启充满后自动再执行
+---
+
+bool success
+string message
+CleanTask task
+CleanTask[] tasks # getAll 时返回任务列表

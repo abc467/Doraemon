@@ -1,0 +1,14 @@
+string map_name
+string map_revision_id
+string area_id
+string display_name
+bool enabled
+string alignment_version
+string display_frame
+string storage_frame
+string map_id
+string map_version
+PolygonRegion display_region
+PolygonRegion map_region
+float64 updated_ts
+string[] warnings

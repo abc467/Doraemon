@@ -8,6 +8,11 @@
     <!-- 波特率 -->
     <param name="baud"  value="921600"/>
 
+    <!-- 优先使用协议里的 Timestamp，并在驱动内映射到主机 ROS 时间轴 -->
+    <param name="use_device_timestamp" value="true"/>
+    <param name="timestamp_unit_to_sec" value="0.000001"/>
+    <param name="timestamp_resync_threshold_sec" value="0.5"/>
+
     <!-- imu数据话题 -->
     <!-- MSG_IMU 0X40数据包的数据 --> 
     <!-- 数据包具体含义，查看【资料包\1.用户手册\2.FDIsystem_通信协议_V21.0823.pdf】 -->
@@ -38,6 +43,7 @@
 
     <!-- NED系位移和速度数据输出话题-->
     <!-- MSG_INSGPS 0X42数据包的数据 -->
+    <param name="enable_ned_odom_publish" value="false"/>
     <param name="NED_odom_topic_" value="/NED_odometry"/>
 
     <!-- 发布的数据基于不同设备有不同的坐标系   -->

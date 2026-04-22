@@ -13,7 +13,7 @@ Concepts
       * optional default clean_mode (scrub/inspect...)
 
 - plan_profile:
-    Coverage plan selection key in SQLite (plans.profile_name), e.g.:
+    Coverage plan selection key in SQLite (plans.plan_profile_name), e.g.:
       cover_standard / cover_deep / cover_eco
     It decides which coverage plan (path) to execute.
 

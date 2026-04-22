@@ -22,11 +22,12 @@
   <depend>actionlib</depend>
   <depend>actionlib_msgs</depend>
 
-  <depend>my_msg_srv</depend>
+  <depend>robot_platform_msgs</depend>
   <depend>dock_tracker</depend>
   <depend>my_docking_controller</depend>
 
   <exec_depend>python3</exec_depend>
+  <test_depend>rostest</test_depend>
 
   <export>
     <build_type>catkin</build_type>

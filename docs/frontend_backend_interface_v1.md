@@ -1,36 +1,65 @@
 # 前端对接用后端接口清单 v1
 
+## 定位说明
+
+这份文档是当前前端对接后端的总接口清单。
+
+它适合回答：
+
+- 前端本期应该接哪些 service / topic
+- 哪些字段是正式门禁、状态或写入口
+- 哪些页面应该依赖哪条后端主链
+
+它现在就是当前前端对接后端的单一长期真源。
+
+## 本轮内容校验依据
+
+本轮已按当前仓库里的 service/topic/msg/srv 定义和 launch 默认值核对这份总接口清单，重点依据包括：
+
+- [planner_server.launch](/home/sunnybaer/Doraemon/src/coverage_planner/launch/planner_server.launch)
+- [task_manager.launch](/home/sunnybaer/Doraemon/src/coverage_task_manager/launch/task_manager.launch)
+- [node_bootstrap.py](/home/sunnybaer/Doraemon/src/coverage_planner/src/coverage_planner/slam_workflow/node_bootstrap.py)
+- [ExeTask.srv](/home/sunnybaer/Doraemon/src/cleanrobot_app_msgs/srv/ExeTask.srv)
+- [GetSystemReadiness.srv](/home/sunnybaer/Doraemon/src/cleanrobot_app_msgs/srv/GetSystemReadiness.srv)
+- [CombinedStatus.msg](/home/sunnybaer/Doraemon/src/robot_platform_msgs/msg/CombinedStatus.msg)
+- [StationStatus.msg](/home/sunnybaer/Doraemon/src/robot_platform_msgs/msg/StationStatus.msg)
+- [TaskState.msg](/home/sunnybaer/Doraemon/src/coverage_msgs/msg/TaskState.msg)
+- [RunProgress.msg](/home/sunnybaer/Doraemon/src/coverage_msgs/msg/RunProgress.msg)
+
 这份清单面向前端工程使用，目标是帮助前端基于当前 ROS 后端快速落地页面、类型定义和联调逻辑。
 
 当前建议前端只依赖“稳定接口 + 状态”，不要直接绑定底层桥接、导航内核、精对接 action、内部命令 topic。
 
-区域编辑页面的实际调用顺序说明，见：
+相关专项流程说明，见：
 
-- [zone_editor_frontend_flow_v1.md](/home/sunnybaer/Doraemon/docs/zone_editor_frontend_flow_v1.md)
-- [constraint_editor_frontend_flow_v1.md](/home/sunnybaer/Doraemon/docs/constraint_editor_frontend_flow_v1.md)
-- [zone_editor_frontend_tasks_v2.md](/home/sunnybaer/Doraemon/docs/zone_editor_frontend_tasks_v2.md)
-- [constraint_editor_frontend_tasks_v1.md](/home/sunnybaer/Doraemon/docs/constraint_editor_frontend_tasks_v1.md)
-- [task_schedule_execution_frontend_tasks_v1.md](/home/sunnybaer/Doraemon/docs/task_schedule_execution_frontend_tasks_v1.md)
+- `zone / constraint` 页面当前都直接基于 site canonical 服务工作：
+  - zone：`/database_server/site/map_alignment_service`、`/database_server/site/map_alignment_by_points_service`、`/database_server/site/rect_zone_preview_service`、`/database_server/site/coverage_preview_service`、`/database_server/site/coverage_commit_service`、`/database_server/site/coverage_zone_service`、`/database_server/site/zone_plan_path_service`
+  - constraint：`/database_server/site/no_go_area_service`、`/database_server/site/virtual_wall_service`
 
 相关阶段验收总结，见：
 
-- [constraint_editor_frontend_acceptance_v1.md](/home/sunnybaer/Doraemon/docs/constraint_editor_frontend_acceptance_v1.md)
-- [task_schedule_execution_frontend_acceptance_v1.md](/home/sunnybaer/Doraemon/docs/task_schedule_execution_frontend_acceptance_v1.md)
-- [frontend_integration_acceptance_v1.md](/home/sunnybaer/Doraemon/docs/frontend_integration_acceptance_v1.md)
+- [backend_runtime_smoke_v1.md](/home/sunnybaer/Doraemon/docs/backend_runtime_smoke_v1.md)
+
+前端 canonical topic/service 名称、状态职责边界和页面落地建议，现在都统一收在本文档里。
 
 ## 0. 新增建议优先接入：系统就绪态 / 运行前检查
 
 为减少现场“点 START 才发现底层没准备好”的联调成本，后端已新增统一 readiness 聚合接口：
 
-- 服务名：`/coverage_task_manager/get_system_readiness`
-- 类型：`my_msg_srv/GetSystemReadiness`
+- 服务名：`/coverage_task_manager/app/get_system_readiness`
+- 类型：`cleanrobot_app_msgs/GetSystemReadiness`
 - 话题名：`/coverage_task_manager/system_readiness`
-- 类型：`my_msg_srv/SystemReadiness`
+- 类型：`cleanrobot_app_msgs/SystemReadiness`
+
+当前阶段说明：
+
+- readiness 持续刷新 topic 和 canonical query service 都已经切到 `cleanrobot_app_msgs/...`
+- 前端新代码应直接收敛到 `/coverage_task_manager/app/get_system_readiness`
 
 用途：
 
 - 在前端真正允许 `START` 前，统一判断当前系统是否 ready
-- 聚合地图一致性、导航链、底盘桥、任务主状态、执行器残留状态、电池/综合状态 freshness
+- 聚合地图一致性、里程计健康、定位状态、导航链、底盘桥、任务主状态、执行器残留状态、电池/综合状态 freshness
 - 可选按 `task_id` 检查具体任务的 `map / zone / active plan` 是否 ready
 
 请求字段：
@@ -62,6 +91,8 @@
 
 - active map 选择状态
 - runtime `/map` 身份与 active map asset 是否一致
+- odometry health
+- runtime localization
 - `move_base_flex` 是否在线
 - `mcore_tcp_bridge` 是否在线且 connected
 - `coverage_task_manager` 是否空闲
@@ -72,10 +103,19 @@
 - station bridge / station_status freshness
 - 可选：指定 `task_id` 的 task config/zone/active plan 是否 ready
 
+补充约定：
+
+- 前端在点击 `START` 前应该主动调一次 `/coverage_task_manager/app/get_system_readiness`
+- 后端 `/coverage_task_manager/app/exe_task_server` 在 `START` 时还会再次调用 readiness 做二次门禁
+- 因此前端和后端的启动判定标准现在是一致的
+- `/coverage_task_manager/app/exe_task_server` 现在由 `coverage_task_manager` 直接持有
+- `/coverage_task_manager/cmd` 只保留给内部/调试命令，不应作为前端正式写入口
+
 ## 1. 总体结论
 
 从商用清洁机器人应用落地的角度看，当前后端这几块主链已经基本具备，前端可以开始写：
 
+- SLAM 状态监控 / 地图切换 / 重定位 / 建图闭环
 - 地图管理
 - 任务管理
 - 调度管理
@@ -93,8 +133,12 @@
 
 ### 2.0 配置目录 / Profile 列表
 
-- 服务名：`/database_server/profile_catalog_service`
-- 类型：`my_msg_srv/GetProfileCatalog`
+- 服务名：`/database_server/app/profile_catalog_service`
+- 类型：`cleanrobot_app_msgs/GetProfileCatalog`
+
+当前阶段说明：
+
+- 前端 canonical 入口已经收敛到 `/database_server/app/profile_catalog_service`
 
 用途：
 
@@ -116,7 +160,7 @@
 
 响应数据类型：
 
-- `my_msg_srv/ProfileOption[]`
+- `cleanrobot_app_msgs/ProfileOption[]`
 
 `ProfileOption` 关键字段：
 
@@ -138,11 +182,61 @@
 - `sys` profile 来源于 `operations.db.sys_profiles`
 - `plan` profile 当前会附带已有 plan 观测到的 `supported_maps[]`
 - `sys` profile 当前会附带默认 `supported_clean_modes[]`
+- 当前前端与脚本联调都应只使用 `/database_server/app/profile_catalog_service`
+
+### 2.0A SLAM 状态与操作（正式前端入口）
+
+- 状态查询服务：`/clean_robot_server/app/get_slam_status`
+- 类型：`cleanrobot_app_msgs/GetSlamStatus`
+- 长动作提交服务：`/clean_robot_server/app/submit_slam_command`
+- 类型：`cleanrobot_app_msgs/SubmitSlamCommand`
+- job 查询服务：`/clean_robot_server/app/get_slam_job`
+- 类型：`cleanrobot_app_msgs/GetSlamJob`
+- 状态话题：`/clean_robot_server/slam_state`
+- 类型：`cleanrobot_app_msgs/SlamState`
+- job 话题：`/clean_robot_server/slam_job_state`
+- 类型：`cleanrobot_app_msgs/SlamJobState`
+
+当前阶段说明：
+
+- 只读状态 topic 与 canonical query/write service 都已经落到 `cleanrobot_app_msgs/...`
+- 历史 `/clean_robot_server/get_*` 与 `/clean_robot_server/submit_slam_command` 仅用于理解旧日志或旧录屏
+
+用途：
+
+- 前端统一获取当前 SLAM 运行状态
+- 统一执行 workflow 风格的 SLAM 长动作并跟踪 job
+- 让前端不再直接绑定历史内部地图辅助链路
+
+操作枚举：
+
+- `prepare_for_task`
+- `switch_map_and_localize`
+- `relocalize`
+- `start_mapping`
+- `save_mapping`
+- `stop_mapping`
+
+前端约定：
+
+- 地图资产 CRUD 继续走 `/clean_robot_server/app/map_server`
+- 默认长动作统一走 `/clean_robot_server/app/submit_slam_command`
+- 页面通过 `/clean_robot_server/slam_job_state` 或 `/clean_robot_server/app/get_slam_job` 跟踪最终结果
+- 顶部状态条、SLAM 页面、建图页面统一订阅 `/clean_robot_server/slam_state`
+- 真正允许开始清扫前，继续调用 `/coverage_task_manager/app/get_system_readiness`
+  - 当前版本已补充 localization 检查，不再只看地图一致性
 - 若 `include_disabled=false`，已禁用 profile 不会出现在默认下拉里
 - 若 `include_disabled=true`，前端可以把历史 profile 显示为“已禁用/历史配置”
 
 前端建议使用方式：
 
+- SLAM Workbench：
+  - 默认主按钮优先做 `prepare_for_task / switch_map_and_localize / relocalize`
+- 长动作统一：
+  - submit
+  - 记录 `job_id`
+  - 订阅 topic 或轮询 query
+  - 以 job 终态为准
 - Zone 页面：
   - `profile_name` 改成 Select
   - 数据来源：`profile_kind="plan"`
@@ -156,13 +250,15 @@
 兼容性：
 
 - 现有 `preview / commit / task add / modify / schedule add / modify` 接口字段不变
-- 后端仍然继续接收 `profile_name / plan_profile_name / sys_profile_name` 的字符串值
+- `preview / commit` 仍沿用 ROS 既有字段名 `profile_name`
+- `task / schedule` 使用正式字段 `plan_profile_name / sys_profile_name`
+- 前端不再额外发明或依赖其它 profile 别名
 - 新接口只负责提供“合法可选值列表”
 
 ### 2.1 地图管理
 
-- 服务名：`/clean_robot_server/map_server`
-- 类型：`my_msg_srv/OperateMap`
+- 服务名：`/clean_robot_server/app/map_server`
+- 类型：`cleanrobot_app_msgs/OperateMap`
 
 用途：
 
@@ -174,7 +270,7 @@
 
 核心数据类型：
 
-- `my_msg_srv/PgmData`
+- `cleanrobot_app_msgs/PgmData`
 
 前端建议页面：
 
@@ -186,13 +282,14 @@
 
 - 当前地图切换是通过 `modify + set_active=true` 完成的
 - 地图资产是“纳管外部地图”，不是前端直接上传原始 SLAM 文件的完整产品化接口
-- 当前标准外部地图目录为：`/home/sunnybaer/Doraemon/map`
+- 当前标准外部地图导入目录为：`/data/maps/imports`
 - 前端 `Import Current Map Asset` 应按 `map_name` 从该目录读取 `<map_name>.pbstream` 后纳管为正式地图资产
+- 运行/运维口径可参考：`docs/slam_runtime_architecture_v1.md`
 
 ### 2.2 任务管理
 
-- 服务名：`/database_server/clean_task_service`
-- 类型：`my_msg_srv/OperateTask`
+- 服务名：`/database_server/app/clean_task_service`
+- 类型：`cleanrobot_app_msgs/OperateTask`
 
 用途：
 
@@ -204,7 +301,7 @@
 
 核心数据类型：
 
-- `my_msg_srv/CleanTask`
+- `cleanrobot_app_msgs/CleanTask`
 
 `CleanTask` 关键字段：
 
@@ -235,7 +332,7 @@
 前端交互建议：
 
 - 不要让操作员手动输入 `zone_id`
-- 应通过 `/database_server/coverage_zone_service getAll`
+- 应通过 `/database_server/site/coverage_zone_service getAll`
   - 按当前 `map_name` 获取可选区域
   - 下拉主显示 `display_name`
   - 次显示 `zone_id / plan_profile_name / estimated_length_m / estimated_duration_s`
@@ -258,8 +355,8 @@
 
 ### 2.3 调度管理
 
-- 服务名：`/database_server/clean_schedule_service`
-- 类型：`my_msg_srv/OperateSchedule`
+- 服务名：`/database_server/app/clean_schedule_service`
+- 类型：`cleanrobot_app_msgs/OperateSchedule`
 
 用途：
 
@@ -271,7 +368,7 @@
 
 核心数据类型：
 
-- `my_msg_srv/CleanSchedule`
+- `cleanrobot_app_msgs/CleanSchedule`
 
 `CleanSchedule` 关键字段：
 
@@ -309,8 +406,9 @@
 
 ### 2.4 执行控制
 
-- 服务名：`/exe_task_server`
-- 类型：`my_msg_srv/ExeTask`
+- 服务名：`/coverage_task_manager/app/exe_task_server`
+- 类型：`cleanrobot_app_msgs/ExeTask`
+- owner：`coverage_task_manager`
 
 支持命令：
 
@@ -328,6 +426,12 @@
 - 停止任务
 - 手动触发回桩
 
+后端收口说明：
+
+- `CONTINUE` 只恢复当前明确的 `active_run_id`
+- 后端不再按 `zone` 猜测“最近一次 checkpoint”来恢复任务
+- 如果运行上下文缺失，恢复会明确失败，而不是隐式重新开始
+
 前端建议页面：
 
 - 任务启动按钮
@@ -336,11 +440,11 @@
 
 ### 2.5 禁行区与虚拟墙管理
 
-- 禁行区服务：`/database_server/no_go_area_service`
-- 类型：`my_msg_srv/OperateMapNoGoArea`
+- 禁行区服务：`/database_server/site/no_go_area_service`
+- 类型：`cleanrobot_site_msgs/OperateMapNoGoArea`
 
-- 虚拟墙服务：`/database_server/virtual_wall_service`
-- 类型：`my_msg_srv/OperateMapVirtualWall`
+- 虚拟墙服务：`/database_server/site/virtual_wall_service`
+- 类型：`cleanrobot_site_msgs/OperateMapVirtualWall`
 
 用途：
 
@@ -348,8 +452,8 @@
 
 核心数据类型：
 
-- `my_msg_srv/MapNoGoArea`
-- `my_msg_srv/MapVirtualWall`
+- `cleanrobot_site_msgs/MapNoGoArea`
+- `cleanrobot_site_msgs/MapVirtualWall`
 
 后端已做的关键能力：
 
@@ -366,8 +470,8 @@
 
 ### 2.6 Zone 查询与删除
 
-- 服务：`/database_server/coverage_zone_service`
-- 类型：`my_msg_srv/OperateCoverageZone`
+- 服务：`/database_server/site/coverage_zone_service`
+- 类型：`cleanrobot_site_msgs/OperateCoverageZone`
 
 用途：
 
@@ -381,10 +485,19 @@
 - 默认 `include_disabled=false` 时，删除后的 zone 不再出现在列表里
 - 使用 `include_disabled=true` 仍可查询到已禁用 zone
 
+补充：
+
+- 区域预览服务当前已有并行 site canonical：
+  - `/database_server/site/coverage_preview_service`
+  - 类型：`cleanrobot_site_msgs/PreviewCoverageRegion`
+- 区域正式提交服务当前已有并行 site canonical：
+  - `/database_server/site/coverage_commit_service`
+  - 类型：`cleanrobot_site_msgs/CommitCoverageRegion`
+
 ### 2.7 Zone Active Plan 路径查询
 
-- 服务：`/database_server/zone_plan_path_service`
-- 类型：`my_msg_srv/GetZonePlanPath`
+- 服务：`/database_server/site/zone_plan_path_service`
+- 类型：`cleanrobot_site_msgs/GetZonePlanPath`
 
 用途：
 
@@ -422,13 +535,19 @@
 
 ### 3.1 任务与执行总状态
 
+- `/clean_robot_server/slam_state`
+  - 类型：`cleanrobot_app_msgs/SlamState`
+  - 用途：SLAM 当前模式、当前地图、定位是否 ready、前端按钮是否可点
+
 - `/coverage_task_manager/state`
   - 类型：`std_msgs/String`
   - 用途：任务层对外总状态
 
 - `/coverage_task_manager/event`
   - 类型：`std_msgs/String`
-  - 用途：事件流 / 故障流 / 恢复流
+  - 用途：事件流 / 故障流 / 恢复流 / 现场诊断上下文
+  - 边界：这是诊断事件流，不是前端正式门禁 contract
+  - 前端不要按事件字符串直接驱动主状态机；正式判决仍应优先依赖 `system_readiness / task_state / slam_state / coverage_task_manager.app.exe_task_server`
 
 - `/coverage_executor/state`
   - 类型：`std_msgs/String`
@@ -441,6 +560,26 @@
 - `/coverage_task_manager/task_state`
   - 类型：`coverage_msgs/TaskState`
   - 用途：更适合 UI 的任务快照聚合状态
+  - canonical ROS topic 名称：`/coverage_task_manager/task_state`
+  - 历史调试记录里如果出现 `/task_state`，按旧记法理解即可，前端正式对接应统一收敛到 `/coverage_task_manager/task_state`
+
+前端判责建议：
+
+- `/coverage_task_manager/app/get_system_readiness` 与 `/coverage_task_manager/system_readiness`
+  - 用于启动前门禁、`can_start_task`、阻塞原因、子检查项
+  - 是 `START` 按钮和执行前风险提示的正式真源
+- `/coverage_task_manager/task_state`
+  - 用于任务状态卡、任务公共状态、phase、executor_state、当前 active run 上下文
+  - 是执行页和运行监控页里“任务当前处于什么阶段”的正式真源
+- `/coverage_executor/run_progress`
+  - 用于进度条、速度、当前 block/path、里程类信息
+  - 不应替代 `task_state` 去表达任务公共状态，也不应替代 readiness 去做启动门禁
+- `/coverage_task_manager/state`
+  - 更适合顶部状态条、轻量摘要、调试辅助
+  - 不建议单独拿它替代 `task_state` 做完整任务状态卡
+- `/coverage_task_manager/event` 与 `task_state.last_event`
+  - 只做最近动作 / 最近故障 / 自动恢复卡点的辅助上下文
+  - 不做正式门禁或主状态机输入
 
 ### 3.2 回充 / 补给 / 电池 / 设备状态
 
@@ -454,11 +593,11 @@
   - 备注：当前最可信的是 `percentage` 和 `voltage`
 
 - `/combined_status`
-  - 类型：`my_msg_srv/CombinedStatus`
+  - 类型：`robot_platform_msgs/CombinedStatus`
   - 用途：污水位、清水位、执行机构位置、避障与底盘综合状态
 
 - `/station_status`
-  - 类型：`my_msg_srv/StationStatus`
+  - 类型：`robot_platform_msgs/StationStatus`
   - 用途：充电桩侧状态、IR 到位、充电机状态等
 
 前端建议页面：
@@ -470,6 +609,49 @@
 - 设备状态面板
 
 ## 4. 建议前端直接建模的数据结构
+
+### 4.0 SLAM 状态：`cleanrobot_app_msgs/SlamState`
+
+关键字段：
+
+- `desired_mode`
+- `current_mode`
+- `active_map_name`
+- `active_map_id`
+- `active_map_md5`
+- `runtime_map_name`
+- `runtime_map_id`
+- `runtime_map_md5`
+- `localization_state`
+- `localization_valid`
+- `runtime_map_ready`
+- `active_map_match`
+- `task_running`
+- `can_switch_map_and_localize`
+- `can_relocalize`
+  - 这两个字段是动作能力位
+  - 页面动作命名应统一按 `switch_map_and_localize / relocalize`
+- `can_start_mapping`
+- `can_save_mapping`
+- `can_stop_mapping`
+- `blocking_reasons[]`
+- `warnings[]`
+
+补充语义：
+
+- `can_*` 系列已经包含公共长动作写入口 `/clean_robot_server/app/submit_slam_command` 的可用性门禁
+- 如果 submit backend 不可用，前端应直接把这些动作视为不可提交，不要再本地宽松放开
+- 此时 `warnings[]` 会带 `slam submit backend unavailable`
+- `can_switch_map_and_localize / can_relocalize` 还包含公共重定位前置条件：`localization backend available + odometry valid`
+- `can_start_mapping` 还包含 `mapping runtime available + odometry valid`
+- 任务层 `can_start_task` 当前也会优先参考 fresh `slam_state.task_ready`，所以前后端不需要再自行拼一套“近似 SLAM ready”逻辑
+- 当 `slam_state` fresh 时，任务层本地 `active_map / runtime_map / odometry / localization` 更多作为诊断和 fallback，不再重复当成另一套正式 SLAM 判决
+
+前端用途建议：
+
+- 地图/定位页面主数据源
+- 建图页面按钮可用性控制
+- 切图 / 重定位前的风险提示
 
 ### 4.1 任务快照：`coverage_msgs/TaskState`
 
@@ -508,6 +690,28 @@
 - 任务状态卡片
 - 异常状态提示
 
+补充职责：
+
+- `task_state` 适合表达“任务现在处于什么公共状态 / phase / executor_state”
+- 执行页按钮门禁不要从 `task_state` 自己推导，仍应优先依赖 `system_readiness`
+- 进度百分比若同时有 `task_state.progress_pct` 和 `run_progress.progress_pct`，页面可优先展示 `run_progress`，而把 `task_state` 作为任务快照补充
+
+补充语义：
+
+- `last_event` 是 `coverage_task_manager` 最近一条 `_emit()` 事件快照
+- 它和 `/coverage_task_manager/event` 是同一事件体系的“最后一条样本”，更适合做 UI 上下文提示，不适合作为正式判决源
+- 前端可以用它展示：
+  - 最近动作
+  - 最近故障
+  - 自动恢复卡在哪一步
+- 前端不应仅根据 `last_event` 决定：
+  - 是否允许 START / CONTINUE / STOP
+  - 是否认为任务 ready
+  - 是否认为 SLAM ready
+- 如果 `last_event` 和 `task_state.public_state / system_readiness / slam_state` 冲突，应优先信正式状态与 service 结果
+- 自动恢复相关事件的流程语义见：
+  - `docs/slam_runtime_architecture_v1.md`
+
 ### 4.2 清扫进度：`coverage_msgs/RunProgress`
 
 关键字段：
@@ -543,7 +747,13 @@
 - 当前速度
 - 当前清扫路径信息
 
-### 4.3 设备综合状态：`my_msg_srv/CombinedStatus`
+补充职责：
+
+- `run_progress` 适合表达“当前 run 走到哪里了、走多快、当前 block/path 是什么”
+- 不要仅根据 `run_progress.state` 决定任务公共状态、按钮门禁或任务是否 ready
+- 如果 `run_progress` 与 `task_state.public_state / system_readiness` 冲突，应优先信任务快照与 readiness
+
+### 4.3 设备综合状态：`robot_platform_msgs/CombinedStatus`
 
 关键字段：
 
@@ -563,7 +773,11 @@
 - 清洁机构状态展示
 - 避障传感状态展示
 
-### 4.4 充电桩状态：`my_msg_srv/StationStatus`
+补充语义：
+
+- 当前 in-tree provider / consumer 已统一切到 `robot_platform_msgs/CombinedStatus`
+
+### 4.4 充电桩状态：`robot_platform_msgs/StationStatus`
 
 字段：
 
@@ -591,11 +805,15 @@
 - 回桩到位提示
 - 桩状态 / 故障灯状态
 
+补充语义：
+
+- 当前 in-tree provider / consumer 已统一切到 `robot_platform_msgs/StationStatus`
+
 ## 5. 当前常见状态字符串
 
 ### 5.1 `/coverage_task_manager/state`
 
-当前前端最值得关心的常见值：
+当前前端做轻量摘要或顶部状态条时，最值得关心的常见值：
 
 - `IDLE`
 - `RUNNING`
@@ -622,6 +840,7 @@
 说明：
 
 - 这是字符串状态，不是严格枚举类型
+- 它更适合轻量摘要，不建议单独拿它替代 `task_state` 做完整任务状态卡
 - 前端建议按“已知状态 + 未知状态兜底”方式实现
 
 ### 5.2 `/dock_supply/state`
@@ -655,17 +874,26 @@
 这些接口更适合内部编排、底层桥接、导航调试，不建议前端直接作为稳定契约：
 
 - `/coverage_task_manager/cmd`
+- `/coverage_task_manager/event`
 - `/station/control`
 - `/mcore/charge_enable`
 - `/mcore/control_*`
 - `/move_base_flex/*`
 - `docking_action`
+- `task_state.last_event`
 
 原因：
 
 - 它们语义更底层
 - 稳定性不如上层服务接口
 - 容易把前端和内部实现耦合死
+- `/coverage_task_manager/event` 和 `task_state.last_event` 更适合做“最近动作 / 最近故障 / 自动恢复卡点”的辅助上下文
+- 前端正式门禁、按钮启停、任务 ready 判决仍应优先依赖：
+  - `/coverage_task_manager/app/get_system_readiness`
+  - `task_state`
+  - `slam_state`
+  - `/coverage_task_manager/app/exe_task_server`
+- 自动恢复相关事件的流程语义见：`docs/slam_runtime_architecture_v1.md`
 
 ## 7. 当前仍偏工程态、建议单列的能力
 
@@ -673,9 +901,13 @@
 
 - `/clicked_point`
 - `/rect_zone_planner/confirm_rect_plan`
+- `/rect_zone_planner/site/confirm_rect_plan`
 - `/rect_zone_planner/cancel_rect_plan`
 
 这套接口更像 RViz 调试链，不适合直接给 Web / APP 前端做正式区域编辑。
+
+其中 `/rect_zone_planner/site/confirm_rect_plan` 已提供 `cleanrobot_site_msgs/ConfirmRectCoveragePlan`
+的 canonical site contract 镜像，但交互方式本身仍是 RViz 点选驱动，暂不建议直接作为正式前端编辑接口。
 
 如果前端后续需要“地图上框选区域并生成 plan”，建议二期单独补一套前端友好的接口：
 

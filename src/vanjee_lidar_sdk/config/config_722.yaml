@@ -6,7 +6,7 @@ common:
   send_imu_packet_ros: true                       # true: 将IMU发送到ROS以便查看
 lidar:
   - driver:
-      lidar_type: vanjee_722                        # LiDAR类型 (支持雷达型号参考 README_CN.md)
+      lidar_type: vanjee_722                        # LiDAR类型 (支持雷达型号参考当前设备配置表)
       connect_type: 1                               # 连接方式 1-udp  2-tcp
       host_msop_port: 3001                          # 接收点云数据的主机端口号
       lidar_msop_port: 3333                         # 雷达端口号

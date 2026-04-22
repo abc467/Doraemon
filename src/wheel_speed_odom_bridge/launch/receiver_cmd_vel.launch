@@ -10,6 +10,7 @@
   <arg name="cmd_vel_topic" default="/cmd_vel"/>
   <arg name="linear_speed" default="0.4"/>
   <arg name="angular_speed" default="0.4"/>
+  <arg name="debug_mode" default="false"/>
 
   <!-- 调试日志开关。 -->
   <arg name="enable_rx_log" default="false"/>
@@ -29,7 +30,9 @@
     <param name="loop_rate_hz" value="100.0"/>
     <param name="publish_stop_on_disconnect" value="true"/>
 
-    <param name="enable_rx_log" value="$(arg enable_rx_log)"/>
-    <param name="enable_rx_raw_log" value="$(arg enable_rx_raw_log)"/>
+    <param name="enable_rx_log"
+           value="$(eval (str(arg('debug_mode')).lower() == 'true') or (str(arg('enable_rx_log')).lower() == 'true'))"/>
+    <param name="enable_rx_raw_log"
+           value="$(eval (str(arg('debug_mode')).lower() == 'true') or (str(arg('enable_rx_raw_log')).lower() == 'true'))"/>
   </node>
 </launch>

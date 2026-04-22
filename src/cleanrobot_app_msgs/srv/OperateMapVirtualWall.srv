@@ -1,0 +1,20 @@
+uint8 get = 0
+uint8 getAll = 1
+uint8 add = 2
+uint8 modify = 3
+uint8 Delete = 4
+
+uint8 operation
+string map_name
+string map_revision_id
+string wall_id
+string alignment_version
+MapVirtualWall wall
+bool include_disabled
+---
+bool success
+string message
+string constraint_version
+MapVirtualWall wall
+MapVirtualWall[] walls
+string[] warnings

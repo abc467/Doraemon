@@ -1,0 +1,48 @@
+# -*- coding: utf-8 -*-
+
+"""Single-source canonical cleanrobot app/site contract type strings."""
+
+APP_EXE_TASK_SERVICE_TYPE = "cleanrobot_app_msgs/ExeTask"
+APP_GET_ODOMETRY_STATUS_SERVICE_TYPE = "cleanrobot_app_msgs/GetOdometryStatus"
+APP_GET_PROFILE_CATALOG_SERVICE_TYPE = "cleanrobot_app_msgs/GetProfileCatalog"
+APP_GET_SLAM_JOB_SERVICE_TYPE = "cleanrobot_app_msgs/GetSlamJob"
+APP_GET_SLAM_STATUS_REQUEST_TYPE = "cleanrobot_app_msgs/GetSlamStatusRequest"
+APP_GET_SLAM_STATUS_SERVICE_TYPE = "cleanrobot_app_msgs/GetSlamStatus"
+APP_GET_SYSTEM_READINESS_SERVICE_TYPE = "cleanrobot_app_msgs/GetSystemReadiness"
+APP_PROFILE_OPTION_MESSAGE_TYPE = "cleanrobot_app_msgs/ProfileOption"
+APP_RESTART_LOCALIZATION_SERVICE_TYPE = "cleanrobot_app_msgs/RestartLocalization"
+APP_SUBMIT_SLAM_COMMAND_SERVICE_TYPE = "cleanrobot_app_msgs/SubmitSlamCommand"
+
+SITE_COMMIT_COVERAGE_REGION_SERVICE_TYPE = "cleanrobot_site_msgs/CommitCoverageRegion"
+SITE_CONFIRM_MAP_ALIGNMENT_BY_POINTS_SERVICE_TYPE = "cleanrobot_site_msgs/ConfirmMapAlignmentByPoints"
+SITE_CONFIRM_RECT_COVERAGE_PLAN_SERVICE_TYPE = "cleanrobot_site_msgs/ConfirmRectCoveragePlan"
+SITE_GET_ZONE_PLAN_PATH_SERVICE_TYPE = "cleanrobot_site_msgs/GetZonePlanPath"
+SITE_OPERATE_COVERAGE_ZONE_SERVICE_TYPE = "cleanrobot_site_msgs/OperateCoverageZone"
+SITE_OPERATE_MAP_ALIGNMENT_SERVICE_TYPE = "cleanrobot_site_msgs/OperateMapAlignment"
+SITE_OPERATE_MAP_NO_GO_AREA_SERVICE_TYPE = "cleanrobot_site_msgs/OperateMapNoGoArea"
+SITE_OPERATE_MAP_VIRTUAL_WALL_SERVICE_TYPE = "cleanrobot_site_msgs/OperateMapVirtualWall"
+SITE_PREVIEW_ALIGNED_RECT_SELECTION_SERVICE_TYPE = "cleanrobot_site_msgs/PreviewAlignedRectSelection"
+SITE_PREVIEW_COVERAGE_REGION_SERVICE_TYPE = "cleanrobot_site_msgs/PreviewCoverageRegion"
+
+__all__ = [
+    "APP_EXE_TASK_SERVICE_TYPE",
+    "APP_GET_ODOMETRY_STATUS_SERVICE_TYPE",
+    "APP_GET_PROFILE_CATALOG_SERVICE_TYPE",
+    "APP_GET_SLAM_JOB_SERVICE_TYPE",
+    "APP_GET_SLAM_STATUS_REQUEST_TYPE",
+    "APP_GET_SLAM_STATUS_SERVICE_TYPE",
+    "APP_GET_SYSTEM_READINESS_SERVICE_TYPE",
+    "APP_PROFILE_OPTION_MESSAGE_TYPE",
+    "APP_RESTART_LOCALIZATION_SERVICE_TYPE",
+    "APP_SUBMIT_SLAM_COMMAND_SERVICE_TYPE",
+    "SITE_COMMIT_COVERAGE_REGION_SERVICE_TYPE",
+    "SITE_CONFIRM_MAP_ALIGNMENT_BY_POINTS_SERVICE_TYPE",
+    "SITE_CONFIRM_RECT_COVERAGE_PLAN_SERVICE_TYPE",
+    "SITE_GET_ZONE_PLAN_PATH_SERVICE_TYPE",
+    "SITE_OPERATE_COVERAGE_ZONE_SERVICE_TYPE",
+    "SITE_OPERATE_MAP_ALIGNMENT_SERVICE_TYPE",
+    "SITE_OPERATE_MAP_NO_GO_AREA_SERVICE_TYPE",
+    "SITE_OPERATE_MAP_VIRTUAL_WALL_SERVICE_TYPE",
+    "SITE_PREVIEW_ALIGNED_RECT_SELECTION_SERVICE_TYPE",
+    "SITE_PREVIEW_COVERAGE_REGION_SERVICE_TYPE",
+]

@@ -1,0 +1,17 @@
+<launch>
+  <arg name="start_robot_state_publisher" default="true"/>
+  <arg name="start_depth_cameras" default="true"/>
+  <arg name="camera1_bind_by_usb_port" default="false"/>
+  <arg name="camera2_bind_by_usb_port" default="false"/>
+
+  <group if="$(arg start_robot_state_publisher)">
+    <include file="$(find cleanrobot_description)/launch/robot_state_only.launch"/>
+  </group>
+
+  <group if="$(arg start_depth_cameras)">
+    <include file="$(find cleanrobot)/launch/orbbec_dual_depth_ground.launch">
+      <arg name="camera1_bind_by_usb_port" value="$(arg camera1_bind_by_usb_port)"/>
+      <arg name="camera2_bind_by_usb_port" value="$(arg camera2_bind_by_usb_port)"/>
+    </include>
+  </group>
+</launch>

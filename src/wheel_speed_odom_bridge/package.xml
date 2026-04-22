@@ -12,7 +12,6 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>roscpp</depend>
-  <depend>rospy</depend>
   <depend>roslib</depend>
   <depend>sensor_msgs</depend>
   <depend>tf2_ros</depend>

@@ -11,12 +11,36 @@ import rospy
 from std_srvs.srv import Trigger, TriggerResponse
 
 
+_DEPLOYMENT_SLAM_CONFIG_ROOT = "/data/config/slam/cartographer"
+
+
 def _bool_flag(value):
     return "true" if bool(value) else "false"
 
 
 def _workspace_root():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+
+
+def _default_slam_config_root():
+    workspace_root = _workspace_root()
+    canonical_root = os.path.join(workspace_root, "src", "cleanrobot", "config", "slam", "cartographer")
+    for candidate in (_DEPLOYMENT_SLAM_CONFIG_ROOT, canonical_root):
+        if _is_slam_config_root(candidate):
+            return os.path.abspath(os.path.expanduser(candidate))
+    return canonical_root
+
+
+def _is_slam_config_root(path):
+    candidate = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if not candidate:
+        return False
+    required = (
+        os.path.join(candidate, "slam", "config.lua"),
+        os.path.join(candidate, "pure_location_odom", "config.lua"),
+        os.path.join(candidate, "relocalization", "global_relocation.sml"),
+    )
+    return all(os.path.isfile(item) for item in required)
 
 
 def _iter_candidate_prefixes():
@@ -75,10 +99,14 @@ class CartographerSupervisorNode:
             "cartographer_ros",
             "cartographer_occupancy_grid_node",
         )
-        self.config_root = os.path.expanduser(str(rospy.get_param("~config_root", ""))).strip()
+        self.config_root = os.path.expanduser(
+            str(rospy.get_param("~config_root", _default_slam_config_root())).strip()
+            or _default_slam_config_root()
+        )
         self.mapping_config_subdir = str(rospy.get_param("~mapping_config_subdir", "slam")).strip() or "slam"
         self.localization_config_subdir = (
-            str(rospy.get_param("~localization_config_subdir", "pure_location")).strip() or "pure_location"
+            str(rospy.get_param("~localization_config_subdir", "pure_location_odom")).strip()
+            or "pure_location_odom"
         )
         self.configuration_basename = str(rospy.get_param("~configuration_basename", "config.lua")).strip() or "config.lua"
         self.default_mode = str(rospy.get_param("~mode", "localization")).strip().lower() or "localization"
@@ -91,6 +119,8 @@ class CartographerSupervisorNode:
         ).strip()
         self.write_state_service_name = str(rospy.get_param("~write_state_service_name", "/write_state")).strip()
         self.landmark_param_yaml = os.path.expanduser(str(rospy.get_param("~landmark_param_yaml", ""))).strip()
+        if not self.landmark_param_yaml:
+            self.landmark_param_yaml = os.path.join(self.config_root, "landmarks", "landmark_719.yaml")
         self.map_topic = str(rospy.get_param("~map_topic", "/map")).strip() or "/map"
         self.map_resolution = float(rospy.get_param("~resolution", 0.05))
         self.publish_period_sec = float(rospy.get_param("~publish_period_sec", 1.0))
@@ -106,6 +136,9 @@ class CartographerSupervisorNode:
         rospy.Service(self.save_state_service_name, Trigger, self._handle_save_state)
         rospy.on_shutdown(self._shutdown)
 
+        rospy.logwarn(
+            "[cartographer_supervisor] legacy manual-debug entry only; do not use in formal product bringup"
+        )
         rospy.loginfo(
             "[cartographer_supervisor] ready mode=%s auto_start=%s config_root=%s node=%s grid=%s",
             self.default_mode,
@@ -179,9 +212,15 @@ class CartographerSupervisorNode:
             raise RuntimeError("landmark yaml missing: %s" % self.landmark_param_yaml)
         subprocess.check_call(["rosparam", "load", self.landmark_param_yaml])
 
+    def _child_env(self):
+        env = os.environ.copy()
+        env["SLAM_ROOT"] = _workspace_root()
+        env["SLAM_CONFIG_ROOT"] = self.config_root
+        return env
+
     def _launch_proc(self, cmd, label):
         rospy.loginfo("[cartographer_supervisor] starting %s: %s", label, " ".join(shlex.quote(x) for x in cmd))
-        return subprocess.Popen(cmd, preexec_fn=os.setsid)
+        return subprocess.Popen(cmd, preexec_fn=os.setsid, env=self._child_env())
 
     def _stop_proc(self, proc):
         if proc is None or proc.poll() is not None:

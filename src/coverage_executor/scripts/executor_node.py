@@ -36,9 +36,8 @@ def _parse_xyyaw(val, default=(0.0, 0.0, 0.0)):
 def main():
     rospy.init_node("coverage_executor", anonymous=False)
 
-    legacy_db_path = rospy.get_param("~db_path", "/data/coverage/operations.db")
     plan_db_path = rospy.get_param("~plan_db_path", "/data/coverage/planning.db")
-    ops_db_path = rospy.get_param("~ops_db_path", legacy_db_path)
+    ops_db_path = rospy.get_param("~ops_db_path", "/data/coverage/operations.db")
     frame_id = rospy.get_param("~frame_id", "map")
     base_frame = rospy.get_param("~base_frame", "base_footprint")
     zone_id = rospy.get_param("~zone_id", "zone_demo")
@@ -59,7 +58,7 @@ def main():
     controller = rospy.get_param("~mbf_controller", "")
     recovery = rospy.get_param("~mbf_recovery", "")
 
-    water_off_distance = rospy.get_param("~water_off_distance", 0.5)
+    water_off_distance = rospy.get_param("~water_off_distance", 2.0)
     vacuum_delay_s = rospy.get_param("~vacuum_delay_s", 1.5)
     keep_cleaning_on_during_connect = rospy.get_param("~keep_cleaning_on_during_connect", True)
 
@@ -83,7 +82,6 @@ def main():
 
     # plan/zone consistency safety
     strict_zone_version_check = rospy.get_param("~strict_zone_version_check", True)
-    strict_resume_plan_id_check = rospy.get_param("~strict_resume_plan_id_check", True)
 
     # map identity safety (map/zone consistency)
     strict_map_check = rospy.get_param("~strict_map_check", True)
@@ -103,7 +101,7 @@ def main():
     start_cleaning_on_zone_begin = rospy.get_param("~start_cleaning_on_zone_begin", False)
 
     auto_start = rospy.get_param("~auto_start", False)
-    auto_resume_on_start = rospy.get_param("~auto_resume_on_start", False)
+    startup_resume_run_id = str(rospy.get_param("~startup_resume_run_id", "") or "").strip()
 
     # AI inspection spot cleaning (巡检：AI触发短时间开启执行机构)
     ai_spot_enable = rospy.get_param("~ai_spot_enable", False)
@@ -185,7 +183,6 @@ def main():
         ai_spot_mode=str(ai_spot_mode),
 
         strict_zone_version_check=bool(strict_zone_version_check),
-        strict_resume_plan_id_check=bool(strict_resume_plan_id_check),
 
         strict_map_check=bool(strict_map_check),
         strict_resume_map_check=bool(strict_resume_map_check),
@@ -236,11 +233,11 @@ def main():
         )
         rospy.loginfo("[EXEC_NODE] auto_charge enabled. battery_topic=%s dock=%s", str(battery_topic), str(dock))
 
-    # auto start / auto resume（你说默认不用 auto resume，就保持 False）
-    if auto_resume_on_start:
-        fsm.enqueue_cmd(f"resume {zone_id}")
+    # Optional debug-only startup resume requires an explicit run_id.
+    if startup_resume_run_id:
+        fsm.enqueue_cmd(f"resume run_id={startup_resume_run_id}")
     elif auto_start:
-        fsm.enqueue_cmd(f"start {zone_id}")
+        fsm.enqueue_cmd(f"start zone_id={zone_id}")
 
     fsm.spin()
 

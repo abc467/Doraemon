@@ -15,6 +15,7 @@ class TaskState:
     active_run_id: str = ""
     active_run_loop_index: int = 0
     task_map_name: str = ""
+    task_map_revision_id: str = ""
     plan_profile_name: str = ""
     sys_profile_name: str = ""
     clean_mode: str = ""
@@ -54,6 +55,7 @@ class TaskStateStore:
             active_run_id=str(rs.active_run_id or ""),
             active_run_loop_index=int(run.loop_index or 0) if run is not None else 0,
             task_map_name=str(rs.map_name or (run.map_name if run is not None else "")),
+            task_map_revision_id=str(rs.map_revision_id or (run.map_revision_id if run is not None else "")),
             plan_profile_name=str(run.plan_profile_name or "") if run is not None else "",
             sys_profile_name=str(run.sys_profile_name or "") if run is not None else "",
             clean_mode=str(run.clean_mode or "") if run is not None else "",
@@ -86,6 +88,7 @@ class TaskStateStore:
                 active_job_id=str(state.active_job_id or ""),
                 active_schedule_id=str(state.active_schedule_id or ""),
                 map_name=str(state.task_map_name or ""),
+                map_revision_id=str(state.task_map_revision_id or ""),
                 return_to_dock_on_finish=bool(state.return_to_dock_on_finish),
                 repeat_after_full_charge=bool(state.repeat_after_full_charge),
                 mission_state=str(state.mission_state or "IDLE"),

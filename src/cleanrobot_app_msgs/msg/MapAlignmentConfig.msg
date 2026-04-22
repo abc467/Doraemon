@@ -1,0 +1,15 @@
+string map_name
+string map_revision_id
+string map_id
+string map_version
+string alignment_version
+string raw_frame
+string aligned_frame
+float64 yaw_offset_deg
+float64 pivot_x
+float64 pivot_y
+string source
+string status
+bool active
+float64 created_ts
+float64 updated_ts

@@ -13,7 +13,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from coverage_msgs.msg import MapConstraints, Polygon2D, ZoneGeometry
 from coverage_planner.constraints import DEFAULT_VIRTUAL_WALL_BUFFER_M, compile_map_constraints
-from coverage_planner.map_identity import ensure_map_identity, get_runtime_map_identity
+from coverage_planner.map_identity import ensure_map_identity, get_runtime_map_identity, get_runtime_map_revision_id
 from coverage_planner.plan_store.store import PlanStore
 
 
@@ -68,8 +68,8 @@ def _line_marker(frame_id, ns, marker_id, points, color, scale=0.05):
 
 class MapConstraintsNode:
     def __init__(self):
-        legacy_db_path = rospy.get_param("~db_path", "/data/coverage/planning.db")
-        self.plan_db_path = rospy.get_param("~plan_db_path", legacy_db_path)
+        self.plan_db_path = rospy.get_param("~plan_db_path", "/data/coverage/planning.db")
+        self.robot_id = str(rospy.get_param("~robot_id", "local_robot"))
         self.map_topic = str(rospy.get_param("~map_topic", "/map"))
         self.frame_id = str(rospy.get_param("~frame_id", "map"))
         self.publish_hz = max(0.1, float(rospy.get_param("~publish_hz", 1.0)))
@@ -87,7 +87,7 @@ class MapConstraintsNode:
         self.marker_pub = rospy.Publisher("~markers", MarkerArray, queue_size=1, latch=True)
         self.reload_srv = rospy.Service("~reload", Trigger, self._on_reload)
 
-        self._last_key = ("", "", "")
+        self._last_key = ("", "", "", "")
         self._timer = rospy.Timer(rospy.Duration(1.0 / self.publish_hz), self._on_timer)
         self._publish_if_needed(force=True)
         rospy.loginfo("[map_constraints] ready. db=%s topic=%s", self.plan_db_path, self.constraints_topic)
@@ -156,19 +156,60 @@ class MapConstraintsNode:
         if not map_id:
             rospy.logwarn_throttle(5.0, "[map_constraints] map_id not ready, skip publish")
             return
+        runtime_revision_id = str(get_runtime_map_revision_id("/cartographer/runtime") or "").strip()
 
         with self._store_lock:
-            raw = self.store.load_map_constraints(map_id=map_id, map_md5_hint=map_md5, create_if_missing=False)
+            active_asset = self.store.get_active_map(robot_id=self.robot_id) or {}
+            active_revision_id = str(active_asset.get("revision_id") or "").strip()
+            active_map_id = str(active_asset.get("map_id") or "").strip()
+            active_map_md5 = str(active_asset.get("map_md5") or "").strip()
+            if active_revision_id and runtime_revision_id and active_revision_id != runtime_revision_id:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[map_constraints] runtime revision=%s mismatches active asset revision=%s; skip publish",
+                    runtime_revision_id,
+                    active_revision_id,
+                )
+                return
+            if (not runtime_revision_id) and active_map_id and active_map_id != map_id:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[map_constraints] runtime map_id=%s mismatches active asset map_id=%s; skip publish",
+                    map_id,
+                    active_map_id,
+                )
+                return
+            if (not runtime_revision_id) and active_map_md5 and map_md5 and active_map_md5 != map_md5:
+                rospy.logwarn_throttle(
+                    5.0,
+                    "[map_constraints] runtime map_md5=%s mismatches active asset map_md5=%s; skip publish",
+                    map_md5,
+                    active_map_md5,
+                )
+                return
+            raw = self.store.load_map_constraints(
+                map_id=active_map_id or map_id,
+                map_revision_id=active_revision_id,
+                map_md5_hint=active_map_md5 or map_md5,
+                create_if_missing=False,
+            )
+        compiled_map_id = active_map_id or map_id
+        compiled_map_md5 = active_map_md5 or map_md5 or str(raw.get("map_md5") or "")
         compiled = compile_map_constraints(
-            map_id=map_id,
-            map_md5=map_md5 or str(raw.get("map_md5") or ""),
+            map_id=compiled_map_id,
+            map_md5=compiled_map_md5,
             constraint_version=str(raw.get("constraint_version") or ""),
             no_go_areas=raw.get("no_go_areas") or [],
             virtual_walls=raw.get("virtual_walls") or [],
             default_buffer_m=float(self.default_virtual_wall_buffer_m),
         )
 
-        key = (str(compiled.map_id or ""), str(compiled.map_md5 or ""), str(compiled.constraint_version or ""))
+        key = (
+            str(active_revision_id or ""),
+            str(compiled.map_id or ""),
+            str(compiled.map_md5 or ""),
+            str(compiled.constraint_version or ""),
+        )
         if (not force) and key == self._last_key:
             return
 
@@ -178,7 +219,8 @@ class MapConstraintsNode:
             self.marker_pub.publish(markers)
         self._last_key = key
         rospy.loginfo(
-            "[map_constraints] published map_id=%s constraint_version=%s no_go=%d virtual_wall_keepouts=%d",
+            "[map_constraints] published revision=%s map_id=%s constraint_version=%s no_go=%d virtual_wall_keepouts=%d",
+            active_revision_id or "-",
             msg.map_id,
             msg.constraint_version,
             len(msg.no_go_polygons),

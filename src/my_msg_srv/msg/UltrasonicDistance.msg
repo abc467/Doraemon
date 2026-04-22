@@ -1,1 +1,0 @@
-uint16[8] distances  # 超声波距离（单位：mm）

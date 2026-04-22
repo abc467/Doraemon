@@ -1,5 +1,6 @@
 ﻿#include <ahrs_driver.h>
 #include <Eigen/Eigen>
+#include <cmath>
 namespace FDILink
 {
 ahrsBringup::ahrsBringup() :frist_sn_(false), serial_timeout_(20)
@@ -21,6 +22,10 @@ ahrsBringup::ahrsBringup() :frist_sn_(false), serial_timeout_(20)
   //serial                                                 
   pravite_nh.param("port", serial_port_, std::string("/dev/ttyTHS1")); 
   pravite_nh.param("baud", serial_baud_, 115200);
+  pravite_nh.param("enable_ned_odom_publish", enable_ned_odom_publish_, true);
+  pravite_nh.param("use_device_timestamp", use_device_timestamp_, true);
+  pravite_nh.param("timestamp_unit_to_sec", timestamp_unit_to_sec_, 1e-6);
+  pravite_nh.param("timestamp_resync_threshold_sec", timestamp_resync_threshold_sec_, 0.5);
 
   //publisher  创建发布对象
   imu_pub_ = nh_.advertise<sensor_msgs::Imu>(imu_topic_.c_str(), 10);
@@ -29,7 +34,10 @@ ahrsBringup::ahrsBringup() :frist_sn_(false), serial_timeout_(20)
   Magnetic_pub_ = nh_.advertise<geometry_msgs::Vector3>(Magnetic_topic_.c_str(), 10);
   gps_pub_ = nh_.advertise<sensor_msgs::NavSatFix>(gps_topic_.c_str(), 10);
   twist_pub_ = nh_.advertise<geometry_msgs::Twist>(twist_topic_.c_str(), 10);
-  NED_odom_pub_ = nh_.advertise<nav_msgs::Odometry>(NED_odom_topic_.c_str(), 10);
+  if (enable_ned_odom_publish_)
+  {
+    NED_odom_pub_ = nh_.advertise<nav_msgs::Odometry>(NED_odom_topic_.c_str(), 10);
+  }
 
   //setp up serial  设置串口参数并打开串口
   try
@@ -402,12 +410,15 @@ void ahrsBringup::processLoop()   // 数据处理过程
         continue;
       }
     }
+    const ros::Time host_stamp = ros::Time::now();
     //读取IMU数据进行解析，并发布相关话题
     if (head_type[0] == TYPE_IMU)
     {
       // publish imu topic
       sensor_msgs::Imu imu_data;
-      imu_data.header.stamp = ros::Time::now();
+      imu_data.header.stamp =
+          resolveDeviceTimestamp(imu_frame_.frame.data.data_pack.Timestamp, host_stamp,
+                                 &imu_time_state_, "imu");
       imu_data.header.frame_id = imu_frame_id_.c_str();
       Eigen::Quaterniond q_ahrs(ahrs_frame_.frame.data.data_pack.Qw,
                                 ahrs_frame_.frame.data.data_pack.Qx,
@@ -492,7 +503,7 @@ void ahrsBringup::processLoop()   // 数据处理过程
     else if (head_type[0] == TYPE_GEODETIC_POS)
     {
       sensor_msgs::NavSatFix gps_data;
-      gps_data.header.stamp = ros::Time::now();
+      gps_data.header.stamp = host_stamp;
       gps_data.header.frame_id = "navsat_link";
       gps_data.latitude = Geodetic_Position_frame_.frame.data.data_pack.Latitude / DEG_TO_RAD;
       gps_data.longitude = Geodetic_Position_frame_.frame.data.data_pack.Longitude / DEG_TO_RAD;
@@ -508,18 +519,23 @@ void ahrsBringup::processLoop()   // 数据处理过程
     else if (head_type[0] == TYPE_INSGPS)
     {
 
-      nav_msgs::Odometry odom_msg;
-      odom_msg.header.stamp = ros::Time::now(); 
-      // odom_msg.header.frame_id = odom_frame_id; // Odometer TF parent coordinates //里程计TF父坐标
-      odom_msg.pose.pose.position.x = insgps_frame_.frame.data.data_pack.Location_North; //Position //位置
-      odom_msg.pose.pose.position.y = insgps_frame_.frame.data.data_pack.Location_East;
-      odom_msg.pose.pose.position.z = insgps_frame_.frame.data.data_pack.Location_Down;
+      if (enable_ned_odom_publish_)
+      {
+        nav_msgs::Odometry odom_msg;
+        odom_msg.header.stamp =
+            resolveDeviceTimestamp(insgps_frame_.frame.data.data_pack.Timestamp, host_stamp,
+                                   &insgps_time_state_, "insgps");
+        // odom_msg.header.frame_id = odom_frame_id; // Odometer TF parent coordinates //里程计TF父坐标
+        odom_msg.pose.pose.position.x = insgps_frame_.frame.data.data_pack.Location_North; //Position //位置
+        odom_msg.pose.pose.position.y = insgps_frame_.frame.data.data_pack.Location_East;
+        odom_msg.pose.pose.position.z = insgps_frame_.frame.data.data_pack.Location_Down;
 
-      // odom_msg.child_frame_id = robot_frame_id; // Odometer TF subcoordinates //里程计TF子坐标
-      odom_msg.twist.twist.linear.x =  insgps_frame_.frame.data.data_pack.Velocity_North; //Speed in the X direction //X方向速度
-      odom_msg.twist.twist.linear.y =  insgps_frame_.frame.data.data_pack.Velocity_East; //Speed in the Y direction //Y方向速度
-      odom_msg.twist.twist.linear.z =  insgps_frame_.frame.data.data_pack.Velocity_Down;
-      NED_odom_pub_.publish(odom_msg);
+        // odom_msg.child_frame_id = robot_frame_id; // Odometer TF subcoordinates //里程计TF子坐标
+        odom_msg.twist.twist.linear.x =  insgps_frame_.frame.data.data_pack.Velocity_North; //Speed in the X direction //X方向速度
+        odom_msg.twist.twist.linear.y =  insgps_frame_.frame.data.data_pack.Velocity_East; //Speed in the Y direction //Y方向速度
+        odom_msg.twist.twist.linear.z =  insgps_frame_.frame.data.data_pack.Velocity_Down;
+        NED_odom_pub_.publish(odom_msg);
+      }
 
       geometry_msgs::Twist speed_msg;
       speed_msg.linear.x =  insgps_frame_.frame.data.data_pack.BodyVelocity_X;
@@ -535,6 +551,80 @@ void ahrsBringup::processLoop()   // 数据处理过程
 
     }   
   }
+}
+
+ros::Time ahrsBringup::resolveDeviceTimestamp(int64_t sensor_timestamp_raw,
+                                              const ros::Time& host_stamp,
+                                              DeviceTimestampState* state,
+                                              const std::string& stream_name)
+{
+  if (!use_device_timestamp_ || state == nullptr || sensor_timestamp_raw <= 0) {
+    return host_stamp;
+  }
+
+  const double sensor_time_sec = static_cast<double>(sensor_timestamp_raw) * timestamp_unit_to_sec_;
+  const double observed_offset_sec = host_stamp.toSec() - sensor_time_sec;
+
+  if (!std::isfinite(sensor_time_sec) || !std::isfinite(observed_offset_sec)) {
+    return host_stamp;
+  }
+
+  if (!state->initialized) {
+    state->initialized = true;
+    state->last_raw = sensor_timestamp_raw;
+    state->offset_sec = observed_offset_sec;
+    state->last_stamp = host_stamp;
+    return host_stamp;
+  }
+
+  if (sensor_timestamp_raw <= state->last_raw) {
+    state->last_raw = sensor_timestamp_raw;
+    state->offset_sec = observed_offset_sec;
+    state->last_stamp = host_stamp;
+    ++state->resync_count;
+    ROS_WARN_STREAM_THROTTLE(5.0, stream_name
+                                      << " timestamp moved backwards. Falling back to host time and"
+                                      << " resyncing. raw=" << sensor_timestamp_raw);
+    return host_stamp;
+  }
+
+  const double offset_delta_sec = std::fabs(observed_offset_sec - state->offset_sec);
+  if (offset_delta_sec > timestamp_resync_threshold_sec_) {
+    state->last_raw = sensor_timestamp_raw;
+    state->offset_sec = observed_offset_sec;
+    state->last_stamp = host_stamp;
+    ++state->resync_count;
+    ROS_WARN_STREAM_THROTTLE(5.0, stream_name
+                                      << " timestamp offset jumped by "
+                                      << offset_delta_sec
+                                      << " s. Falling back to host time and resyncing.");
+    return host_stamp;
+  }
+
+  if (observed_offset_sec < state->offset_sec) {
+    state->offset_sec = observed_offset_sec;
+  }
+
+  ros::Time mapped_stamp;
+  mapped_stamp.fromSec(sensor_time_sec + state->offset_sec);
+  if (mapped_stamp > host_stamp) {
+    mapped_stamp = host_stamp;
+  }
+
+  if (!state->last_stamp.isZero() && mapped_stamp <= state->last_stamp) {
+    state->last_raw = sensor_timestamp_raw;
+    state->offset_sec = observed_offset_sec;
+    state->last_stamp = host_stamp;
+    ++state->resync_count;
+    ROS_WARN_STREAM_THROTTLE(5.0, stream_name
+                                      << " mapped timestamp became non-monotonic. Falling back to"
+                                      << " host time and resyncing.");
+    return host_stamp;
+  }
+
+  state->last_raw = sensor_timestamp_raw;
+  state->last_stamp = mapped_stamp;
+  return mapped_stamp;
 }
 
 void ahrsBringup::magCalculateYaw(double roll, double pitch, double &magyaw, double magx, double magy, double magz)

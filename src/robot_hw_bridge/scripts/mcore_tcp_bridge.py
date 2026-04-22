@@ -11,20 +11,20 @@ M-core (底盘/M核) TCP bridge
 
 ROS I/O:
   - Subscribe: /cmd_vel (geometry_msgs/Twist)
-  - Publish  : /combined_status (my_msg_srv/CombinedStatus)
+  - Publish  : /combined_status (robot_platform_msgs/CombinedStatus)
   - Publish  : /battery_state (sensor_msgs/BatteryState)
   - Publish  : ~connected (std_msgs/Bool, latch)
-  - Publish  : /mcore/cleaning_params/current (my_msg_srv/CleaningParams, latch)
+  - Publish  : /mcore/cleaning_params/current (robot_platform_msgs/CleaningParams, latch)
 
 供补给/充电流程使用的控制输入（保持你们现有架构）:
-  - Subscribe: /mcore/control_clean_tools (my_msg_srv/ControlCleanTools)
+  - Subscribe: /mcore/control_clean_tools (robot_platform_msgs/ControlCleanTools)
       cmd 0x5002: tool_id + operation
-  - Subscribe: /mcore/control_water_tap (my_msg_srv/ControlWaterTap)
+  - Subscribe: /mcore/control_water_tap (robot_platform_msgs/ControlWaterTap)
       tap_id: 0x01 水泵, 0x02 清水阀, 0x03 污水阀, 0x05 吸水机
-      operation: 0/1 (阀门开关) 或 0..64(泵PWM/吸水机风力)
-  - Subscribe: /mcore/control_motor (my_msg_srv/ControlMotor)
-      cmd 0x5004: vel 0..64
-  - Subscribe: /mcore/cleaning_params/set (my_msg_srv/CleaningParams)
+      operation: 0/1 (阀门开关) 或 0..100(泵PWM/吸水机风力)
+  - Subscribe: /mcore/control_motor (robot_platform_msgs/ControlMotor)
+      cmd 0x5004: vel 0..100
+  - Subscribe: /mcore/cleaning_params/set (robot_platform_msgs/CleaningParams)
       仅更新参数快照，不直接触发执行机构启停
   - Subscribe: /mcore/charge_enable (std_msgs/Bool)
       True -> cmd 0x5005 [0x01]
@@ -49,13 +49,15 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import Bool
 
-from my_msg_srv.msg import (
+from robot_platform_msgs.msg import (
     CleaningParams,
     CombinedStatus,
     ControlCleanTools,
     ControlMotor,
     ControlWaterTap,
 )
+
+MCORE_ACTUATOR_MAX = 100
 
 
 def float_to_list_le(val: float):
@@ -111,8 +113,8 @@ class MCoreTCPBridge:
         self._battery_msg.power_supply_technology = BatteryState.POWER_SUPPLY_TECHNOLOGY_LION
         self._cleaning_params = CleaningParams()
         self._cleaning_params.profile_name = str(rospy.get_param('~profile_name', 'default'))
-        self._cleaning_params.vel_water_pump = clamp_u8(rospy.get_param('~vel_water_pump', 0), 0, 64)
-        self._cleaning_params.vel_water_suction = clamp_u8(rospy.get_param('~vel_water_suction', 0), 0, 64)
+        self._cleaning_params.vel_water_pump = clamp_u8(rospy.get_param('~vel_water_pump', 0), 0, MCORE_ACTUATOR_MAX)
+        self._cleaning_params.vel_water_suction = clamp_u8(rospy.get_param('~vel_water_suction', 0), 0, MCORE_ACTUATOR_MAX)
         self._cleaning_params.height_scrub = clamp_u8(rospy.get_param('~height_scrub', 38))
 
         self.cmd_vel_sub = rospy.Subscriber('/cmd_vel', Twist, self._on_cmd_vel, queue_size=20)
@@ -222,8 +224,8 @@ class MCoreTCPBridge:
 
     def _on_cleaning_params(self, msg: CleaningParams):
         self._cleaning_params.profile_name = str(msg.profile_name or self._cleaning_params.profile_name or '')
-        self._cleaning_params.vel_water_pump = clamp_u8(msg.vel_water_pump, 0, 64)
-        self._cleaning_params.vel_water_suction = clamp_u8(msg.vel_water_suction, 0, 64)
+        self._cleaning_params.vel_water_pump = clamp_u8(msg.vel_water_pump, 0, MCORE_ACTUATOR_MAX)
+        self._cleaning_params.vel_water_suction = clamp_u8(msg.vel_water_suction, 0, MCORE_ACTUATOR_MAX)
         self._cleaning_params.height_scrub = clamp_u8(msg.height_scrub)
 
         rospy.loginfo(
@@ -252,7 +254,7 @@ class MCoreTCPBridge:
     def _on_control_motor(self, msg: ControlMotor):
         # cmd_id 0x5004 : [vel]
         cmd_id = [0x50, 0x04]
-        vel = clamp_u8(msg.vel, 0, 64)
+        vel = clamp_u8(msg.vel, 0, MCORE_ACTUATOR_MAX)
         self._data_send(cmd_id, [vel])
 
     def _on_charge_enable(self, msg: Bool):

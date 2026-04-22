@@ -1,0 +1,29 @@
+<launch>
+  <arg name="imu_topic" default="/imu"/>
+  <arg name="corrected_imu_topic" default="/imu_corrected"/>
+  <arg name="enable_imu_bias_compensation" default="true"/>
+  <arg name="estimate_imu_bias_on_startup" default="true"/>
+  <arg name="imu_bias_estimation_duration_sec" default="5.0"/>
+  <arg name="imu_bias_stationary_threshold_rad_s" default="0.02"/>
+
+  <node pkg="wheel_speed_odom_bridge" type="ekf_covariance_override_node"
+        name="ekf_covariance_override" output="screen">
+    <param name="input_imu_topic" value="$(arg imu_topic)"/>
+    <param name="output_imu_topic" value="$(arg corrected_imu_topic)"/>
+    <param name="override_imu_orientation_covariance" value="false"/>
+    <param name="override_imu_angular_velocity_covariance" value="true"/>
+    <param name="override_imu_linear_acceleration_covariance" value="false"/>
+    <param name="enable_imu_angular_velocity_bias_compensation"
+           value="$(arg enable_imu_bias_compensation)"/>
+    <param name="estimate_imu_angular_velocity_bias_on_startup"
+           value="$(arg estimate_imu_bias_on_startup)"/>
+    <param name="imu_angular_velocity_bias_estimation_duration_sec"
+           value="$(arg imu_bias_estimation_duration_sec)"/>
+    <param name="imu_angular_velocity_bias_stationary_threshold_rad_s"
+           value="$(arg imu_bias_stationary_threshold_rad_s)"/>
+    <param name="imu_angular_velocity_bias_min_samples" value="200"/>
+    <rosparam param="imu_angular_velocity_covariance_diagonal">[1000000.0, 1000000.0, 0.05]</rosparam>
+    <rosparam param="imu_linear_acceleration_covariance_diagonal">[1000000.0, 1000000.0, 1000000.0]</rosparam>
+    <rosparam param="imu_angular_velocity_bias">[0.003318707, -0.007191083, -0.004131934]</rosparam>
+  </node>
+</launch>
