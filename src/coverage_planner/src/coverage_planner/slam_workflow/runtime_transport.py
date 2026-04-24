@@ -39,6 +39,15 @@ class CartographerRuntimeTransport:
     def __init__(self, backend: Any):
         self._backend = backend
 
+    @staticmethod
+    def _log_subdir_for_label(label: str) -> str:
+        name = str(label or "").strip()
+        if name in ("cartographer_node", "cartographer_occupancy_grid_node"):
+            return "cartographer"
+        if name == "runtime_flag_server_node":
+            return "runtime_flags"
+        return "runtime"
+
     def _visual_command_service_name(self) -> str:
         return (
             str(getattr(self._backend, "visual_command_service", "") or _INTERNAL_VISUAL_COMMAND_SERVICE).strip()
@@ -101,7 +110,12 @@ class CartographerRuntimeTransport:
         backend = self._backend
         self.stop_managed_proc(label)
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        log_path = os.path.join(backend.log_root, "%s_%s.log" % (str(label or "proc"), stamp))
+        log_dir = os.path.join(
+            backend.log_root,
+            self._log_subdir_for_label(str(label or "proc")),
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "%s_%s.log" % (str(label or "proc"), stamp))
         log_fh = open(log_path, "a", encoding="utf-8")
         proc = subprocess.Popen(
             [str(part) for part in list(cmd or [])],

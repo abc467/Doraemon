@@ -487,13 +487,11 @@ class ScheduleApiServiceNode:
                     message="schedule not found",
                 )
             try:
-                self.ops.set_schedule_enabled(schedule_id, False)
-                self.ops.clear_schedule_state(schedule_id)
-                saved = self.ops.get_schedule(schedule_id)
+                self.ops.delete_schedule(schedule_id)
                 return response_cls(
                     success=True,
-                    message="disabled",
-                    schedule=self._schedule_to_msg(saved or rec, schedule_cls=schedule_cls),
+                    message="deleted",
+                    schedule=self._schedule_to_msg(rec, schedule_cls=schedule_cls),
                     schedules=[],
                 )
             except Exception as e:

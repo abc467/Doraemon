@@ -97,6 +97,49 @@ class AppParallelServiceTest(unittest.TestCase):
         self.assertIsInstance(resp.schedules[0], AppCleanSchedule)
         self.assertEqual(resp.schedules[0].map_revision_id, "rev_demo_01")
 
+    def test_schedule_api_app_delete_physically_removes_schedule(self):
+        deleted = []
+        rec = types.SimpleNamespace(
+            schedule_id="sched_a",
+            job_id="7",
+            job_name="task_demo",
+            enabled=True,
+            schedule_type="daily",
+            dow=[],
+            time_local="09:00",
+            timezone="Asia/Shanghai",
+            start_date="2026-04-20",
+            end_date="",
+            map_name="demo_map",
+            map_revision_id="rev_demo_01",
+            zone_id="zone_a",
+            default_loops=2,
+            plan_profile_name="cover_standard",
+            sys_profile_name="standard",
+            default_clean_mode="scrub",
+            return_to_dock_on_finish=True,
+            repeat_after_full_charge=False,
+            last_fire_ts=0.0,
+            last_done_ts=0.0,
+            last_status="idle",
+        )
+
+        node = SCHEDULE_API_MODULE.ScheduleApiServiceNode.__new__(SCHEDULE_API_MODULE.ScheduleApiServiceNode)
+        node.ops = types.SimpleNamespace(
+            get_schedule=lambda schedule_id: rec if str(schedule_id) == "sched_a" else None,
+            delete_schedule=lambda schedule_id: deleted.append(str(schedule_id)),
+        )
+
+        req = AppOperateScheduleRequest()
+        req.operation = int(req.Delete)
+        req.schedule_id = "sched_a"
+        resp = node._handle_app(req)
+
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.message, "deleted")
+        self.assertEqual(deleted, ["sched_a"])
+        self.assertEqual(resp.schedule.schedule_id, "sched_a")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1237,6 +1237,20 @@ class OperationsStore:
         finally:
             conn.close()
 
+    def delete_schedule(self, schedule_id: str):
+        sid = str(schedule_id or "").strip()
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM job_schedule_state WHERE schedule_id=?;", (sid,))
+            conn.execute("DELETE FROM job_schedules WHERE schedule_id=?;", (sid,))
+            conn.execute(
+                "UPDATE robot_runtime_state SET active_schedule_id='' WHERE active_schedule_id=?;",
+                (sid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def list_schedule_specs(self) -> List[Dict[str, Any]]:
         conn = self._connect()
         try:
