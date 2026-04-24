@@ -6,6 +6,8 @@ from typing import List, Tuple, Callable, Optional, Dict, Any
 
 import fields2cover as f2c
 
+from coverage_planner.constraints import path_points_outside_effective_regions
+
 from .types import RobotSpec, PlannerParams, PlanResult, BlockPlan, BlockDebug
 from .geom import resample_polyline_uniform, yaw_list_from_pts, polyline_length_xy
 from .f2c_adapter import (
@@ -13,12 +15,41 @@ from .f2c_adapter import (
     build_turn_planner, generate_best_swaths, snake_sorted_swaths, recon_snake_polyline,
     swaths_size, swath_at, swath_endpoints_xyz, cell_outer_ring_xy
 )
-from .shrink import long_side_shrink_cells
+from .shrink import cell_to_shapely_polygon, long_side_shrink_cells
 from .stitch import StitchParams, build_edge_loop_from_rawcell_bbox, stitch_with_edge_loop
 from .exec_order import nearest_neighbor_exec_order
 
 
 XY = Tuple[float, float]
+
+
+def _bbox_edge_loop_safe_for_cell(cell_geom) -> bool:
+    poly = cell_to_shapely_polygon(cell_geom)
+    if poly is None or poly.is_empty:
+        return False
+    if len(getattr(poly, "interiors", []) or []) > 0:
+        return False
+    minx, miny, maxx, maxy = poly.bounds
+    bbox_area = float(maxx - minx) * float(maxy - miny)
+    if bbox_area <= 1e-9:
+        return False
+    # The legacy edge pass is a rectangle-bbox sweep. It is safe only when the
+    # actual cell is essentially that rectangle; concave cells/holes are handled
+    # by the snake path so we do not drive through keepout cut-outs.
+    return abs(float(poly.area) - bbox_area) <= max(1e-6, bbox_area * 0.005)
+
+
+def _path_region_violation_message(path_xy: List[XY], effective_regions: Optional[List[Dict[str, Any]]]) -> str:
+    if not effective_regions:
+        return ""
+    offenders = path_points_outside_effective_regions(path_xy, effective_regions, max_examples=5)
+    if not offenders:
+        return ""
+    sample = ", ".join(
+        "#%d=(%.3f,%.3f)" % (idx, xy[0], xy[1])
+        for idx, xy in offenders
+    )
+    return "coverage path leaves effective region at %s" % sample
 
 
 def plan_coverage(
@@ -135,10 +166,18 @@ def plan_coverage(
                 # 4) edge loop from raw_cell bbox shrunken by wall_margin (all 4 sides)
                 raw_outer_xy = cell_outer_ring_xy(raw_cell)
 
-                edge_vertices, edge_dense, edge_close_gap, edge_len = build_edge_loop_from_rawcell_bbox(
-                    raw_outer_xy, wall_margin, edge_r,
-                    params.edge_corner_pull, params.path_step_m, params.edge_corner_min_pts
-                )
+                edge_vertices: List[XY] = []
+                edge_dense: List[XY] = []
+                edge_close_gap = 0.0
+                edge_len = 0.0
+                edge_loop_skipped = ""
+                if _bbox_edge_loop_safe_for_cell(cell_b):
+                    edge_vertices, edge_dense, edge_close_gap, edge_len = build_edge_loop_from_rawcell_bbox(
+                        raw_outer_xy, wall_margin, edge_r,
+                        params.edge_corner_pull, params.path_step_m, params.edge_corner_min_pts
+                    )
+                elif wall_margin > 1e-9:
+                    edge_loop_skipped = "non_rectangular_or_hole_cell"
 
                 # 5) stitch flow (if edge exists), else final=snake
                 final_pts = snake_pts_path[:]
@@ -164,6 +203,22 @@ def plan_coverage(
                         edge_dense=edge_dense,
                         sp=sp
                     )
+                    violation = _path_region_violation_message(final_pts, effective_regions)
+                    if violation:
+                        snake_violation = _path_region_violation_message(snake_pts_path, effective_regions)
+                        if snake_violation:
+                            return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", snake_violation, frame_id, [], [], 0.0)
+                        final_pts = snake_pts_path[:]
+                        stitch_dbg = None
+                        edge_loop_skipped = "bbox_edge_loop_rejected_by_region_guard"
+                        edge_dense = []
+                        edge_vertices = []
+                        edge_close_gap = 0.0
+                        edge_len = 0.0
+                else:
+                    violation = _path_region_violation_message(final_pts, effective_regions)
+                    if violation:
+                        return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", violation, frame_id, [], [], 0.0)
 
                 # debug data
                 dbg = None
@@ -189,6 +244,8 @@ def plan_coverage(
                     "final_pts": int(len(final_pts)),
                     "final_len": float(polyline_length_xy(final_pts)),
                 }
+                if edge_loop_skipped:
+                    stats["edge_loop_skipped"] = edge_loop_skipped
 
                 blocks.append(
                     BlockPlan(

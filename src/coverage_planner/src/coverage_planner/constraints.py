@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
-    from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon
-    from shapely.ops import unary_union
+    from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Point, Polygon
+    from shapely.ops import split, triangulate, unary_union
 
     _HAS_SHAPELY = True
 except Exception:  # pragma: no cover - runtime environment decides this
@@ -15,6 +15,8 @@ except Exception:  # pragma: no cover - runtime environment decides this
     LineString = None
     MultiPolygon = None
     Polygon = None
+    split = None
+    triangulate = None
     unary_union = None
     _HAS_SHAPELY = False
 
@@ -112,7 +114,174 @@ def _geometry_to_region_list(geom, *, prec: int = 3) -> List[Dict[str, Any]]:
     return out
 
 
-def _compile_no_go_areas(no_go_areas: Sequence[Dict[str, Any]], *, prec: int = 3):
+def _iter_polygon_geometries(geom) -> List["Polygon"]:
+    if (not _HAS_SHAPELY) or geom is None or geom.is_empty:
+        return []
+    if geom.geom_type == "Polygon":
+        return [geom]
+    if geom.geom_type == "MultiPolygon":
+        return [g for g in geom.geoms if not g.is_empty]
+    if geom.geom_type == "GeometryCollection":
+        return [g for g in geom.geoms if getattr(g, "geom_type", "") == "Polygon" and not g.is_empty]
+    return []
+
+
+def _split_parts_by_lines(parts, lines) -> List["Polygon"]:
+    out = list(parts or [])
+    for line in lines or []:
+        next_parts = []
+        for part in out:
+            if part is None or part.is_empty:
+                continue
+            try:
+                pieces = split(part, line)
+                next_parts.extend(_iter_polygon_geometries(pieces))
+            except Exception:
+                next_parts.append(part)
+        out = next_parts
+    return out
+
+
+def _hole_split_lines(poly, *, orientation: str):
+    minx, miny, maxx, maxy = poly.bounds
+    pad = max(float(maxx - minx), float(maxy - miny), 1.0) + 1.0
+    values = set()
+    for ring in poly.interiors:
+        for x, y in list(ring.coords):
+            values.add(round(float(x if orientation == "vertical" else y), 6))
+    lines = []
+    for value in sorted(values):
+        if orientation == "vertical":
+            if value <= minx + 1e-6 or value >= maxx - 1e-6:
+                continue
+            lines.append(LineString([(value, miny - pad), (value, maxy + pad)]))
+        else:
+            if value <= miny + 1e-6 or value >= maxy - 1e-6:
+                continue
+            lines.append(LineString([(minx - pad, value), (maxx + pad, value)]))
+    return lines
+
+
+def _triangulate_hole_free(poly) -> List["Polygon"]:
+    pieces = []
+    try:
+        triangles = triangulate(poly)
+    except Exception:
+        return pieces
+    for tri in triangles or []:
+        if tri is None or tri.is_empty:
+            continue
+        try:
+            clipped = tri.intersection(poly)
+        except Exception:
+            continue
+        for part in _iter_polygon_geometries(clipped):
+            if part.area > 1e-6 and len(part.interiors) == 0:
+                pieces.append(part)
+    return pieces
+
+
+def _geometry_to_hole_free_region_list(geom, *, prec: int = 3) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for poly in _iter_polygon_geometries(geom):
+        if len(poly.interiors) == 0:
+            out.extend(_geometry_to_region_list(poly, prec=prec))
+            continue
+
+        parts = [poly]
+        parts = _split_parts_by_lines(
+            parts,
+            [line for part in parts for line in _hole_split_lines(part, orientation="vertical")],
+        )
+        if any(len(part.interiors) > 0 for part in parts):
+            parts = _split_parts_by_lines(
+                parts,
+                [line for part in parts for line in _hole_split_lines(part, orientation="horizontal")],
+            )
+
+        for part in parts:
+            if part.is_empty or part.area <= 1e-6:
+                continue
+            if len(part.interiors) == 0:
+                out.extend(_geometry_to_region_list(part, prec=prec))
+            else:
+                for tri in _triangulate_hole_free(part):
+                    out.extend(_geometry_to_region_list(tri, prec=prec))
+    return out
+
+
+def make_hole_free_effective_regions(
+    regions: Sequence[Dict[str, Any]],
+    *,
+    prec: int = 3,
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for region in list(regions or []):
+        outer = list((region or {}).get("outer") or [])
+        if len(outer) < 3:
+            continue
+        poly = _safe_polygon(outer, (region or {}).get("holes") or [])
+        out.extend(_geometry_to_hole_free_region_list(poly, prec=prec))
+    return out
+
+
+def min_plannable_span_m(robot_spec: Any, params: Any) -> float:
+    edge_radius_m = float(getattr(params, "edge_corner_radius_m", 0.0) or 0.0)
+    min_turning_radius_m = float(getattr(robot_spec, "min_turning_radius", 0.0) or 0.0)
+    if edge_radius_m < 0.0:
+        edge_radius_m = min_turning_radius_m
+    return max(
+        float(getattr(robot_spec, "cov_width", 0.0) or 0.0) * 1.5,
+        float(getattr(robot_spec, "width", 0.0) or 0.0)
+        + max(edge_radius_m, min_turning_radius_m) * 1.6,
+        float(getattr(params, "turn_margin_m", 0.0) or 0.0) * 2.0,
+        0.25,
+    )
+
+
+def filter_effective_regions_for_planner(
+    regions: Sequence[Dict[str, Any]],
+    robot_spec: Any,
+    params: Any,
+) -> Tuple[List[Dict[str, Any]], int, float]:
+    min_span_m = float(min_plannable_span_m(robot_spec, params))
+    kept: List[Dict[str, Any]] = []
+    skipped = 0
+    for region in list(regions or []):
+        outer = list((region or {}).get("outer") or [])
+        if len(outer) < 3:
+            skipped += 1
+            continue
+        xs = [float(pt[0]) for pt in outer if pt is not None and len(pt) >= 2]
+        ys = [float(pt[1]) for pt in outer if pt is not None and len(pt) >= 2]
+        if (not xs) or (not ys):
+            skipped += 1
+            continue
+        width_m = max(xs) - min(xs)
+        height_m = max(ys) - min(ys)
+        if min(float(width_m), float(height_m)) + 1e-9 < min_span_m:
+            skipped += 1
+            continue
+        kept.append(dict(region))
+    return kept, int(skipped), min_span_m
+
+
+def _buffer_keepout_polygon(poly: "Polygon", buffer_m: float):
+    buffer_m = max(0.0, float(buffer_m or 0.0))
+    if buffer_m <= 1e-9:
+        return poly
+    buffered = poly.buffer(buffer_m, cap_style=2, join_style=2)
+    if not buffered.is_valid:
+        buffered = buffered.buffer(0.0)
+    return buffered if not buffered.is_empty else poly
+
+
+def _compile_no_go_areas(
+    no_go_areas: Sequence[Dict[str, Any]],
+    *,
+    default_buffer_m: float = 0.0,
+    prec: int = 3,
+):
     compiled = []
     geoms = []
     for idx, area in enumerate(no_go_areas or []):
@@ -121,10 +290,13 @@ def _compile_no_go_areas(no_go_areas: Sequence[Dict[str, Any]], *, prec: int = 3
             continue
         polygon = area.get("polygon") or area.get("points") or area.get("outer") or []
         poly = _safe_polygon(polygon)
+        buffer_m = float(area.get("buffer_m", area.get("buffer", default_buffer_m)) or 0.0)
+        poly = _buffer_keepout_polygon(poly, buffer_m)
         compiled.append(
             {
                 "area_id": str(area.get("area_id") or area.get("id") or f"no_go_{idx}"),
                 "name": str(area.get("name") or ""),
+                "buffer_m": float(max(0.0, buffer_m)),
                 "geometry": _geometry_to_region_list(poly, prec=prec),
             }
         )
@@ -173,12 +345,17 @@ def compile_map_constraints(
     no_go_areas: Sequence[Dict[str, Any]],
     virtual_walls: Sequence[Dict[str, Any]],
     default_buffer_m: float = DEFAULT_VIRTUAL_WALL_BUFFER_M,
+    default_no_go_buffer_m: float = 0.0,
     prec: int = 3,
 ) -> CompiledMapConstraints:
     if not _HAS_SHAPELY:
         raise RuntimeError("Shapely is required for map constraint compilation")
 
-    no_go_compiled, _ = _compile_no_go_areas(no_go_areas, prec=prec)
+    no_go_compiled, _ = _compile_no_go_areas(
+        no_go_areas,
+        default_buffer_m=float(default_no_go_buffer_m or 0.0),
+        prec=prec,
+    )
     wall_compiled, _ = _compile_virtual_walls(
         virtual_walls,
         default_buffer_m=float(default_buffer_m),
@@ -236,3 +413,43 @@ def compile_zone_constraints(
         effective_regions=effective_regions,
         keepout_snapshot_rings=keepout_snapshot_rings,
     )
+
+
+def path_points_outside_effective_regions(
+    points: Sequence[Sequence[float]],
+    regions: Sequence[Dict[str, Any]],
+    *,
+    max_examples: int = 8,
+) -> List[Tuple[int, XY]]:
+    if not _HAS_SHAPELY:
+        return []
+
+    polys = []
+    for region in list(regions or []):
+        outer = list((region or {}).get("outer") or [])
+        if len(outer) < 3:
+            continue
+        try:
+            polys.append(_safe_polygon(outer, (region or {}).get("holes") or []))
+        except Exception:
+            continue
+    if not polys:
+        return []
+
+    allowed = unary_union(polys)
+    if allowed.is_empty:
+        return []
+    # Tiny positive tolerance prevents numerical round-off from rejecting points
+    # that lie on a generated cell boundary, while still catching keepout leaks.
+    allowed = allowed.buffer(1e-6)
+
+    offenders: List[Tuple[int, XY]] = []
+    for idx, pt in enumerate(points or []):
+        if pt is None or len(pt) < 2:
+            continue
+        xy = _round_xy(float(pt[0]), float(pt[1]), prec=6)
+        if not allowed.covers(Point(float(xy[0]), float(xy[1]))):
+            offenders.append((int(idx), xy))
+            if len(offenders) >= int(max_examples):
+                break
+    return offenders

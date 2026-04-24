@@ -72,9 +72,12 @@ from coverage_planner.constraints import (
     DEFAULT_VIRTUAL_WALL_BUFFER_M,
     compile_map_constraints,
     compile_zone_constraints,
+    filter_effective_regions_for_planner,
+    make_hole_free_effective_regions,
+    min_plannable_span_m,
 )
 from coverage_planner.coverage_planner_core.geom_norm import normalize_polygon
-from coverage_planner.coverage_planner_core.planner import plan_coverage
+from coverage_planner.coverage_planner_core.isolated_runner import run_plan_coverage_isolated
 from coverage_planner.coverage_planner_core.types import PlannerParams, RobotSpec
 from coverage_planner.map_asset_status import map_asset_verification_error
 from coverage_planner.map_alignment import (
@@ -438,7 +441,17 @@ class SiteEditorServiceNode:
         self.default_virtual_wall_buffer_m = float(
             rospy.get_param("~default_virtual_wall_buffer_m", DEFAULT_VIRTUAL_WALL_BUFFER_M)
         )
+        self.default_no_go_buffer_m = float(
+            rospy.get_param("~default_no_go_buffer_m", 0.30)
+        )
         self.default_plan_profile_name = str(rospy.get_param("~default_plan_profile_name", "cover_standard")).strip() or "cover_standard"
+        self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)
+        self.degraded_preview_on_planner_crash = bool(
+            rospy.get_param("~degraded_preview_on_planner_crash", True)
+        )
+        self.degraded_commit_on_planner_crash = bool(
+            rospy.get_param("~degraded_commit_on_planner_crash", False)
+        )
 
         self.app_alignment_contract_param_ns = str(
             rospy.get_param(
@@ -2758,6 +2771,27 @@ class SiteEditorServiceNode:
         )
         return max(0.0, (short_side_m - min_safe_inner_span_m) * 0.5)
 
+    def _min_plannable_span_m(self, params: PlannerParams) -> float:
+        return min_plannable_span_m(self.default_robot_spec, params)
+
+    def _filter_effective_regions_for_planner(
+        self,
+        regions: Sequence[Dict[str, object]],
+        params: PlannerParams,
+        warnings: List[str],
+    ) -> List[Dict[str, object]]:
+        kept, skipped, min_span_m = filter_effective_regions_for_planner(
+            regions,
+            self.default_robot_spec,
+            params,
+        )
+        if skipped:
+            warnings.append(
+                "skipped %d constraint-split subregion(s) below %.2fm safe planning span"
+                % (int(skipped), float(min_span_m))
+            )
+        return kept
+
     def _planner_params_for_region(self, outer: Sequence[Sequence[float]], warnings: List[str]) -> PlannerParams:
         params = replace(self.default_planner_params)
         requested_wall_margin_m = max(0.0, float(params.wall_margin_m or 0.0))
@@ -2915,6 +2949,7 @@ class SiteEditorServiceNode:
         region: PolygonRegion,
         plan_profile_name: str,
         debug_publish_markers: bool,
+        allow_degraded_fallback: bool = False,
     ) -> Dict[str, object]:
         warnings: List[str] = []
         map_outer, map_holes, disp_outer, disp_holes = self._region_to_map_and_display(
@@ -2957,6 +2992,7 @@ class SiteEditorServiceNode:
             no_go_areas=raw_constraints.get("no_go_areas") or [],
             virtual_walls=raw_constraints.get("virtual_walls") or [],
             default_buffer_m=float(self.default_virtual_wall_buffer_m),
+            default_no_go_buffer_m=float(self.default_no_go_buffer_m),
             prec=3,
         )
         zone_constraints = compile_zone_constraints(
@@ -2967,18 +3003,97 @@ class SiteEditorServiceNode:
         )
         if zone_constraints.keepout_snapshot_rings:
             warnings.append("active map constraints are applied to the preview")
+        if not zone_constraints.effective_regions:
+            return {
+                "ok": False,
+                "error_code": "NO_EFFECTIVE_REGION",
+                "error_message": "constraints leave no reachable cleaning area in zone",
+                "warnings": warnings,
+                "map_outer": map_outer,
+                "map_holes": map_holes,
+                "display_outer": disp_outer,
+                "display_holes": disp_holes,
+                "constraint_version": str(zone_constraints.constraint_version or ""),
+            }
 
         planner_params = self._planner_params_for_region(map_outer, warnings)
-
-        plan_result = plan_coverage(
-            str(alignment.raw_frame or asset.get("frame_id") or "map"),
-            map_outer,
-            map_holes,
-            self.default_robot_spec,
-            planner_params,
+        frame_id = str(alignment.raw_frame or asset.get("frame_id") or "map")
+        primary = run_plan_coverage_isolated(
+            frame_id=frame_id,
+            outer=map_outer,
+            holes=map_holes,
+            robot_spec=self.default_robot_spec,
+            params=planner_params,
             effective_regions=zone_constraints.effective_regions,
             debug=bool(debug_publish_markers),
+            timeout_s=float(self.planner_worker_timeout_s),
         )
+        plan_result = primary.result
+        if plan_result is None:
+            worker_msg = str(primary.message or "planner worker failed")
+            if len(worker_msg) > 240:
+                worker_msg = worker_msg[:237] + "..."
+            warnings.append("primary holes-aware planner failed in isolated worker: %s" % worker_msg)
+            if allow_degraded_fallback:
+                fallback_regions = make_hole_free_effective_regions(zone_constraints.effective_regions, prec=3)
+                fallback_regions = self._filter_effective_regions_for_planner(
+                    fallback_regions,
+                    planner_params,
+                    warnings,
+                )
+                if not fallback_regions:
+                    return {
+                        "ok": False,
+                        "error_code": "REGION_TOO_NARROW",
+                        "error_message": "no plannable region remains after applying constraints",
+                        "warnings": warnings,
+                        "map_outer": map_outer,
+                        "map_holes": map_holes,
+                        "display_outer": disp_outer,
+                        "display_holes": disp_holes,
+                        "constraint_version": str(zone_constraints.constraint_version or ""),
+                        "planner_params": planner_params,
+                    }
+                warnings.append(
+                    "degraded hole-free preview fallback used; commit still requires primary planner success"
+                )
+                fallback = run_plan_coverage_isolated(
+                    frame_id=frame_id,
+                    outer=map_outer,
+                    holes=map_holes,
+                    robot_spec=self.default_robot_spec,
+                    params=planner_params,
+                    effective_regions=fallback_regions,
+                    debug=bool(debug_publish_markers),
+                    timeout_s=float(self.planner_worker_timeout_s),
+                )
+                plan_result = fallback.result
+                if plan_result is None:
+                    return {
+                        "ok": False,
+                        "error_code": "PLANNER_NATIVE_CRASH",
+                        "error_message": str(fallback.message or "degraded planner fallback failed"),
+                        "warnings": warnings,
+                        "map_outer": map_outer,
+                        "map_holes": map_holes,
+                        "display_outer": disp_outer,
+                        "display_holes": disp_holes,
+                        "constraint_version": str(zone_constraints.constraint_version or ""),
+                        "planner_params": planner_params,
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "error_code": "PLANNER_TIMEOUT" if primary.timeout else "PLANNER_NATIVE_CRASH",
+                    "error_message": str(primary.message or "planner worker failed"),
+                    "warnings": warnings,
+                    "map_outer": map_outer,
+                    "map_holes": map_holes,
+                    "display_outer": disp_outer,
+                    "display_holes": disp_holes,
+                    "constraint_version": str(zone_constraints.constraint_version or ""),
+                    "planner_params": planner_params,
+                }
         if not bool(getattr(plan_result, "ok", False)):
             return {
                 "ok": False,
@@ -3083,6 +3198,7 @@ class SiteEditorServiceNode:
                 region=req.region,
                 plan_profile_name=plan_profile_name,
                 debug_publish_markers=bool(req.debug_publish_markers),
+                allow_degraded_fallback=bool(self.degraded_preview_on_planner_crash),
             )
             return self._preview_to_response(preview, alignment, asset, success=bool(preview.get("ok", False)))
         except Exception as e:
@@ -3129,6 +3245,7 @@ class SiteEditorServiceNode:
                 region=req.region,
                 plan_profile_name=plan_profile_name,
                 debug_publish_markers=False,
+                allow_degraded_fallback=bool(self.degraded_commit_on_planner_crash),
             )
             if not bool(preview.get("ok", False)):
                 return CommitCoverageRegionResponse(

@@ -16,6 +16,8 @@ map_identity_timeout_s: 2.0
 planner_version: "coverage_planner_v1"
 # 当虚拟墙没有单独配置 buffer 时使用的默认缓冲距离，单位米。
 default_virtual_wall_buffer_m: 0.575
+# 当禁行区没有单独配置 buffer 时，规划侧额外膨胀的安全缓冲距离，单位米。
+default_no_go_buffer_m: 0.30
 robot:
   # Fields2Cover 使用的覆盖条带宽度；它更接近相邻清扫路径间距，而不是路径点间距，单位米。
   cov_width: 0.90

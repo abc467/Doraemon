@@ -12,7 +12,7 @@ from coverage_msgs.msg import PlanCoverageAction, PlanCoverageFeedback, PlanCove
 
 from coverage_planner.coverage_planner_core.types import RobotSpec, PlannerParams
 from coverage_planner.coverage_planner_core.geom_norm import normalize_polygon
-from coverage_planner.coverage_planner_core.planner import plan_coverage
+from coverage_planner.coverage_planner_core.isolated_runner import run_plan_coverage_isolated
 from coverage_planner.constraints import (
     DEFAULT_VIRTUAL_WALL_BUFFER_M,
     compile_map_constraints,
@@ -99,6 +99,10 @@ class CoveragePlannerActionServer:
         self.default_virtual_wall_buffer_m = float(
             rospy.get_param("~default_virtual_wall_buffer_m", DEFAULT_VIRTUAL_WALL_BUFFER_M)
         )
+        self.default_no_go_buffer_m = float(
+            rospy.get_param("~default_no_go_buffer_m", 0.30)
+        )
+        self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)
 
         if self.auto_map_identity_enable:
             mid, mmd5, ok = ensure_map_identity(map_topic=self.map_topic, timeout_s=self.map_identity_timeout_s)
@@ -431,6 +435,7 @@ class CoveragePlannerActionServer:
                 no_go_areas=raw_constraints.get("no_go_areas") or [],
                 virtual_walls=raw_constraints.get("virtual_walls") or [],
                 default_buffer_m=float(self.default_virtual_wall_buffer_m),
+                default_no_go_buffer_m=float(self.default_no_go_buffer_m),
                 prec=prec,
             )
             compiled_zone_constraints = compile_zone_constraints(
@@ -460,16 +465,22 @@ class CoveragePlannerActionServer:
                 return
 
             publish("PLAN", 0.25, "run core planner")
-            plan_res = plan_coverage(
+            outcome = run_plan_coverage_isolated(
                 frame_id=frame_id,
                 outer=outer_u,
                 holes=holes_u,
-                effective_regions=compiled_zone_constraints.effective_regions,
                 robot_spec=robot,
                 params=params,
+                effective_regions=compiled_zone_constraints.effective_regions,
                 debug=bool(goal.debug_publish_markers),
-                preempt_cb=self.server.is_preempt_requested
+                timeout_s=float(self.planner_worker_timeout_s),
             )
+            if outcome.result is None:
+                return abort(
+                    "PLANNER_TIMEOUT" if outcome.timeout else "PLANNER_NATIVE_CRASH",
+                    str(outcome.message or "planner worker failed"),
+                )
+            plan_res = outcome.result
 
             if self.server.is_preempt_requested():
                 self.server.set_preempted()

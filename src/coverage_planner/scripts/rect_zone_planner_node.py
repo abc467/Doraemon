@@ -103,6 +103,9 @@ class RectZonePlannerNode:
         self.default_virtual_wall_buffer_m = float(
             rospy.get_param("~default_virtual_wall_buffer_m", DEFAULT_VIRTUAL_WALL_BUFFER_M)
         )
+        self.default_no_go_buffer_m = float(
+            rospy.get_param("~default_no_go_buffer_m", 0.30)
+        )
         self.site_confirm_service_name = str(
             rospy.get_param("~site_confirm_service_name", "~site/confirm_rect_plan")
         ).strip() or "~site/confirm_rect_plan"
@@ -254,6 +257,7 @@ class RectZonePlannerNode:
             no_go_areas=raw.get("no_go_areas") or [],
             virtual_walls=raw.get("virtual_walls") or [],
             default_buffer_m=float(self.default_virtual_wall_buffer_m),
+            default_no_go_buffer_m=float(self.default_no_go_buffer_m),
             prec=prec,
         )
         zone = compile_zone_constraints(
