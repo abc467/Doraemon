@@ -142,14 +142,15 @@ TrajectoryNode::Data FromProto(const proto::TrajectoryNodeData& proto) {
     // auto desc = new BetaGrid;
     auto desc = new ShapeContext;
     // descriptor - histogram
-    desc->m_histogram.reserve(pp.desc().histogram().size());
+    auto& histogram = desc->getHistogram();
+    histogram.reserve(pp.desc().histogram().size());
     for (auto&& j : pp.desc().histogram()) {
       std::vector<double> v;
       v.reserve(j.values().size());
       for (auto&& m : j.values()) {
         v.emplace_back(m);
       }
-      desc->m_histogram.emplace_back(std::move(v));
+      histogram.emplace_back(std::move(v));
     }
     // descriptor - hit
     // desc->m_hit.reserve(pp.desc().hit().size());

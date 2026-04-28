@@ -19,6 +19,7 @@ from coverage_planner.canonical_contract_types import (
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_DIR)))
 SCRIPT_PATH = os.path.join(REPO_ROOT, "scripts", "runtime_common.sh")
+START_SCRIPT_PATH = os.path.join(REPO_ROOT, "scripts", "start_runtime.sh")
 NON_CANONICAL_GET_PROFILE_CATALOG_SERVICE_TYPE = "retired/GetProfileCatalog"
 NON_CANONICAL_GET_SLAM_JOB_SERVICE_TYPE = "retired/GetSlamJob"
 NON_CANONICAL_GET_SLAM_STATUS_SERVICE_TYPE = "retired/GetSlamStatus"
@@ -528,6 +529,37 @@ class RuntimeCommonScriptTest(unittest.TestCase):
                 "rosservice type /coverage_task_manager/app/exe_task_server",
             ],
         )
+
+    def test_start_runtime_allows_no_active_map_by_default_auto(self):
+        command = textwrap.dedent(
+            f"""
+            set -euo pipefail
+            source "{START_SCRIPT_PATH}"
+            allow_no_active_map_startup_enabled
+            """
+        )
+
+        completed = subprocess.run(["bash", "-lc", command], check=False)
+
+        self.assertEqual(completed.returncode, 0)
+
+    def test_start_runtime_can_disable_no_active_map_degraded_boot(self):
+        command = textwrap.dedent(
+            f"""
+            set -euo pipefail
+            ALLOW_NO_ACTIVE_MAP_STARTUP=0
+            source "{START_SCRIPT_PATH}"
+            if allow_no_active_map_startup_enabled; then
+              false
+            else
+              true
+            fi
+            """
+        )
+
+        completed = subprocess.run(["bash", "-lc", command], check=False)
+
+        self.assertEqual(completed.returncode, 0)
 
 
 if __name__ == "__main__":

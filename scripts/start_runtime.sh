@@ -29,7 +29,8 @@ ATTACH="${ATTACH:-0}"
 CONTRACT_WAIT_TIMEOUT="${CONTRACT_WAIT_TIMEOUT:-30}"
 CONTRACT_WAIT_INTERVAL="${CONTRACT_WAIT_INTERVAL:-1}"
 READINESS_WAIT_TIMEOUT="${READINESS_WAIT_TIMEOUT:-90}"
-ALLOW_NO_ACTIVE_MAP_STARTUP="${ALLOW_NO_ACTIVE_MAP_STARTUP:-0}"
+REQUIRE_TASK_READINESS_ON_STARTUP="${REQUIRE_TASK_READINESS_ON_STARTUP:-0}"
+ALLOW_NO_ACTIVE_MAP_STARTUP="${ALLOW_NO_ACTIVE_MAP_STARTUP:-auto}"
 FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH="${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-false}"
 RUNTIME_START_DEPTH_CAMERAS="${RUNTIME_START_DEPTH_CAMERAS:-true}"
 RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING="${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING:-true}"
@@ -62,7 +63,8 @@ Environment highlights:
   FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH=false
   CONTRACT_WAIT_TIMEOUT=30
   READINESS_WAIT_TIMEOUT=90
-  ALLOW_NO_ACTIVE_MAP_STARTUP=0
+  REQUIRE_TASK_READINESS_ON_STARTUP=0
+  ALLOW_NO_ACTIVE_MAP_STARTUP=auto
   RUN_BACKEND_RUNTIME_SMOKE=1
   BACKEND_RUNTIME_SMOKE_ACTIONS=
   RUN_REVISION_DB_HEALTH_CHECK=0
@@ -102,6 +104,19 @@ append_shell_words() {
   # shellcheck disable=SC2206
   local extra_args=( ${raw_words} )
   target_ref+=("${extra_args[@]}")
+}
+
+allow_no_active_map_startup_enabled() {
+  local value
+  value="$(printf '%s' "${ALLOW_NO_ACTIVE_MAP_STARTUP:-auto}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    1|true|yes|auto)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 build_backend_runtime_smoke_cmd() {
@@ -218,6 +233,7 @@ handle_degraded_startup_without_active_map() {
   runtime_log_status "SLAM status service: /clean_robot_server/app/get_slam_status"
   runtime_log_status "odometry status service: /clean_robot_server/app/get_odometry_status"
   runtime_log_status "task start service: /coverage_task_manager/app/exe_task_server"
+  runtime_restart_site_gateway_if_disconnected
 }
 
 run_backend_runtime_smoke_if_enabled() {
@@ -354,7 +370,7 @@ main() {
   active_revision="$(runtime_get_active_map_revision_id)"
   restart_localization_to_active_map "${active_map}" "${active_revision}" || relocalize_rc=$?
   if (( relocalize_rc != 0 )); then
-    if [[ "${ALLOW_NO_ACTIVE_MAP_STARTUP}" == "1" && "${relocalize_rc}" == "2" ]]; then
+    if allow_no_active_map_startup_enabled && [[ "${relocalize_rc}" == "2" ]]; then
       handle_degraded_startup_without_active_map
       return 0
     fi
@@ -374,7 +390,25 @@ main() {
   runtime_log_status "[INFO] 若深度避障链未就绪，系统仍可启动；是否启用深度避障请以后续现场状态为准"
 
   runtime_log_status "等待任务系统 readiness"
-  runtime_wait_for_readiness "${READINESS_WAIT_TIMEOUT}"
+  local readiness_rc=0
+  runtime_wait_for_readiness "${READINESS_WAIT_TIMEOUT}" || readiness_rc=$?
+  if (( readiness_rc != 0 )); then
+    if [[ "${REQUIRE_TASK_READINESS_ON_STARTUP}" == "1" ]]; then
+      return "${readiness_rc}"
+    fi
+    runtime_log_status "[WARN] 任务 readiness 暂未满足（本次不阻塞启动）"
+    runtime_log_status "[WARN] system is service-ready only; task readiness stays unavailable until map/localization/safety gates are satisfied"
+    runtime_log_status "[OK] runtime started in service-ready mode"
+    runtime_log_status "tmux session: ${TMUX_SESSION}"
+    runtime_log_status "frontend service session: ${FRONTEND_TMUX_SESSION}"
+    runtime_log_status "ROS master: ${ROS_MASTER_URI}"
+    runtime_log_status "frontend backend bridge: /clean_robot_server/app/map_server"
+    runtime_log_status "SLAM status service: /clean_robot_server/app/get_slam_status"
+    runtime_log_status "odometry status service: /clean_robot_server/app/get_odometry_status"
+    runtime_log_status "task start service: /coverage_task_manager/app/exe_task_server"
+    runtime_restart_site_gateway_if_disconnected
+    return 0
+  fi
 
   run_post_ready_acceptance_if_enabled
 
@@ -386,6 +420,7 @@ main() {
   runtime_log_status "SLAM status service: /clean_robot_server/app/get_slam_status"
   runtime_log_status "odometry status service: /clean_robot_server/app/get_odometry_status"
   runtime_log_status "task start service: /coverage_task_manager/app/exe_task_server"
+  runtime_restart_site_gateway_if_disconnected
   if [[ "${START_FRONTEND_DEV}" == "1" && -d "${FRONTEND_DIR}" ]] && command -v pnpm >/dev/null 2>&1; then
     runtime_log_status "frontend: ${FRONTEND_URL}"
   fi
@@ -406,3 +441,5 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
   main
 fi
+
+true

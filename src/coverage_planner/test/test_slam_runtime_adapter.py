@@ -21,6 +21,12 @@ from coverage_planner.slam_workflow.runtime_adapter import CartographerRuntimeAd
 
 
 class _FakeTransport:
+    def __init__(self):
+        self.stop_runtime_calls = 0
+
+    def stop_runtime(self):
+        self.stop_runtime_calls += 1
+
     def __getattr__(self, name):
         raise AssertionError("unexpected transport call: %s" % str(name or ""))
 
@@ -331,6 +337,83 @@ class SlamRuntimeAdapterTest(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error_code"], "map_scope_mismatch")
+
+    def test_stop_mapping_without_active_map_stops_runtime_successfully(self):
+        result = self.adapter.stop_mapping(
+            robot_id="local_robot",
+            map_name="",
+            operation=5,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["current_mode"], "localization")
+        self.assertEqual(result["localization_state"], "not_localized")
+        self.assertEqual(result["map_name"], "")
+        self.assertEqual(self.adapter._transport.stop_runtime_calls, 1)
+        self.assertEqual(self.backend._runtime_state.mode_kwargs["mode"], "localization")
+        self.assertEqual(self.backend._runtime_state.localization_kwargs["state"], "not_localized")
+
+    @mock.patch("coverage_planner.slam_workflow.runtime_adapter.rospy.set_param", side_effect=lambda *_args, **_kwargs: None)
+    def test_stop_mapping_succeeds_when_relocalization_needs_manual_assist(self, _set_param):
+        pbstream_path = os.path.join(self._tmpdir, "demo_map.pbstream")
+        with open(pbstream_path, "w", encoding="utf-8") as fh:
+            fh.write("pbstream")
+        self.backend.asset = {
+            "map_name": "demo_map",
+            "revision_id": "rev_demo_01",
+            "pbstream_path": pbstream_path,
+            "enabled": True,
+            "verification_status": "verified",
+        }
+        self.backend._plan_store.selected_map = dict(self.backend.asset)
+        self.adapter._transport.start_runtime_processes = lambda **_kwargs: (321, "runtime_started")
+        self.adapter.run_localization_sequence = mock.Mock(
+            side_effect=SlamWorkflowRuntimeError(
+                "relocalize_low_constraint_score",
+                "try_global_relocate failed",
+                manual_assist_required=True,
+            )
+        )
+
+        result = self.adapter.stop_mapping(
+            robot_id="local_robot",
+            map_name="demo_map",
+            map_revision_id="rev_demo_01",
+            operation=5,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["error_code"], "")
+        self.assertEqual(result["current_mode"], "localization")
+        self.assertEqual(result["localization_state"], "manual_assist_required")
+        self.assertIn("mapping stopped", result["message"])
+        self.assertIn("manual assist", result["message"])
+
+    def test_stop_mapping_handles_ros_response_object_from_restart_localization(self):
+        self.adapter.restart_localization = mock.Mock(
+            return_value=SimpleNamespace(
+                success=False,
+                error_code="relocalize_low_constraint_score",
+                message="try_global_relocate failed",
+                map_name="demo_map",
+                map_revision_id="rev_demo_01",
+                localization_state="manual_assist_required",
+                current_mode="localization",
+            )
+        )
+
+        result = self.adapter.stop_mapping(
+            robot_id="local_robot",
+            map_name="demo_map",
+            map_revision_id="rev_demo_01",
+            operation=5,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["error_code"], "")
+        self.assertEqual(result["current_mode"], "localization")
+        self.assertEqual(result["map_revision_id"], "rev_demo_01")
+        self.assertIn("mapping stopped", result["message"])
 
     def test_save_mapping_allows_same_name_existing_asset_and_creates_candidate_revision(self):
         self.backend.asset = {
@@ -845,8 +928,9 @@ class SlamRuntimeAdapterTest(unittest.TestCase):
 
     @mock.patch("coverage_planner.slam_workflow.runtime_adapter.rospy.is_shutdown", return_value=False)
     @mock.patch("coverage_planner.slam_workflow.runtime_adapter.rospy.sleep", side_effect=lambda *_args, **_kwargs: None)
+    @mock.patch("coverage_planner.slam_workflow.runtime_adapter.rospy.set_param", side_effect=lambda *_args, **_kwargs: None)
     @mock.patch("coverage_planner.slam_workflow.runtime_adapter.time.time")
-    def test_wait_until_ready_requires_stable_window_before_localized(self, time_now, _sleep, _is_shutdown):
+    def test_wait_until_ready_requires_stable_window_before_localized(self, time_now, _set_param, _sleep, _is_shutdown):
         self.backend._plan_store.selected_map = {"map_name": "demo_map", "revision_id": "rev_demo_01"}
         self.backend._runtime_context.tracked_pose_fresh_since = lambda **_kwargs: True
         stable_values = iter([False, True])

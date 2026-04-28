@@ -260,7 +260,7 @@ class SlamRuntimeServiceController:
                 relocalize_after_switch=bool(relocalize_after_switch),
             )
         if operation == int(AppOperateSlamRuntime._request_class.stop_mapping):
-            return workflow_executor.stop_mapping(
+            return runtime_adapter.stop_mapping(
                 robot_id=robot_id,
                 map_name=effective_map_name,
                 map_revision_id=map_revision_id,

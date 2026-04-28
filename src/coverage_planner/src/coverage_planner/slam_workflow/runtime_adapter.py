@@ -25,6 +25,7 @@ from coverage_planner.runtime_gate_messages import (
 from coverage_planner.slam_workflow.executor import should_restart_localization_after_save
 from coverage_planner.slam_workflow_semantics import (
     is_global_relocate_manual_assist,
+    is_manual_assist_error_code,
     localization_needs_manual_assist,
     map_global_relocate_result_code,
 )
@@ -42,6 +43,12 @@ def _map_id_from_md5(map_md5: str) -> str:
     if not value:
         return ""
     return "map_%s" % value[:8]
+
+
+def _response_value(response: Any, field_name: str, default: Any = "") -> Any:
+    if isinstance(response, dict):
+        return response.get(field_name, default)
+    return getattr(response, field_name, default)
 
 
 class SlamWorkflowRuntimeError(RuntimeError):
@@ -924,6 +931,90 @@ class CartographerRuntimeAdapter:
                 map_name="",
                 localization_state="not_localized",
                 current_mode="localization",
+            )
+
+    def stop_mapping(
+        self,
+        *,
+        robot_id: str,
+        map_name: str,
+        map_revision_id: str = "",
+        operation: int,
+    ):
+        backend = self._backend
+        transport = self._transport
+        runtime_state = backend._runtime_state
+        service_api = backend._service_api
+        resolved_name = str(map_name or "").strip()
+        resolved_revision_id = str(map_revision_id or "").strip()
+        if not resolved_name and not resolved_revision_id:
+            active_asset = backend._plan_store.get_active_map(robot_id=robot_id) or {}
+            resolved_name = str(active_asset.get("map_name") or "").strip()
+            resolved_revision_id = str(active_asset.get("revision_id") or "").strip()
+        if resolved_name or resolved_revision_id:
+            result = self.restart_localization(
+                robot_id=robot_id,
+                map_name=resolved_name,
+                map_revision_id=resolved_revision_id,
+                operation=operation,
+            )
+            if (
+                not bool(_response_value(result, "success", False))
+                and is_manual_assist_error_code(str(_response_value(result, "error_code") or ""))
+                and localization_needs_manual_assist(str(_response_value(result, "localization_state") or ""))
+            ):
+                return service_api.response(
+                    success=True,
+                    message=(
+                        "mapping stopped; localization requires manual assist: %s"
+                        % str(_response_value(result, "message") or "").strip()
+                    ).strip(),
+                    error_code="",
+                    operation=operation,
+                    map_name=str(_response_value(result, "map_name") or resolved_name),
+                    map_revision_id=str(_response_value(result, "map_revision_id") or resolved_revision_id),
+                    localization_state=str(_response_value(result, "localization_state") or "manual_assist_required"),
+                    current_mode=str(_response_value(result, "current_mode") or "localization"),
+                )
+            return result
+
+        try:
+            transport.stop_runtime()
+            self.clear_runtime_map_identity()
+            runtime_state.set_runtime_mode(mode="localization", map_name="", pbstream_path="", map_revision_id="")
+            runtime_state.publish_runtime_snapshot(
+                current_mode="localization",
+                map_name="",
+                pbstream_path="",
+                map_revision_id="",
+            )
+            runtime_state.set_localization_state(
+                robot_id=robot_id,
+                map_name="",
+                state="not_localized",
+                valid=False,
+                map_revision_id="",
+            )
+            return service_api.response(
+                success=True,
+                message="mapping stopped; no active map available for localization",
+                error_code="",
+                operation=operation,
+                map_name="",
+                map_revision_id="",
+                localization_state="not_localized",
+                current_mode="localization",
+            )
+        except Exception as exc:
+            return service_api.response(
+                success=False,
+                message=str(exc),
+                error_code="stop_mapping_failed",
+                operation=operation,
+                map_name="",
+                map_revision_id="",
+                localization_state="mapping",
+                current_mode="mapping",
             )
 
     def save_mapping(

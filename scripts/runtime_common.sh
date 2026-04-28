@@ -431,6 +431,59 @@ runtime_frontend_service_session_healthy() {
   fi
 }
 
+runtime_site_gateway_health_ok() {
+  local health_url="${SITE_GATEWAY_HEALTH_URL:-http://127.0.0.1:4173/api/health}"
+  local output
+  if ! command -v curl >/dev/null 2>&1; then
+    return 1
+  fi
+  output="$(curl -fsS -m "${SITE_GATEWAY_HEALTH_TIMEOUT:-5}" "${health_url}" 2>/dev/null || true)"
+  [[ "${output}" == *'"status":"ok"'* && "${output}" == *'"isConnected":true'* ]]
+}
+
+runtime_restart_site_gateway_if_disconnected() {
+  local service_name="${SITE_GATEWAY_SERVICE:-clean-robot-site-gateway.service}"
+  local health_url="${SITE_GATEWAY_HEALTH_URL:-http://127.0.0.1:4173/api/health}"
+  local pid
+  local attempt
+
+  if [[ "${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE:-true}" != "true" ]]; then
+    return 0
+  fi
+
+  if runtime_site_gateway_health_ok; then
+    runtime_log_status "[OK] site gateway connected: ${health_url}"
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl is-active --quiet "${service_name}" 2>/dev/null; then
+    runtime_log_status "[WARN] site gateway health not connected and service is not active: ${service_name}"
+    return 0
+  fi
+
+  pid="$(systemctl show -p MainPID --value "${service_name}" 2>/dev/null || true)"
+  if [[ -z "${pid}" || "${pid}" == "0" ]]; then
+    runtime_log_status "[WARN] site gateway health not connected but MainPID is unavailable: ${service_name}"
+    return 0
+  fi
+
+  runtime_log_status "[WARN] site gateway not connected to rosbridge; restarting ${service_name} via SIGTERM pid=${pid}"
+  kill -TERM "${pid}" >/dev/null 2>&1 || {
+    runtime_log_status "[WARN] failed to terminate site gateway pid=${pid}; run: sudo systemctl restart ${service_name}"
+    return 0
+  }
+
+  for attempt in $(seq 1 15); do
+    sleep 1
+    if runtime_site_gateway_health_ok; then
+      runtime_log_status "[OK] site gateway reconnected: ${health_url}"
+      return 0
+    fi
+  done
+
+  runtime_log_status "[WARN] site gateway did not reconnect yet; check: systemctl status ${service_name}"
+}
+
 runtime_tmux_window() {
   local session_name="$1"
   local window_name="$2"

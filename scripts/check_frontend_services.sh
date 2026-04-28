@@ -13,6 +13,8 @@ FRONTEND_SERVICE_MODE="${FRONTEND_SERVICE_MODE:-runtime}"
 FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH="${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-true}"
 EXPECT_FRONTEND_READINESS_APP_QUERY="${EXPECT_FRONTEND_READINESS_APP_QUERY:-}"
 EXPECT_FRONTEND_ODOMETRY_APP_QUERY="${EXPECT_FRONTEND_ODOMETRY_APP_QUERY:-}"
+CHECK_SITE_GATEWAY="${CHECK_SITE_GATEWAY:-1}"
+SITE_GATEWAY_HEALTH_URL="${SITE_GATEWAY_HEALTH_URL:-http://127.0.0.1:4173/api/health}"
 
 export ROS_MASTER_URI="http://localhost:11311"
 unset ROS_IP
@@ -53,6 +55,24 @@ check_ok() {
     return 0
   fi
   echo "[FAIL] ${label}"
+  return 1
+}
+
+check_site_gateway_health() {
+  local output
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[FAIL] site gateway health: curl unavailable"
+    return 1
+  fi
+  if ! output="$(curl -fsS -m 5 "${SITE_GATEWAY_HEALTH_URL}" 2>&1)"; then
+    echo "[FAIL] site gateway health: ${SITE_GATEWAY_HEALTH_URL} ${output}"
+    return 1
+  fi
+  if [[ "${output}" == *'"status":"ok"'* && "${output}" == *'"isConnected":true'* ]]; then
+    echo "[OK] site gateway health: ${SITE_GATEWAY_HEALTH_URL}"
+    return 0
+  fi
+  echo "[FAIL] site gateway health: rosbridge not connected ${output}"
   return 1
 }
 
@@ -430,6 +450,10 @@ main() {
     echo "${output}"
     echo "[FAIL] rosbridge app query contracts: ${ROSBRIDGE_WS_URL}"
     failed=1
+  fi
+
+  if [[ "${CHECK_SITE_GATEWAY}" == "1" ]]; then
+    check_site_gateway_health || failed=1
   fi
 
   if [[ "${failed}" -eq 0 ]]; then
