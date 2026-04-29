@@ -10,7 +10,8 @@ M-core (底盘/M核) TCP bridge
   - send() 加互斥锁，避免并发写 socket
 
 ROS I/O:
-  - Subscribe: /cmd_vel (geometry_msgs/Twist)
+  - Subscribe: /cmd_vel (geometry_msgs/Twist), can be disabled for a different
+    motion chassis while keeping M-core cleaning/status I/O alive.
   - Publish  : /combined_status (robot_platform_msgs/CombinedStatus)
   - Publish  : /battery_state (sensor_msgs/BatteryState)
   - Publish  : ~connected (std_msgs/Bool, latch)
@@ -78,6 +79,13 @@ def clamp_u8(val: int, lo: int = 0, hi: int = 255) -> int:
     return max(int(lo), min(int(hi), int(val)))
 
 
+def get_bool_param(name: str, default: bool) -> bool:
+    value = rospy.get_param(name, default)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 class MCoreTCPBridge:
     HDR0 = 0x43
     HDR0_ALT = 0x42
@@ -93,6 +101,14 @@ class MCoreTCPBridge:
         self.connected_publish_interval_s = float(rospy.get_param('~connected_publish_interval_s', 1.0))
         self.cleaning_params_topic = str(rospy.get_param('~cleaning_params_topic', '/mcore/cleaning_params/set'))
         self.cleaning_params_state_topic = str(rospy.get_param('~cleaning_params_state_topic', '/mcore/cleaning_params/current'))
+        self.enable_cmd_vel = get_bool_param('~enable_cmd_vel', True)
+        self.cmd_vel_topic = str(rospy.get_param('~cmd_vel_topic', '/cmd_vel'))
+        self.linear_velocity_scale = float(rospy.get_param('~linear_velocity_scale', 1.0))
+        self.angular_velocity_scale = float(rospy.get_param('~angular_velocity_scale', 1.0))
+        self.linear_velocity_sign = float(rospy.get_param('~linear_velocity_sign', 1.0))
+        self.angular_velocity_sign = float(rospy.get_param('~angular_velocity_sign', 1.0))
+        self.max_abs_linear_velocity = float(rospy.get_param('~max_abs_linear_velocity', 0.0))
+        self.max_abs_angular_velocity = float(rospy.get_param('~max_abs_angular_velocity', 0.0))
 
         self._sock: Optional[socket.socket] = None
         self._connected = False
@@ -117,7 +133,21 @@ class MCoreTCPBridge:
         self._cleaning_params.vel_water_suction = clamp_u8(rospy.get_param('~vel_water_suction', 0), 0, MCORE_ACTUATOR_MAX)
         self._cleaning_params.height_scrub = clamp_u8(rospy.get_param('~height_scrub', 38))
 
-        self.cmd_vel_sub = rospy.Subscriber('/cmd_vel', Twist, self._on_cmd_vel, queue_size=20)
+        self.cmd_vel_sub = None
+        if self.enable_cmd_vel:
+            self.cmd_vel_sub = rospy.Subscriber(self.cmd_vel_topic, Twist, self._on_cmd_vel, queue_size=20)
+            rospy.loginfo(
+                '[MCORE] motion cmd_vel enabled topic=%s linear_scale=%.6g linear_sign=%.6g angular_scale=%.6g angular_sign=%.6g max_linear=%.6g max_angular=%.6g',
+                self.cmd_vel_topic,
+                self.linear_velocity_scale,
+                self.linear_velocity_sign,
+                self.angular_velocity_scale,
+                self.angular_velocity_sign,
+                self.max_abs_linear_velocity,
+                self.max_abs_angular_velocity,
+            )
+        else:
+            rospy.logwarn('[MCORE] motion cmd_vel disabled; M-core bridge will only handle status/cleaning/charging I/O')
         self.clean_tools_sub = rospy.Subscriber('/mcore/control_clean_tools', ControlCleanTools, self._on_control_clean_tools, queue_size=10)
         self.tap_sub = rospy.Subscriber('/mcore/control_water_tap', ControlWaterTap, self._on_control_tap, queue_size=10)
         self.motor_sub = rospy.Subscriber('/mcore/control_motor', ControlMotor, self._on_control_motor, queue_size=10)
@@ -215,8 +245,14 @@ class MCoreTCPBridge:
 
     # ---------------- command inputs ----------------
     def _on_cmd_vel(self, msg: Twist):
+        linear_x = float(msg.linear.x) * self.linear_velocity_scale * self.linear_velocity_sign
+        angular_z = float(msg.angular.z) * self.angular_velocity_scale * self.angular_velocity_sign
+        if self.max_abs_linear_velocity > 0.0:
+            linear_x = max(-self.max_abs_linear_velocity, min(self.max_abs_linear_velocity, linear_x))
+        if self.max_abs_angular_velocity > 0.0:
+            angular_z = max(-self.max_abs_angular_velocity, min(self.max_abs_angular_velocity, angular_z))
         cmd_id = [0x40, 0x60]
-        cmd_data = float_to_list_le(msg.linear.x) + float_to_list_le(msg.angular.z)
+        cmd_data = float_to_list_le(linear_x) + float_to_list_le(angular_z)
         self._data_send(cmd_id, cmd_data)
 
     def _publish_cleaning_params(self):

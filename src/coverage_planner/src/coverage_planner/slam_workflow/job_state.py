@@ -15,7 +15,11 @@ from cleanrobot_app_msgs.msg import SlamJobState
 from coverage_planner.ops_store.store import SlamJobRecord
 from coverage_planner.runtime_gate_messages import manual_assist_metadata
 from coverage_planner.slam_workflow.api import operation_name, submit_to_runtime_operation
-from coverage_planner.slam_workflow_semantics import is_manual_assist_error_code, localization_is_ready
+from coverage_planner.slam_workflow_semantics import (
+    is_manual_assist_error_code,
+    localization_is_ready,
+    localization_needs_manual_assist,
+)
 
 
 class CartographerSlamJobController:
@@ -122,6 +126,19 @@ class CartographerSlamJobController:
     def record_to_snapshot(self, record: Optional[SlamJobRecord]) -> Optional[Dict[str, object]]:
         if record is None:
             return None
+        status = str(record.status or "").strip()
+        phase = str(record.phase or "").strip()
+        error_code = str(record.error_code or "").strip()
+        localization_state = str(record.localization_state or "").strip()
+        manual_assist_required = bool(
+            is_manual_assist_error_code(error_code)
+            or localization_needs_manual_assist(localization_state)
+            or status == "manual_assist_required"
+            or phase == "manual_assist_required"
+        )
+        if manual_assist_required:
+            status = "manual_assist_required"
+            phase = "manual_assist_required"
         return {
             "job_id": str(record.job_id or ""),
             "robot_id": str(record.robot_id or self._backend.robot_id),
@@ -134,15 +151,15 @@ class CartographerSlamJobController:
             "resolved_map_revision_id": str(record.resolved_map_revision_id or ""),
             "set_active": bool(record.set_active),
             "description": str(record.description or ""),
-            "status": str(record.status or ""),
-            "phase": str(record.phase or ""),
+            "status": status,
+            "phase": phase,
             "progress_0_1": float(record.progress_0_1 or 0.0),
             "done": bool(record.done),
             "success": bool(record.success),
-            "error_code": str(record.error_code or ""),
+            "error_code": error_code,
             "message": str(record.message or ""),
             "current_mode": str(record.current_mode or ""),
-            "localization_state": str(record.localization_state or ""),
+            "localization_state": localization_state,
             "created_ts": float(record.created_ts or 0.0),
             "started_ts": float(record.started_ts or 0.0),
             "finished_ts": float(record.finished_ts or 0.0),
@@ -150,10 +167,10 @@ class CartographerSlamJobController:
             "progress_text": str(record.message or ""),
             "runtime_map_match": False,
             "localization_valid": localization_is_ready(
-                str(record.localization_state or "").strip(),
+                localization_state,
                 True,
             ),
-            "manual_assist_required": is_manual_assist_error_code(str(record.error_code or "")),
+            "manual_assist_required": manual_assist_required,
         }
 
     def remember_job_locked(self, job: Dict[str, object]):

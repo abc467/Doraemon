@@ -19,6 +19,7 @@
   <exec_depend>robot_runtime_flags</exec_depend>
   <exec_depend>cartographer_ros</exec_depend>
   <exec_depend>cleanrobot_description</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>coverage_planner</exec_depend>
   <exec_depend>coverage_constraints_nav</exec_depend>
   <exec_depend>ground_segmentation_tracking</exec_depend>

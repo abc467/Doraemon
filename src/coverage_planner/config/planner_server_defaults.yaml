@@ -15,18 +15,18 @@ map_identity_timeout_s: 2.0
 # 存入规划数据库的规划器版本字符串。
 planner_version: "coverage_planner_v1"
 # 当虚拟墙没有单独配置 buffer 时使用的默认缓冲距离，单位米。
-default_virtual_wall_buffer_m: 0.575
+default_virtual_wall_buffer_m: 0.25
 # 当禁行区没有单独配置 buffer 时，规划侧额外膨胀的安全缓冲距离，单位米。
-default_no_go_buffer_m: 0.30
+default_no_go_buffer_m: 0.25
 robot:
   # Fields2Cover 使用的覆盖条带宽度；它更接近相邻清扫路径间距，而不是路径点间距，单位米。
-  cov_width: 0.90
+  cov_width: 0.60
   # 机器人物理宽度，单位米。
-  width: 0.50
+  width: 0.42
   # 机器人最小转弯半径，单位米。
   min_turning_radius: 0.50
   # 曲率变化约束上限；值越小，转弯通常越平滑。
-  max_diff_curv: 0.20
+  max_diff_curv: 0.30
 
 planner:
   # Boustrophedon 分解时使用的分割角，单位度。
@@ -43,11 +43,15 @@ planner:
   line_w: 0.05
   # 是否抑制 Fields2Cover 原生调用输出的 stderr 噪声。
   mute_stderr: true
+  # 是否要求生成后的路径中心点全部留在有效清扫区域内；新底盘调试阶段先关闭。
+  validate_effective_region_path: false
   # 生成覆盖路径前，相对墙体 / 边界的收缩安全距离，单位米。
   # 过大的值在狭窄区域会让底层 Fields2Cover 绑定不稳定；后端还会在运行时继续做安全收敛。
   wall_margin_m: 0.30
   # 在插入转弯前，从每条覆盖条带两端裁掉的预留距离，单位米。
-  turn_margin_m: 1.20
+  turn_margin_m: 1.00
+  # 约束切分后的子区域短边小于该值时，不送入 Fields2Cover，单位米；0 表示使用动态估算。
+  min_plannable_span_m: 1.40
   # 边缘收边环路使用的圆角半径；实际生效值不会小于 min_turning_radius。
   edge_corner_radius_m: 0.50
   # 边缘收边圆角的 Bezier 拉伸系数；会影响圆角看起来更紧还是更舒展。

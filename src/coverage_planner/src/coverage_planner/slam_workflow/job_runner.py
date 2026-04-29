@@ -8,7 +8,11 @@ import time
 from typing import Any
 
 from coverage_planner.slam_workflow.api import operation_name, running_phase_for_operation
-from coverage_planner.slam_workflow_semantics import is_manual_assist_error_code, localization_is_ready
+from coverage_planner.slam_workflow_semantics import (
+    is_manual_assist_error_code,
+    localization_is_ready,
+    localization_needs_manual_assist,
+)
 
 
 class CartographerSlamJobRunner:
@@ -70,8 +74,16 @@ class CartographerSlamJobRunner:
             )
 
         result_error_code = str(getattr(resp, "error_code", "") or "")
-        manual_assist_required = is_manual_assist_error_code(result_error_code)
         result_message = str(getattr(resp, "message", "") or "")
+        result_success = bool(getattr(resp, "success", False))
+        result_localization_state = str(getattr(resp, "localization_state", "") or "")
+        manual_assist_required = bool(
+            is_manual_assist_error_code(result_error_code)
+            or localization_needs_manual_assist(result_localization_state)
+        )
+        finished_status = "manual_assist_required" if manual_assist_required else ("succeeded" if result_success else "failed")
+        finished_phase = "manual_assist_required" if manual_assist_required else ("done" if result_success else "failed")
+        finished_progress_text = result_message if manual_assist_required else ("completed" if result_success else result_message)
         resolved_map_name = str(getattr(resp, "map_name", "") or snapshot.get("requested_map_name") or "")
         response_map_revision_id = str(getattr(resp, "map_revision_id", "") or "").strip()
         runtime_revision_id = ""
@@ -119,28 +131,20 @@ class CartographerSlamJobRunner:
             snapshot,
             resolved_map_name=resolved_map_name,
             resolved_map_revision_id=resolved_map_revision_id,
-            status=(
-                "succeeded"
-                if bool(getattr(resp, "success", False))
-                else ("manual_assist_required" if manual_assist_required else "failed")
-            ),
-            phase=(
-                "done"
-                if bool(getattr(resp, "success", False))
-                else ("manual_assist_required" if manual_assist_required else "failed")
-            ),
+            status=finished_status,
+            phase=finished_phase,
             progress_0_1=1.0,
             done=True,
-            success=bool(getattr(resp, "success", False)),
+            success=result_success,
             error_code=result_error_code,
             message=result_message,
-            progress_text="completed" if bool(getattr(resp, "success", False)) else result_message,
+            progress_text=finished_progress_text,
             current_mode=str(getattr(resp, "current_mode", "") or ""),
-            localization_state=str(getattr(resp, "localization_state", "") or ""),
+            localization_state=result_localization_state,
             runtime_map_match=runtime_map_match,
             localization_valid=localization_is_ready(
-                str(getattr(resp, "localization_state", "") or ""),
-                bool(getattr(resp, "success", False)),
+                result_localization_state,
+                result_success,
             ),
             manual_assist_required=manual_assist_required,
             finished_ts=time.time(),

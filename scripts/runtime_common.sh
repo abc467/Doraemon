@@ -287,6 +287,9 @@ runtime_warn_if_localization_not_ready() {
 
   runtime_log_status "[WARN] 定位未完全就绪（本次不阻塞启动）: source=${source} state=${state:-missing} valid=${valid:-missing} active_map=${active_map:-missing} active_revision=${active_revision:-missing} runtime_map=${runtime_map:-missing} runtime_revision=${runtime_revision:-missing} expected_map=${expected_map:-missing} expected_revision=${expected_revision:-missing}"
   runtime_log_status "[WARN] 如需立即开始任务，建议先在前端确认地图与定位状态是否正确"
+  if [[ -n "${active_map}" || -n "${expected_map}" ]]; then
+    runtime_log_status "[WARN] 如果小车已经换到新环境，当前活动地图可能与现场不匹配；请在前端重新建图并激活新地图，旧地图任务会被 readiness 拦截"
+  fi
 
   if [[ -f "${RESTART_LOCALIZATION_OUT:-}" ]]; then
     restart_summary="$(grep -E '^(success:|message:|map_name:|map_revision_id:|localization_state:|active_map_revision_id:|runtime_map_revision_id:)' "${RESTART_LOCALIZATION_OUT}" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g')"
@@ -456,8 +459,27 @@ runtime_restart_site_gateway_if_disconnected() {
     return 0
   fi
 
-  if ! command -v systemctl >/dev/null 2>&1 || ! systemctl is-active --quiet "${service_name}" 2>/dev/null; then
-    runtime_log_status "[WARN] site gateway health not connected and service is not active: ${service_name}"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    runtime_log_status "[WARN] site gateway health not connected and systemctl is unavailable: ${service_name}"
+    return 0
+  fi
+
+  if ! systemctl is-active --quiet "${service_name}" 2>/dev/null; then
+    runtime_log_status "[WARN] site gateway health not connected and service is not active; starting ${service_name}"
+    if systemctl start "${service_name}" >/dev/null 2>&1 || {
+      command -v sudo >/dev/null 2>&1 && sudo -n systemctl start "${service_name}" >/dev/null 2>&1
+    }; then
+      for attempt in $(seq 1 15); do
+        sleep 1
+        if runtime_site_gateway_health_ok; then
+          runtime_log_status "[OK] site gateway connected: ${health_url}"
+          return 0
+        fi
+      done
+      runtime_log_status "[WARN] site gateway started but health did not become connected yet: ${health_url}"
+      return 0
+    fi
+    runtime_log_status "[WARN] failed to start site gateway service; run: sudo systemctl start ${service_name}"
     return 0
   fi
 
@@ -496,9 +518,13 @@ runtime_tmux_window() {
 runtime_ensure_frontend_service_session() {
   local backend_cmd
   local enable_odometry_health
+  local odometry_health_imu_topic
+  local odometry_health_ekf_node_name
 
   enable_odometry_health="${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-false}"
-  backend_cmd="export PLAN_DB_PATH='${PLAN_DB_PATH:-/data/coverage/planning.db}'; export OPS_DB_PATH='${OPS_DB_PATH:-/data/coverage/operations.db}'; export ROBOT_ID='${ROBOT_ID:-local_robot}'; export MAPS_ROOT='${MAPS_ROOT:-/data/maps}'; export EXTERNAL_MAPS_ROOT='${EXTERNAL_MAPS_ROOT:-/data/maps/imports}'; export MAP_TOPIC='${MAP_TOPIC:-/map}'; export START_ROSBRIDGE='${START_ROSBRIDGE:-true}'; export ROSBRIDGE_ADDRESS='${ROSBRIDGE_ADDRESS:-0.0.0.0}'; export ROSBRIDGE_PORT='${ROSBRIDGE_PORT:-9090}'; export START_MAP_ASSET_SERVICE='${START_MAP_ASSET_SERVICE:-true}'; export ENABLE_SITE_EDITOR_SERVICE='${ENABLE_SITE_EDITOR_SERVICE:-true}'; export ENABLE_RECT_ZONE_PLANNER='${ENABLE_RECT_ZONE_PLANNER:-false}'; export FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH='${enable_odometry_health}'; exec \"${DORAEMON_SCRIPT_DIR}/start_frontend_backend.sh\""
+  odometry_health_imu_topic="${ODOMETRY_HEALTH_IMU_TOPIC:-/imu_corrected}"
+  odometry_health_ekf_node_name="${ODOMETRY_HEALTH_EKF_NODE_NAME:-/wheel_speed_odom_ekf}"
+  backend_cmd="export PLAN_DB_PATH='${PLAN_DB_PATH:-/data/coverage/planning.db}'; export OPS_DB_PATH='${OPS_DB_PATH:-/data/coverage/operations.db}'; export ROBOT_ID='${ROBOT_ID:-local_robot}'; export MAPS_ROOT='${MAPS_ROOT:-/data/maps}'; export EXTERNAL_MAPS_ROOT='${EXTERNAL_MAPS_ROOT:-/data/maps/imports}'; export MAP_TOPIC='${MAP_TOPIC:-/map}'; export START_ROSBRIDGE='${START_ROSBRIDGE:-true}'; export ROSBRIDGE_ADDRESS='${ROSBRIDGE_ADDRESS:-0.0.0.0}'; export ROSBRIDGE_PORT='${ROSBRIDGE_PORT:-9090}'; export START_MAP_ASSET_SERVICE='${START_MAP_ASSET_SERVICE:-true}'; export ENABLE_SITE_EDITOR_SERVICE='${ENABLE_SITE_EDITOR_SERVICE:-true}'; export ENABLE_RECT_ZONE_PLANNER='${ENABLE_RECT_ZONE_PLANNER:-false}'; export FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH='${enable_odometry_health}'; export FRONTEND_BACKEND_ODOMETRY_HEALTH_IMU_TOPIC='${odometry_health_imu_topic}'; export FRONTEND_BACKEND_ODOMETRY_HEALTH_EKF_NODE_NAME='${odometry_health_ekf_node_name}'; exec \"${DORAEMON_SCRIPT_DIR}/start_frontend_backend.sh\""
 
   runtime_log_status "ensure frontend service session ${FRONTEND_TMUX_SESSION}"
   if tmux has-session -t "${FRONTEND_TMUX_SESSION}" 2>/dev/null; then
@@ -604,9 +630,12 @@ runtime_kill_runtime_nodes() {
     "/wheel_speed_odom_ekf_balanced"
     "/wheel_speed_odom_ekf_conservative"
     "/ekf_covariance_override"
+    "/wheeltec_robot"
     "/vanjee_lidar_sdk_node"
     "/ahrs_driver"
     "/robot_state_publisher"
+    "/base_footprint_to_base_link"
+    "/base_footprint_to_gyro_link"
   )
 
   local node
@@ -630,6 +659,8 @@ runtime_kill_runtime_processes() {
     "wheel_speed_odom_node"
     "ekf_covariance_override_node"
     "wheel_speed_odom_ekf_"
+    "wheeltec_senior_diff_base.launch"
+    "wheeltec_robot_node"
     "mcore_tcp_bridge.py"
     "station_tcp_bridge.py"
     "dock_supply_manager.py"

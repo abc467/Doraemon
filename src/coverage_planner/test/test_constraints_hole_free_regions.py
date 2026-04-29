@@ -105,9 +105,16 @@ class ConstraintHoleFreeRegionTest(unittest.TestCase):
             RobotSpec(cov_width=0.55, width=0.8, min_turning_radius=0.5),
             PlannerParams(turn_margin_m=1.2),
         )
-        self.assertAlmostEqual(min_span_m, 2.4, places=3)
+        self.assertAlmostEqual(min_span_m, 1.6, places=3)
         self.assertEqual(skipped, 2)
         self.assertEqual(len(safe_regions), len(fallback_regions) - 2)
+
+        _, _, configured_min_span_m = filter_effective_regions_for_planner(
+            fallback_regions,
+            RobotSpec(cov_width=0.55, width=0.8, min_turning_radius=0.5),
+            PlannerParams(turn_margin_m=1.2, min_plannable_span_m=1.4),
+        )
+        self.assertAlmostEqual(configured_min_span_m, 1.4, places=3)
 
     def test_planning_no_go_buffer_expands_rectangular_keepout(self):
         zone_outer = [[0.0, 0.0], [8.0, 0.0], [8.0, 5.0], [0.0, 5.0]]

@@ -70,6 +70,8 @@ from .health_monitor import HealthMonitor, HealthResult
 from .map_identity import ensure_map_identity, get_runtime_map_revision_id, get_runtime_map_scope
 from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
 from coverage_planner.runtime_gate_messages import (
+    active_map_localization_not_ready_message,
+    active_map_runtime_unavailable_message,
     manual_assist_metadata,
     no_current_active_map_selected_message,
     odometry_not_ready_message,
@@ -396,6 +398,7 @@ class TaskManager:
         mcore_connected_topic: str = "/mcore_tcp_bridge/connected",
         station_connected_topic: str = "/station_tcp_bridge/connected",
         connected_stale_timeout_s: float = 5.0,
+        require_mcore_bridge_for_readiness: bool = False,
     ):
         self.frame_id = str(frame_id)
         self.zone_id_default = str(zone_id_default)
@@ -467,6 +470,7 @@ class TaskManager:
         self._mcore_connected_topic = str(mcore_connected_topic or "/mcore_tcp_bridge/connected").strip() or "/mcore_tcp_bridge/connected"
         self._station_connected_topic = str(station_connected_topic or "/station_tcp_bridge/connected").strip() or "/station_tcp_bridge/connected"
         self._connected_stale_timeout_s = max(0.5, float(connected_stale_timeout_s))
+        self._require_mcore_bridge_for_readiness = bool(require_mcore_bridge_for_readiness)
 
         # sys profile catalog + applier
         self._mode_catalog = ModeProfileCatalog(mode_profiles or {})
@@ -1117,6 +1121,14 @@ class TaskManager:
             or result.runtime_map_md5
         )
         if runtime_missing:
+            if result.active_map_name:
+                self._append_unique_readiness_text(
+                    local_slam_blockers,
+                    active_map_runtime_unavailable_message(
+                        map_name=result.active_map_name,
+                        map_revision_id=result.active_revision_id,
+                    ),
+                )
             self._append_unique_readiness_text(local_slam_blockers, runtime_map_identity_unavailable_message())
             result.checks.append(self._make_readiness_check(
                 key="runtime_map",
@@ -1262,6 +1274,16 @@ class TaskManager:
         result.manual_assist_guidance = str(manual_assist_info.get("guidance") or "")
         localization_ok = localization_is_ready(localization_state, localization_valid)
         if not localization_ok:
+            if result.active_map_name:
+                self._append_unique_readiness_text(
+                    local_slam_blockers,
+                    active_map_localization_not_ready_message(
+                        localization_state,
+                        localization_valid,
+                        map_name=result.manual_assist_map_name or result.active_map_name,
+                        map_revision_id=result.manual_assist_map_revision_id or result.active_revision_id,
+                    ),
+                )
             self._append_unique_readiness_text(
                 local_slam_blockers,
                 runtime_localization_not_ready_message(
@@ -1308,10 +1330,21 @@ class TaskManager:
             ))
         else:
             if not slam_task_ready:
-                self._append_unique_readiness_text(
-                    result.blockers,
-                    slam_blocking_reason or (local_slam_blockers[0] if local_slam_blockers else "") or "slam runtime not ready",
-                )
+                appended = False
+                if slam_blocking_reason:
+                    self._append_unique_readiness_text(result.blockers, slam_blocking_reason)
+                    appended = True
+                if slam_state is not None:
+                    for item in list(getattr(slam_state, "blocking_reasons", []) or []):
+                        before = len(result.blockers)
+                        self._append_unique_readiness_text(result.blockers, item)
+                        appended = appended or len(result.blockers) != before
+                for item in local_slam_blockers:
+                    before = len(result.blockers)
+                    self._append_unique_readiness_text(result.blockers, item)
+                    appended = appended or len(result.blockers) != before
+                if not appended:
+                    self._append_unique_readiness_text(result.blockers, "slam runtime not ready")
             result.checks.append(self._make_readiness_check(
                 key="slam_runtime",
                 level="OK" if slam_task_ready else "ERROR",
@@ -1367,19 +1400,21 @@ class TaskManager:
 
         mcore_node_ok = self._node_online("/mcore_tcp_bridge")
         mcore_fresh = mcore_connected_ts > 0.0 and (now - mcore_connected_ts) <= self._connected_stale_timeout_s
-        if (not mcore_node_ok) or (mcore_connected is not True) or (not mcore_fresh):
+        mcore_ready = bool(mcore_node_ok and mcore_connected is True and mcore_fresh)
+        require_mcore = bool(getattr(self, "_require_mcore_bridge_for_readiness", False))
+        if require_mcore and not mcore_ready:
             result.blockers.append("mcore bridge not ready")
         result.checks.append(self._make_readiness_check(
             key="mcore_bridge",
-            level="OK" if (mcore_node_ok and mcore_connected is True and mcore_fresh) else "ERROR",
-            ok=bool(mcore_node_ok and mcore_connected is True and mcore_fresh),
+            level="OK" if mcore_ready else ("ERROR" if require_mcore else "WARN"),
+            ok=mcore_ready,
             fresh=bool(mcore_fresh),
             stale=bool(mcore_connected_ts > 0.0 and not mcore_fresh),
             missing=bool(not mcore_node_ok or mcore_connected_ts <= 0.0),
             age_s=float(max(0.0, now - mcore_connected_ts)) if mcore_connected_ts > 0.0 else -1.0,
             summary=(
                 "connected"
-                if (mcore_node_ok and mcore_connected is True and mcore_fresh)
+                if mcore_ready
                 else (
                     "node offline"
                     if not mcore_node_ok

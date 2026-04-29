@@ -11,6 +11,8 @@
   <arg name="enable_slam_runtime_manager" default="true"/>
   <arg name="enable_slam_api_service" default="true"/>
   <arg name="enable_odometry_health" default="false"/>
+  <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
+  <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
   <arg name="clicked_topic" default="/clicked_point"/>
   <arg name="selection_inset_m" default="0.05"/>
   <arg name="hole_outset_m" default="0.05"/>
@@ -123,8 +125,8 @@
       <param name="emit_auxiliary_diagnostics" value="false"/>
       <param name="raw_odom_topic" value="/odom_raw"/>
       <param name="odom_topic" value="/odom"/>
-      <param name="imu_topic" value="/imu_corrected"/>
-      <param name="ekf_node_name" value="/wheel_speed_odom_ekf"/>
+      <param name="imu_topic" value="$(arg odometry_health_imu_topic)"/>
+      <param name="ekf_node_name" value="$(arg odometry_health_ekf_node_name)"/>
       <param name="state_topic_name" value="$(arg odometry_state_topic_name)"/>
       <param name="app_service_name" value="$(arg odometry_status_app_service_name)"/>
       <param name="app_contract_param_ns" value="$(arg odometry_status_app_contract_param_ns)"/>

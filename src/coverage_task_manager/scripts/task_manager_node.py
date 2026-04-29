@@ -67,6 +67,7 @@ def main():
     mcore_connected_topic = rospy.get_param("~mcore_connected_topic", "/mcore_tcp_bridge/connected")
     station_connected_topic = rospy.get_param("~station_connected_topic", "/station_tcp_bridge/connected")
     connected_stale_timeout_s = rospy.get_param("~connected_stale_timeout_s", 5.0)
+    require_mcore_bridge_for_readiness = rospy.get_param("~require_mcore_bridge_for_readiness", False)
     app_exe_task_service_name = rospy.get_param(
         "~app_exe_task_service_name", "/coverage_task_manager/app/exe_task_server"
     )
@@ -284,6 +285,7 @@ def main():
         mcore_connected_topic=str(mcore_connected_topic),
         station_connected_topic=str(station_connected_topic),
         connected_stale_timeout_s=float(connected_stale_timeout_s),
+        require_mcore_bridge_for_readiness=bool(require_mcore_bridge_for_readiness),
         mbf_move_base_action=mbf_move_base_action,
         mbf_exe_path_action=mbf_exe_path_action,
         mbf_planner=mbf_planner,

@@ -203,22 +203,24 @@ def plan_coverage(
                         edge_dense=edge_dense,
                         sp=sp
                     )
-                    violation = _path_region_violation_message(final_pts, effective_regions)
-                    if violation:
-                        snake_violation = _path_region_violation_message(snake_pts_path, effective_regions)
-                        if snake_violation:
-                            return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", snake_violation, frame_id, [], [], 0.0)
-                        final_pts = snake_pts_path[:]
-                        stitch_dbg = None
-                        edge_loop_skipped = "bbox_edge_loop_rejected_by_region_guard"
-                        edge_dense = []
-                        edge_vertices = []
-                        edge_close_gap = 0.0
-                        edge_len = 0.0
+                    if bool(params.validate_effective_region_path):
+                        violation = _path_region_violation_message(final_pts, effective_regions)
+                        if violation:
+                            snake_violation = _path_region_violation_message(snake_pts_path, effective_regions)
+                            if snake_violation:
+                                return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", snake_violation, frame_id, [], [], 0.0)
+                            final_pts = snake_pts_path[:]
+                            stitch_dbg = None
+                            edge_loop_skipped = "bbox_edge_loop_rejected_by_region_guard"
+                            edge_dense = []
+                            edge_vertices = []
+                            edge_close_gap = 0.0
+                            edge_len = 0.0
                 else:
-                    violation = _path_region_violation_message(final_pts, effective_regions)
-                    if violation:
-                        return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", violation, frame_id, [], [], 0.0)
+                    if bool(params.validate_effective_region_path):
+                        violation = _path_region_violation_message(final_pts, effective_regions)
+                        if violation:
+                            return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", violation, frame_id, [], [], 0.0)
 
                 # debug data
                 dbg = None

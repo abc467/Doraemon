@@ -56,6 +56,9 @@
   <arg name="slam_state_topic" default="/clean_robot_server/slam_state"/>
   <arg name="slam_state_stale_timeout_s" default="5.0"/>
   <arg name="start_odometry_health" default="true"/>
+  <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
+  <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
+  <arg name="require_mcore_bridge_for_readiness" default="false"/>
   <arg name="odometry_status_app_service_name" default="/clean_robot_server/app/get_odometry_status"/>
   <arg name="odometry_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_odometry_status"/>
   <arg name="app_readiness_service_name" default="/coverage_task_manager/app/get_system_readiness"/>
@@ -106,8 +109,8 @@
     <param name="emit_auxiliary_diagnostics" value="false"/>
     <param name="raw_odom_topic" value="/odom_raw"/>
     <param name="odom_topic" value="/odom"/>
-    <param name="imu_topic" value="/imu_corrected"/>
-    <param name="ekf_node_name" value="/wheel_speed_odom_ekf"/>
+    <param name="imu_topic" value="$(arg odometry_health_imu_topic)"/>
+    <param name="ekf_node_name" value="$(arg odometry_health_ekf_node_name)"/>
     <param name="state_topic_name" value="$(arg odometry_state_topic)"/>
     <param name="app_service_name" value="$(arg odometry_status_app_service_name)"/>
     <param name="app_contract_param_ns" value="$(arg odometry_status_app_contract_param_ns)"/>
@@ -159,6 +162,7 @@
     <arg name="odometry_state_stale_timeout_s" value="$(arg odometry_state_stale_timeout_s)"/>
     <arg name="slam_state_topic" value="$(arg slam_state_topic)"/>
     <arg name="slam_state_stale_timeout_s" value="$(arg slam_state_stale_timeout_s)"/>
+    <arg name="require_mcore_bridge_for_readiness" value="$(arg require_mcore_bridge_for_readiness)"/>
     <arg name="app_readiness_service_name" value="$(arg app_readiness_service_name)"/>
     <arg name="app_readiness_contract_param_ns" value="$(arg app_readiness_contract_param_ns)"/>
     <arg name="readiness_timeout_s" value="$(arg readiness_timeout_s)"/>

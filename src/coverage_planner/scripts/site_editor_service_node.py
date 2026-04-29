@@ -1417,6 +1417,16 @@ class SiteEditorServiceNode:
             mute_stderr=bool(
                 self._cfg_value(cfg, "mute_stderr", self._private_param("mute_stderr", PlannerParams.mute_stderr))
             ),
+            validate_effective_region_path=bool(
+                self._cfg_value(
+                    cfg,
+                    "validate_effective_region_path",
+                    self._private_param(
+                        "validate_effective_region_path",
+                        PlannerParams.validate_effective_region_path,
+                    ),
+                )
+            ),
             wall_margin_m=_finite_float(
                 self._cfg_value(cfg, "wall_margin_m", self._private_param("wall_margin_m", PlannerParams.wall_margin_m)),
                 PlannerParams.wall_margin_m,
@@ -1424,6 +1434,14 @@ class SiteEditorServiceNode:
             turn_margin_m=_finite_float(
                 self._cfg_value(cfg, "turn_margin_m", self._private_param("turn_margin_m", PlannerParams.turn_margin_m)),
                 PlannerParams.turn_margin_m,
+            ),
+            min_plannable_span_m=_finite_float(
+                self._cfg_value(
+                    cfg,
+                    "min_plannable_span_m",
+                    self._private_param("min_plannable_span_m", PlannerParams.min_plannable_span_m),
+                ),
+                PlannerParams.min_plannable_span_m,
             ),
             edge_corner_radius_m=_finite_float(
                 self._cfg_value(
@@ -3018,13 +3036,32 @@ class SiteEditorServiceNode:
 
         planner_params = self._planner_params_for_region(map_outer, warnings)
         frame_id = str(alignment.raw_frame or asset.get("frame_id") or "map")
+        planner_regions = self._filter_effective_regions_for_planner(
+            zone_constraints.effective_regions,
+            planner_params,
+            warnings,
+        )
+        if not planner_regions:
+            return {
+                "ok": False,
+                "error_code": "REGION_TOO_NARROW",
+                "error_message": "no plannable region remains after applying constraints",
+                "warnings": warnings,
+                "map_outer": map_outer,
+                "map_holes": map_holes,
+                "display_outer": disp_outer,
+                "display_holes": disp_holes,
+                "constraint_version": str(zone_constraints.constraint_version or ""),
+                "planner_params": planner_params,
+            }
+
         primary = run_plan_coverage_isolated(
             frame_id=frame_id,
             outer=map_outer,
             holes=map_holes,
             robot_spec=self.default_robot_spec,
             params=planner_params,
-            effective_regions=zone_constraints.effective_regions,
+            effective_regions=planner_regions,
             debug=bool(debug_publish_markers),
             timeout_s=float(self.planner_worker_timeout_s),
         )
@@ -3035,7 +3072,7 @@ class SiteEditorServiceNode:
                 worker_msg = worker_msg[:237] + "..."
             warnings.append("primary holes-aware planner failed in isolated worker: %s" % worker_msg)
             if allow_degraded_fallback:
-                fallback_regions = make_hole_free_effective_regions(zone_constraints.effective_regions, prec=3)
+                fallback_regions = make_hole_free_effective_regions(planner_regions, prec=3)
                 fallback_regions = self._filter_effective_regions_for_planner(
                     fallback_regions,
                     planner_params,

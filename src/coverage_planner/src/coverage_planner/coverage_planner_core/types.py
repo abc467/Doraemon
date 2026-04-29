@@ -26,9 +26,11 @@ class PlannerParams:
     turn_step_m: float = 0.05
     line_w: float = 0.05
     mute_stderr: bool = False
+    validate_effective_region_path: bool = True
 
     wall_margin_m: float = 0.05
     turn_margin_m: float = 0.0
+    min_plannable_span_m: float = 0.0
 
     edge_corner_radius_m: float = -1.0
     edge_corner_pull: float = 1.35

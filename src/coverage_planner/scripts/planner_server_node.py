@@ -242,6 +242,16 @@ class CoveragePlannerActionServer:
             mute_stderr=bool(
                 self._cfg_value(cfg, "mute_stderr", self._private_param("mute_stderr", PlannerParams.mute_stderr))
             ),
+            validate_effective_region_path=bool(
+                self._cfg_value(
+                    cfg,
+                    "validate_effective_region_path",
+                    self._private_param(
+                        "validate_effective_region_path",
+                        PlannerParams.validate_effective_region_path,
+                    ),
+                )
+            ),
             wall_margin_m=_finite_float(
                 self._cfg_value(cfg, "wall_margin_m", self._private_param("wall_margin_m", PlannerParams.wall_margin_m)),
                 PlannerParams.wall_margin_m,
@@ -249,6 +259,14 @@ class CoveragePlannerActionServer:
             turn_margin_m=_finite_float(
                 self._cfg_value(cfg, "turn_margin_m", self._private_param("turn_margin_m", PlannerParams.turn_margin_m)),
                 PlannerParams.turn_margin_m,
+            ),
+            min_plannable_span_m=_finite_float(
+                self._cfg_value(
+                    cfg,
+                    "min_plannable_span_m",
+                    self._private_param("min_plannable_span_m", PlannerParams.min_plannable_span_m),
+                ),
+                PlannerParams.min_plannable_span_m,
             ),
             edge_corner_radius_m=_finite_float(
                 self._cfg_value(
@@ -321,8 +339,10 @@ class CoveragePlannerActionServer:
             turn_step_m=goal_float(goal.turn_step_m, defaults.turn_step_m, positive=True),
             line_w=goal_float(goal.line_w, defaults.line_w, positive=True),
             mute_stderr=bool(goal.mute_stderr or defaults.mute_stderr),
+            validate_effective_region_path=bool(defaults.validate_effective_region_path),
             wall_margin_m=goal_float(goal.wall_margin_m, defaults.wall_margin_m),
             turn_margin_m=goal_float(goal.turn_margin_m, defaults.turn_margin_m),
+            min_plannable_span_m=float(defaults.min_plannable_span_m),
             edge_corner_radius_m=goal_float(goal.edge_corner_radius_m, defaults.edge_corner_radius_m),
             edge_corner_pull=goal_float(goal.edge_corner_pull, defaults.edge_corner_pull),
             edge_corner_min_pts=goal_int(goal.edge_corner_min_pts, defaults.edge_corner_min_pts, positive=True),

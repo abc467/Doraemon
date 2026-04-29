@@ -1,0 +1,34 @@
+<launch>
+  <arg name="serial_device" default="/dev/wheeltec_controller"/>
+  <arg name="serial_baudrate" default="115200"/>
+  <arg name="car_mode" default="senior_diff"/>
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="odom_frame_id" default="odom"/>
+  <arg name="robot_frame_id" default="base_footprint"/>
+  <arg name="gyro_frame_id" default="gyro_link"/>
+  <arg name="publish_odom_tf" default="true"/>
+  <arg name="odom_x_scale" default="1.0"/>
+  <arg name="odom_y_scale" default="1.0"/>
+  <arg name="odom_z_scale_positive" default="1.0"/>
+  <arg name="odom_z_scale_negative" default="1.0"/>
+
+  <node pkg="turn_on_wheeltec_robot"
+        type="wheeltec_robot_node"
+        name="wheeltec_robot"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <param name="usart_port_name" type="string" value="$(arg serial_device)"/>
+    <param name="serial_baud_rate" type="int" value="$(arg serial_baudrate)"/>
+    <param name="car_mode" type="string" value="$(arg car_mode)"/>
+    <param name="odom_frame_id" type="string" value="$(arg odom_frame_id)"/>
+    <param name="robot_frame_id" type="string" value="$(arg robot_frame_id)"/>
+    <param name="gyro_frame_id" type="string" value="$(arg gyro_frame_id)"/>
+    <param name="publish_odom_tf" type="bool" value="$(arg publish_odom_tf)"/>
+    <param name="odom_x_scale" type="double" value="$(arg odom_x_scale)"/>
+    <param name="odom_y_scale" type="double" value="$(arg odom_y_scale)"/>
+    <param name="odom_z_scale_positive" type="double" value="$(arg odom_z_scale_positive)"/>
+    <param name="odom_z_scale_negative" type="double" value="$(arg odom_z_scale_negative)"/>
+    <remap from="cmd_vel" to="$(arg cmd_vel_topic)"/>
+  </node>
+</launch>

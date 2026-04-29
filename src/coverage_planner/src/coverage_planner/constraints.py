@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
@@ -226,15 +227,19 @@ def make_hole_free_effective_regions(
 
 
 def min_plannable_span_m(robot_spec: Any, params: Any) -> float:
+    configured = float(getattr(params, "min_plannable_span_m", 0.0) or 0.0)
+    if math.isfinite(configured) and configured > 0.0:
+        return configured
     edge_radius_m = float(getattr(params, "edge_corner_radius_m", 0.0) or 0.0)
     min_turning_radius_m = float(getattr(robot_spec, "min_turning_radius", 0.0) or 0.0)
     if edge_radius_m < 0.0:
         edge_radius_m = min_turning_radius_m
+    # turn_margin_m trims along generated swaths, so it must not define a
+    # region's required short-side span.
     return max(
         float(getattr(robot_spec, "cov_width", 0.0) or 0.0) * 1.5,
         float(getattr(robot_spec, "width", 0.0) or 0.0)
         + max(edge_radius_m, min_turning_radius_m) * 1.6,
-        float(getattr(params, "turn_margin_m", 0.0) or 0.0) * 2.0,
         0.25,
     )
 

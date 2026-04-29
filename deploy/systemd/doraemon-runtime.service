@@ -1,7 +1,7 @@
 [Unit]
 Description=Doraemon Robot Runtime
 After=local-fs.target network.target systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+Wants=systemd-udev-settle.service clean-robot-site-gateway.service
 
 [Service]
 Type=oneshot
@@ -13,6 +13,7 @@ Environment=TERM=xterm-256color
 Environment=ALLOW_NO_ACTIVE_MAP_STARTUP=1
 Environment=RUN_BACKEND_RUNTIME_SMOKE=0
 Environment=DORAEMON_BOOT_WAIT_TIMEOUT=120
+EnvironmentFile=-/etc/doraemon/runtime.env
 ExecStartPre=/home/linaro/Doraemon/scripts/wait_robot_boot_ready.sh
 ExecStart=/bin/bash -lc 'exec scripts/start_runtime.sh'
 ExecStop=/bin/bash -lc 'exec scripts/stop_all_backend.sh'

@@ -11,6 +11,7 @@ _MANUAL_ASSIST_RETRY_ACTION_BY_OPERATION = {
     "relocalize": "relocalize",
     "verify_map_revision": "verify_map_revision",
     "activate_map_revision": "activate_map_revision",
+    "stop_mapping": "prepare_for_task",
 }
 
 
@@ -20,6 +21,37 @@ def no_current_active_map_selected_message() -> str:
 
 def runtime_map_identity_unavailable_message() -> str:
     return "runtime /map identity unavailable"
+
+
+def _scope_suffix(*, map_name: str = "", map_revision_id: str = "") -> str:
+    scope = manual_assist_scope_label(map_name=map_name, map_revision_id=map_revision_id)
+    return " (%s)" % scope if scope else ""
+
+
+def active_map_runtime_unavailable_message(
+    *,
+    map_name: str = "",
+    map_revision_id: str = "",
+) -> str:
+    return (
+        "active map%s is not loaded in localization runtime; if the robot is in a new environment, "
+        "create and activate a new map; otherwise relocalize or switch map before start/resume"
+    ) % _scope_suffix(map_name=map_name, map_revision_id=map_revision_id)
+
+
+def active_map_localization_not_ready_message(
+    localization_state: str,
+    localization_valid: bool,
+    *,
+    map_name: str = "",
+    map_revision_id: str = "",
+) -> str:
+    state = str(localization_state or "").strip() or "-"
+    valid = str(bool(localization_valid)).lower()
+    return (
+        "active map%s is not localized: state=%s valid=%s; if the robot is in a new environment, "
+        "create and activate a new map; otherwise relocalize or provide an initial pose before start/resume"
+    ) % (_scope_suffix(map_name=map_name, map_revision_id=map_revision_id), state, valid)
 
 
 def runtime_map_mismatch_reason(

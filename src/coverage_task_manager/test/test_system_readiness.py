@@ -65,6 +65,7 @@ class TaskManagerReadinessTest(unittest.TestCase):
         slam_localization_state=None,
         slam_localization_valid=None,
         slam_state_ts=None,
+        require_mcore_bridge=False,
     ):
         mgr = TaskManager.__new__(TaskManager)
         mgr._lock = threading.Lock()
@@ -111,6 +112,7 @@ class TaskManagerReadinessTest(unittest.TestCase):
         mgr._connected_stale_timeout_s = 5.0
         mgr._combined_status_stale_timeout_s = 5.0
         mgr._station_status_stale_timeout_s = 5.0
+        mgr._require_mcore_bridge_for_readiness = bool(require_mcore_bridge)
         mgr.battery_stale_timeout_s = 5.0
         mgr._runtime_localization_state_param = "/cartographer/runtime/localization_state"
         mgr._runtime_localization_valid_param = "/cartographer/runtime/localization_valid"
@@ -167,6 +169,25 @@ class TaskManagerReadinessTest(unittest.TestCase):
         odom_check = next(item for item in readiness.checks if item.key == "odometry")
         self.assertEqual(odom_check.level, "OK")
         self.assertEqual(odom_check.summary, "mode=odom_stream stream=true valid=true code=- msg=ok")
+
+    def test_mcore_bridge_offline_is_diagnostic_not_readiness_blocker(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            online_nodes={"/move_base_flex"},
+        )
+        mgr._mcore_connected = BoolSnapshot(value=None, ts=0.0)
+        with mock.patch("coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch("coverage_task_manager.task_manager.time.time", return_value=self.now):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        self.assertTrue(readiness.overall_ready)
+        self.assertTrue(readiness.can_start_task)
+        self.assertNotIn("mcore bridge not ready", list(readiness.blocking_reasons))
+        mcore_check = next(item for item in readiness.checks if item.key == "mcore_bridge")
+        self.assertEqual(mcore_check.level, "WARN")
+        self.assertEqual(mcore_check.summary, "node offline")
 
     def test_blocks_when_odometry_invalid(self):
         mgr, get_param, fake_now = self._build_manager(

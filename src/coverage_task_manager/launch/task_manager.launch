@@ -35,6 +35,7 @@
   <arg name="mcore_connected_topic" default="/mcore_tcp_bridge/connected"/>
   <arg name="station_connected_topic" default="/station_tcp_bridge/connected"/>
   <arg name="connected_stale_timeout_s" default="5.0"/>
+  <arg name="require_mcore_bridge_for_readiness" default="false"/>
   <arg name="app_readiness_service_name" default="/coverage_task_manager/app/get_system_readiness"/>
   <arg name="app_readiness_contract_param_ns" default="/coverage_task_manager/contracts/app/get_system_readiness"/>
   <arg name="readiness_timeout_s" default="3.0"/>
@@ -135,6 +136,7 @@
     <param name="mcore_connected_topic" value="$(arg mcore_connected_topic)"/>
     <param name="station_connected_topic" value="$(arg station_connected_topic)"/>
     <param name="connected_stale_timeout_s" value="$(arg connected_stale_timeout_s)"/>
+    <param name="require_mcore_bridge_for_readiness" value="$(arg require_mcore_bridge_for_readiness)"/>
     <param name="app_exe_task_service_name" value="$(arg app_exe_task_service_name)"/>
     <param name="app_exe_task_contract_param_ns" value="$(arg app_exe_task_contract_param_ns)"/>
     <param name="task_persist_enable" value="true"/>

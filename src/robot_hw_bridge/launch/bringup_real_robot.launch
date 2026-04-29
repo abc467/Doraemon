@@ -20,6 +20,32 @@
   <arg name="cartographer_runtime_ns" default="/cartographer/runtime"/>
   <arg name="cartographer_config_root" default=""/>
   <arg name="start_odometry_runtime" default="true"/>
+  <arg name="odom_serial_device" default="/dev/odom"/>
+  <arg name="odom_serial_baudrate" default="115200"/>
+  <arg name="odom_wheel_separation" default="0.7307"/>
+  <arg name="odom_wheel_diameter" default="0.165"/>
+  <arg name="odom_gear_ratio" default="9.0"/>
+  <arg name="odom_encoder_ppr" default="10000.0"/>
+  <arg name="odom_left_wheel_scale" default="0.9995"/>
+  <arg name="odom_right_wheel_scale" default="1.0010"/>
+  <arg name="odom_angular_velocity_sign" default="-1.0"/>
+  <arg name="start_wheeltec_base" default="false"/>
+  <arg name="wheeltec_serial_device" default="/dev/wheeltec_controller"/>
+  <arg name="wheeltec_serial_baudrate" default="115200"/>
+  <arg name="wheeltec_car_mode" default="senior_diff"/>
+  <arg name="wheeltec_cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="wheeltec_odom_frame_id" default="odom"/>
+  <arg name="wheeltec_robot_frame_id" default="base_footprint"/>
+  <arg name="wheeltec_gyro_frame_id" default="gyro_link"/>
+  <arg name="wheeltec_publish_odom_tf" default="true"/>
+  <arg name="wheeltec_odom_x_scale" default="1.0"/>
+  <arg name="wheeltec_odom_y_scale" default="1.0"/>
+  <arg name="wheeltec_odom_z_scale_positive" default="1.0"/>
+  <arg name="wheeltec_odom_z_scale_negative" default="1.0"/>
+  <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/clean_robot.urdf"/>
+  <arg name="publish_base_footprint_to_base_link" default="false"/>
+  <arg name="base_footprint_to_base_link_z" default="0.0"/>
+  <arg name="publish_base_footprint_to_gyro_link" default="false"/>
   <arg name="start_planner_server" default="true"/>
   <arg name="enable_rect_zone_planner" default="true"/>
   <arg name="enable_depth_obstacle_tracking" default="true"/>
@@ -36,25 +62,86 @@
   <arg name="camera2_bind_by_usb_port" default="false"/>
   <arg name="mechanical_connect_enable" default="false"/>
   <arg name="dock_pose_score_thresh" default="0.00012"/>
+  <arg name="enable_mcore_bridge" default="true"/>
+  <arg name="mcore_enable_cmd_vel" default="true"/>
+  <arg name="mcore_server_ip" default="192.168.16.10"/>
+  <arg name="mcore_server_port" default="5001"/>
+  <arg name="mcore_cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="mcore_linear_velocity_scale" default="1.0"/>
+  <arg name="mcore_angular_velocity_scale" default="1.0"/>
+  <arg name="mcore_linear_velocity_sign" default="1.0"/>
+  <arg name="mcore_angular_velocity_sign" default="1.0"/>
+  <arg name="mcore_max_abs_linear_velocity" default="0.0"/>
+  <arg name="mcore_max_abs_angular_velocity" default="0.0"/>
+  <arg name="enable_station_bridge" default="true"/>
+  <arg name="enable_dock_supply_manager" default="true"/>
+  <arg name="enable_docking_stack" default="true"/>
   <arg name="restart_localization_app_service_name" default="/cartographer/runtime/app/restart_localization"/>
   <arg name="restart_localization_app_contract_param_ns" default="/cartographer/runtime/contracts/app/restart_localization"/>
+  <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
+  <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
 
   <!-- start TCP bridges + supply manager -->
   <include file="$(find robot_hw_bridge)/launch/hardware_bridges.launch">
+    <arg name="enable_mcore_bridge" value="$(arg enable_mcore_bridge)"/>
+    <arg name="mcore_enable_cmd_vel" value="$(arg mcore_enable_cmd_vel)"/>
+    <arg name="mcore_server_ip" value="$(arg mcore_server_ip)"/>
+    <arg name="mcore_server_port" value="$(arg mcore_server_port)"/>
+    <arg name="mcore_cmd_vel_topic" value="$(arg mcore_cmd_vel_topic)"/>
+    <arg name="mcore_linear_velocity_scale" value="$(arg mcore_linear_velocity_scale)"/>
+    <arg name="mcore_angular_velocity_scale" value="$(arg mcore_angular_velocity_scale)"/>
+    <arg name="mcore_linear_velocity_sign" value="$(arg mcore_linear_velocity_sign)"/>
+    <arg name="mcore_angular_velocity_sign" value="$(arg mcore_angular_velocity_sign)"/>
+    <arg name="mcore_max_abs_linear_velocity" value="$(arg mcore_max_abs_linear_velocity)"/>
+    <arg name="mcore_max_abs_angular_velocity" value="$(arg mcore_max_abs_angular_velocity)"/>
+    <arg name="enable_station_bridge" value="$(arg enable_station_bridge)"/>
+    <arg name="enable_dock_supply_manager" value="$(arg enable_dock_supply_manager)"/>
+    <arg name="enable_docking_stack" value="$(arg enable_docking_stack)"/>
     <arg name="mechanical_connect_enable" value="$(arg mechanical_connect_enable)"/>
     <arg name="dock_pose_score_thresh" value="$(arg dock_pose_score_thresh)"/>
   </include>
 
+  <group if="$(arg start_wheeltec_base)">
+    <include file="$(find robot_hw_bridge)/launch/wheeltec_senior_diff_base.launch">
+      <arg name="serial_device" value="$(arg wheeltec_serial_device)"/>
+      <arg name="serial_baudrate" value="$(arg wheeltec_serial_baudrate)"/>
+      <arg name="car_mode" value="$(arg wheeltec_car_mode)"/>
+      <arg name="cmd_vel_topic" value="$(arg wheeltec_cmd_vel_topic)"/>
+      <arg name="odom_frame_id" value="$(arg wheeltec_odom_frame_id)"/>
+      <arg name="robot_frame_id" value="$(arg wheeltec_robot_frame_id)"/>
+      <arg name="gyro_frame_id" value="$(arg wheeltec_gyro_frame_id)"/>
+      <arg name="publish_odom_tf" value="$(arg wheeltec_publish_odom_tf)"/>
+      <arg name="odom_x_scale" value="$(arg wheeltec_odom_x_scale)"/>
+      <arg name="odom_y_scale" value="$(arg wheeltec_odom_y_scale)"/>
+      <arg name="odom_z_scale_positive" value="$(arg wheeltec_odom_z_scale_positive)"/>
+      <arg name="odom_z_scale_negative" value="$(arg wheeltec_odom_z_scale_negative)"/>
+    </include>
+  </group>
+
   <group if="$(arg start_navigation)">
     <group if="$(arg start_odometry_runtime)">
       <include file="$(find wheel_speed_odom_bridge)/launch/imu_bias_correction.launch"/>
-      <include file="$(find wheel_speed_odom_bridge)/launch/wheel_speed_odom.launch"/>
+      <include file="$(find wheel_speed_odom_bridge)/launch/wheel_speed_odom.launch">
+        <arg name="serial_device" value="$(arg odom_serial_device)"/>
+        <arg name="serial_baudrate" value="$(arg odom_serial_baudrate)"/>
+        <arg name="wheel_separation" value="$(arg odom_wheel_separation)"/>
+        <arg name="wheel_diameter" value="$(arg odom_wheel_diameter)"/>
+        <arg name="gear_ratio" value="$(arg odom_gear_ratio)"/>
+        <arg name="encoder_pulses_per_motor_revolution" value="$(arg odom_encoder_ppr)"/>
+        <arg name="left_wheel_scale" value="$(arg odom_left_wheel_scale)"/>
+        <arg name="right_wheel_scale" value="$(arg odom_right_wheel_scale)"/>
+        <arg name="angular_velocity_sign" value="$(arg odom_angular_velocity_sign)"/>
+      </include>
     </group>
 
     <group if="$(arg enable_depth_obstacle_tracking)">
       <group if="$(arg start_depth_camera_runtime)">
         <include file="$(find cleanrobot)/launch/depth_obstacle_runtime.launch">
           <arg name="start_robot_state_publisher" value="$(arg publish_robot_tf_for_depth_cameras)"/>
+          <arg name="robot_description_path" value="$(arg robot_description_path)"/>
+          <arg name="publish_base_footprint_to_base_link" value="$(arg publish_base_footprint_to_base_link)"/>
+          <arg name="base_footprint_to_base_link_z" value="$(arg base_footprint_to_base_link_z)"/>
+          <arg name="publish_base_footprint_to_gyro_link" value="$(arg publish_base_footprint_to_gyro_link)"/>
           <arg name="start_depth_cameras" value="true"/>
           <arg name="camera1_bind_by_usb_port" value="$(arg camera1_bind_by_usb_port)"/>
           <arg name="camera2_bind_by_usb_port" value="$(arg camera2_bind_by_usb_port)"/>
@@ -115,6 +202,8 @@
     <arg name="maps_root" value="$(arg maps_root)"/>
     <arg name="robot_id" value="$(arg robot_id)"/>
     <arg name="start_odometry_health" value="true"/>
+    <arg name="odometry_health_imu_topic" value="$(arg odometry_health_imu_topic)"/>
+    <arg name="odometry_health_ekf_node_name" value="$(arg odometry_health_ekf_node_name)"/>
     <arg name="start_localization_lifecycle_manager" value="false"/>
     <arg name="run_map_migration" value="false"/>
   </include>

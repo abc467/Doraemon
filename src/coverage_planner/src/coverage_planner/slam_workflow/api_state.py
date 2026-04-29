@@ -17,6 +17,8 @@ from cleanrobot_app_msgs.srv import GetSlamStatusResponse as AppGetSlamStatusRes
 from coverage_planner.canonical_contract_types import APP_GET_ODOMETRY_STATUS_SERVICE_TYPE
 from coverage_planner.map_identity import ensure_map_identity, get_runtime_map_revision_id, get_runtime_map_scope
 from coverage_planner.runtime_gate_messages import (
+    active_map_localization_not_ready_message,
+    active_map_runtime_unavailable_message,
     manual_assist_metadata,
     no_current_active_map_selected_message,
     odometry_not_ready_message,
@@ -324,6 +326,13 @@ class SlamApiStateController:
         if current_mode == "mapping":
             warnings.append("runtime is in mapping mode")
         if current_mode != "mapping" and not runtime_map_ready:
+            if active_map_name:
+                blockers.append(
+                    active_map_runtime_unavailable_message(
+                        map_name=active_map_name,
+                        map_revision_id=active_revision_id,
+                    )
+                )
             blockers.append(runtime_map_identity_unavailable_message())
         if current_mode != "mapping" and active_map_name and runtime_map_ready and (not active_map_match):
             blockers.append(
@@ -339,9 +348,17 @@ class SlamApiStateController:
                 )
                 or "runtime map does not match active map"
             )
-        if current_mode != "mapping" and (
-            not localization_is_ready(localization_state, localization_valid)
-        ):
+        localization_ready = localization_is_ready(localization_state, localization_valid)
+        if current_mode != "mapping" and (not localization_ready):
+            if active_map_name:
+                blockers.append(
+                    active_map_localization_not_ready_message(
+                        localization_state,
+                        localization_valid,
+                        map_name=manual_assist_map_name or active_map_name,
+                        map_revision_id=manual_assist_revision_id or active_revision_id,
+                    )
+                )
             blockers.append(
                 runtime_localization_not_ready_message(
                     localization_state,

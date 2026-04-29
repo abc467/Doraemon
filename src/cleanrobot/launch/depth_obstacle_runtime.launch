@@ -1,12 +1,28 @@
 <launch>
   <arg name="start_robot_state_publisher" default="true"/>
+  <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/clean_robot.urdf"/>
+  <arg name="publish_base_footprint_to_base_link" default="false"/>
+  <arg name="base_footprint_to_base_link_z" default="0.0"/>
+  <arg name="publish_base_footprint_to_gyro_link" default="false"/>
   <arg name="start_depth_cameras" default="true"/>
   <arg name="camera1_bind_by_usb_port" default="false"/>
   <arg name="camera2_bind_by_usb_port" default="false"/>
 
   <group if="$(arg start_robot_state_publisher)">
-    <include file="$(find cleanrobot_description)/launch/robot_state_only.launch"/>
+    <include file="$(find cleanrobot_description)/launch/robot_state_only.launch">
+      <arg name="robot_description_path" value="$(arg robot_description_path)"/>
+    </include>
   </group>
+  <node if="$(arg publish_base_footprint_to_base_link)"
+        pkg="tf"
+        type="static_transform_publisher"
+        name="base_footprint_to_base_link"
+        args="0 0 $(arg base_footprint_to_base_link_z) 0 0 0 base_footprint base_link 100"/>
+  <node if="$(arg publish_base_footprint_to_gyro_link)"
+        pkg="tf"
+        type="static_transform_publisher"
+        name="base_footprint_to_gyro_link"
+        args="0 0 0 0 0 0 base_footprint gyro_link 100"/>
 
   <group if="$(arg start_depth_cameras)">
     <include file="$(find cleanrobot)/launch/orbbec_dual_depth_ground.launch">
