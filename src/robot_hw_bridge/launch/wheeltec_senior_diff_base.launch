@@ -11,6 +11,9 @@
   <arg name="odom_y_scale" default="1.0"/>
   <arg name="odom_z_scale_positive" default="1.0"/>
   <arg name="odom_z_scale_negative" default="1.0"/>
+  <arg name="start_battery_state_bridge" default="true"/>
+  <arg name="battery_empty_voltage" default="20.0"/>
+  <arg name="battery_full_voltage" default="25.2"/>
 
   <node pkg="turn_on_wheeltec_robot"
         type="wheeltec_robot_node"
@@ -30,5 +33,18 @@
     <param name="odom_z_scale_positive" type="double" value="$(arg odom_z_scale_positive)"/>
     <param name="odom_z_scale_negative" type="double" value="$(arg odom_z_scale_negative)"/>
     <remap from="cmd_vel" to="$(arg cmd_vel_topic)"/>
+  </node>
+
+  <node if="$(arg start_battery_state_bridge)"
+        pkg="robot_hw_bridge"
+        type="wheeltec_battery_state_bridge.py"
+        name="wheeltec_battery_state_bridge"
+        output="screen">
+    <param name="voltage_topic" value="/PowerVoltage"/>
+    <param name="charging_flag_topic" value="/robot_charging_flag"/>
+    <param name="charging_current_topic" value="/robot_charging_current"/>
+    <param name="battery_topic" value="/battery_state"/>
+    <param name="empty_voltage" value="$(arg battery_empty_voltage)"/>
+    <param name="full_voltage" value="$(arg battery_full_voltage)"/>
   </node>
 </launch>

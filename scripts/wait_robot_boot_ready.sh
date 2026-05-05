@@ -25,6 +25,7 @@ if [[ "${CHASSIS_DRIVER}" == "wheeltec_senior_diff" ]]; then
   DEFAULT_REQUIRE_MBOX_PING="false"
 fi
 A_BOX_IP="${DORAEMON_A_BOX_IP:-192.168.16.11}"
+A_BOX_IFACE="${DORAEMON_A_BOX_IFACE:-}"
 MBOX_IP="${DORAEMON_MBOX_IP:-192.168.16.10}"
 LIDAR_IP="${DORAEMON_LIDAR_IP:-192.168.16.23}"
 IMU_DEVICE="${DORAEMON_IMU_DEVICE:-/dev/imu}"
@@ -35,7 +36,7 @@ REQUIRE_ODOM_DEVICE="${DORAEMON_REQUIRE_ODOM_DEVICE:-${DEFAULT_REQUIRE_ODOM_DEVI
 REQUIRE_CHASSIS_DEVICE="${DORAEMON_REQUIRE_CHASSIS_DEVICE:-${DEFAULT_REQUIRE_CHASSIS_DEVICE}}"
 REQUIRE_MBOX_PING="${DORAEMON_REQUIRE_MBOX_PING:-${DEFAULT_REQUIRE_MBOX_PING}}"
 REQUIRE_LIDAR_PING="${DORAEMON_REQUIRE_LIDAR_PING:-true}"
-REPO_ROOT="${DORAEMON_REPO_ROOT:-/home/linaro/Doraemon}"
+REPO_ROOT="${DORAEMON_REPO_ROOT:-/home/baer/Doraemon}"
 
 log() {
   echo "[$(date '+%F %T')] $*"
@@ -78,8 +79,12 @@ has_workspace_setup() {
   [[ -f "${REPO_ROOT}/install/setup.bash" || -f "${REPO_ROOT}/devel/setup.bash" ]]
 }
 
-has_eth0_ip() {
-  ip -4 addr show dev eth0 | grep -q "inet ${A_BOX_IP}/"
+has_a_box_ip() {
+  if [[ -n "${A_BOX_IFACE}" ]]; then
+    ip -4 addr show dev "${A_BOX_IFACE}" | grep -q "inet ${A_BOX_IP}/"
+    return
+  fi
+  ip -4 addr show | grep -q "inet ${A_BOX_IP}/"
 }
 
 can_ping() {
@@ -100,7 +105,7 @@ truthy() {
 START_TS="$(date +%s)"
 
 log "waiting for Doraemon robot boot dependencies"
-log "repo=${REPO_ROOT} chassis=${CHASSIS_DRIVER} chassis_device=${CHASSIS_DEVICE:-none} a_box=${A_BOX_IP} mbox=${MBOX_IP} lidar=${LIDAR_IP} imu=${IMU_DEVICE} odom=${ODOM_DEVICE} timeout=${TIMEOUT_SEC}s"
+log "repo=${REPO_ROOT} chassis=${CHASSIS_DRIVER} chassis_device=${CHASSIS_DEVICE:-none} a_box=${A_BOX_IP} a_box_iface=${A_BOX_IFACE:-auto} mbox=${MBOX_IP} lidar=${LIDAR_IP} imu=${IMU_DEVICE} odom=${ODOM_DEVICE} timeout=${TIMEOUT_SEC}s"
 
 udevadm settle --timeout=10 || true
 
@@ -120,7 +125,7 @@ if truthy "${REQUIRE_CHASSIS_DEVICE}"; then
 else
   log "[SKIP] chassis device check disabled"
 fi
-wait_for "eth0 ${A_BOX_IP}" has_eth0_ip
+wait_for "A-box IP ${A_BOX_IP}" has_a_box_ip
 if truthy "${REQUIRE_MBOX_PING}"; then
   wait_for "M-box ${MBOX_IP}" can_ping "${MBOX_IP}"
 else

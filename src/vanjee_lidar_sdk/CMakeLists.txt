@@ -251,9 +251,11 @@ if(roscpp_FOUND)
     install(DIRECTORY config/
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
     )
-    install(DIRECTORY rviz/
-        DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/rviz
-    )
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rviz")
+      install(DIRECTORY rviz/
+          DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/rviz
+      )
+    endif()
 
   endif()
 
@@ -280,6 +282,5 @@ if(rclcpp_FOUND AND ${COMPILE_METHOD} STREQUAL "COLCON")
   ament_package()
 
 endif(rclcpp_FOUND AND ${COMPILE_METHOD} STREQUAL "COLCON")
-
 
 

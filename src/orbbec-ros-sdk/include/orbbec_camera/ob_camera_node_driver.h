@@ -20,7 +20,6 @@
 #include <mutex>
 #include <semaphore.h>
 #include <pthread.h>
-#define BACKWARD_HAS_DW 1
 #include <backward-cpp/backward.hpp>
 
 namespace orbbec_camera {

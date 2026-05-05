@@ -326,8 +326,8 @@ start_runtime_session() {
   else
     runtime_log_status "[INFO] skip legacy hardware bridges: all hardware bridge switches are false"
   fi
-  runtime_tmux_window "${TMUX_SESSION}" nav "exec roslaunch cleanrobot mbf_nav.launch start_map_asset_service:=false enable_depth_obstacle_tracking:=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} enable_depth_up_cam:=${RUNTIME_ENABLE_DEPTH_UP_CAM}"
-  runtime_tmux_window "${TMUX_SESSION}" task "exec roslaunch coverage_task_manager task_system.launch task_auto_charge_enable:=${TASK_AUTO_CHARGE_ENABLE} executor_auto_charge_enable:=${EXECUTOR_AUTO_CHARGE_ENABLE} odometry_health_imu_topic:=${ODOMETRY_HEALTH_IMU_TOPIC} odometry_health_ekf_node_name:=${ODOMETRY_HEALTH_EKF_NODE_NAME} require_mcore_bridge_for_readiness:=${REQUIRE_MCORE_BRIDGE_FOR_READINESS}"
+  runtime_tmux_window "${TMUX_SESSION}" nav "exec roslaunch cleanrobot mbf_nav.launch start_map_asset_service:=false enable_depth_obstacle_tracking:=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} enable_depth_up_cam:=${RUNTIME_ENABLE_DEPTH_UP_CAM} plan_db_path:=${PLAN_DB_PATH} ops_db_path:=${OPS_DB_PATH} maps_root:=${MAPS_ROOT} external_maps_root:=${EXTERNAL_MAPS_ROOT} robot_id:=${ROBOT_ID}"
+  runtime_tmux_window "${TMUX_SESSION}" task "exec roslaunch coverage_task_manager task_system.launch task_auto_charge_enable:=${TASK_AUTO_CHARGE_ENABLE} executor_auto_charge_enable:=${EXECUTOR_AUTO_CHARGE_ENABLE} odometry_health_imu_topic:=${ODOMETRY_HEALTH_IMU_TOPIC} odometry_health_ekf_node_name:=${ODOMETRY_HEALTH_EKF_NODE_NAME} require_mcore_bridge_for_readiness:=${REQUIRE_MCORE_BRIDGE_FOR_READINESS} plan_db_path:=${PLAN_DB_PATH} ops_db_path:=${OPS_DB_PATH} maps_root:=${MAPS_ROOT} robot_id:=${ROBOT_ID}"
 
   tmux new-window -t "${TMUX_SESSION}" -n status \
     "bash -lc 'clear; echo \"Doraemon startup status\"; echo; exec tail -n 200 -f \"${STATUS_LOG}\"'"

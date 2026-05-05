@@ -23,8 +23,8 @@ robot:
   cov_width: 0.60
   # 机器人物理宽度，单位米。
   width: 0.42
-  # 机器人最小转弯半径，单位米。
-  min_turning_radius: 0.50
+  # 机器人最小转弯半径，单位米；0.40m 可显著缩短 0.60m 相邻条带的灯泡型转弯。
+  min_turning_radius: 0.40
   # 曲率变化约束上限；值越小，转弯通常越平滑。
   max_diff_curv: 0.30
 
@@ -53,7 +53,7 @@ planner:
   # 约束切分后的子区域短边小于该值时，不送入 Fields2Cover，单位米；0 表示使用动态估算。
   min_plannable_span_m: 1.40
   # 边缘收边环路使用的圆角半径；实际生效值不会小于 min_turning_radius。
-  edge_corner_radius_m: 0.50
+  edge_corner_radius_m: 0.40
   # 边缘收边圆角的 Bezier 拉伸系数；会影响圆角看起来更紧还是更舒展。
   edge_corner_pull: 0.10
   # 每个圆角最少采样点数。

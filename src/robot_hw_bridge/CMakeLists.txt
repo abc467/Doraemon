@@ -19,6 +19,7 @@ catkin_install_python(PROGRAMS
   scripts/mcore_tcp_bridge.py
   scripts/station_tcp_bridge.py
   scripts/dock_supply_manager.py
+  scripts/wheeltec_battery_state_bridge.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
