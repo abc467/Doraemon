@@ -63,8 +63,8 @@ MyPlanner:
 MPPI_Standard_Controller: &mppi_standard_controller
   odom_topic: /odom
   # 目标容忍度（单位：米）
-  goal_tolerance: 0.6      # 机器人与目标的距离小于此值时认为到达目标
-  angle_tolerance: 0.4     # 机器人朝向与目标角度的容忍度（单位：弧度）
+  goal_tolerance: 0.5      # 机器人与目标的距离小于此值时认为到达目标
+  angle_tolerance: 0.3     # 机器人朝向与目标角度的容忍度（单位：弧度）
 
   # 模型参数
   time_steps: 30           # 预测时域步数
@@ -72,15 +72,15 @@ MPPI_Standard_Controller: &mppi_standard_controller
   batch_size: 2000         # 每次优化采样的轨迹数量
 
   # 控制输入噪声（标准差）
-  vx_std: 0.2              # 线速度x的噪声标准差
-  vy_std: 0.2              # 线速度y的噪声标准差（差速驱动应为0）
-  wz_std: 0.2              # 角速度z的噪声标准差
+  vx_std: 0.1              # 线速度x的噪声标准差
+  vy_std: 0.0              # 线速度y的噪声标准差（差速驱动应为0）
+  wz_std: 0.3              # 角速度z的噪声标准差
 
   # 控制输入限制
-  vx_max: 0.5             # 最大线速度x（正方向）
+  vx_max: 0.3             # 最大线速度x（正方向）
   vx_min: 0.0             # 最小线速度x（负方向，倒车）
   vy_max: 0.0              # 最大线速度y（差速驱动应为0）
-  wz_max: 0.3              # 最大角速度z
+  wz_max: 0.6              # 最大角速度z
 
   # 优化参数
   iteration_count: 1       # 每次控制周期的优化迭代次数
@@ -143,7 +143,7 @@ MPPI_Standard_Controller: &mppi_standard_controller
   PathAlignCritic:
      enabled: true
      cost_power: 1
-     cost_weight: 7.8    # 高权重确保严格对齐  10.0
+     cost_weight: 8    # 高权重确保严格对齐  10.0
      max_path_occupancy_ratio: 0.07 # 路径占用比例限制
      offset_from_furthest: 20       # 从最远点开始的偏移量
      trajectory_point_step: 4       # 轨迹点采样步长
@@ -174,14 +174,14 @@ MPPI_Standard_Controller: &mppi_standard_controller
      enabled: true
      threshold_to_consider: 0.4
      cost_power: 1
-     cost_weight: 5.0      # 高权重减少不必要的转向
+     cost_weight: 4.5      # 高权重减少不必要的转向
 
   # 旋转评估（避免原地旋转）
   TwirlingCritic:
      enabled: true
      threshold_to_consider: 0.3
      cost_power: 1
-     cost_weight: 2.0      # 较低权重，仅轻微惩罚旋转
+     cost_weight: 2      # 较低权重，仅轻微惩罚旋转
 
 MPPI_Heavy_Controller:
   <<: *mppi_standard_controller

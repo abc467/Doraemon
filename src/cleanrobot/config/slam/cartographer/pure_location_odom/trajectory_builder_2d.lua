@@ -23,9 +23,9 @@ TRAJECTORY_BUILDER_2D = {
   voxel_filter_size = 0.025,
 
   adaptive_voxel_filter = {
-    max_length = 1,
-    min_num_points = 200,
-    max_range = 20.,
+    max_length = 0.7,
+    min_num_points = 280,
+    max_range = 25.,
   },
 
   loop_closure_adaptive_voxel_filter = {

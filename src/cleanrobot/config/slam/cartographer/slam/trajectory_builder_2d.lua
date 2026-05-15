@@ -54,8 +54,8 @@ TRAJECTORY_BUILDER_2D = {
   },
 
   motion_filter = {
-    max_time_seconds =5,
-    max_distance_meters = 0.2,
+    max_time_seconds = 1.,
+    max_distance_meters = 0.15,
     max_angle_radians = math.rad(1.),
   },
 

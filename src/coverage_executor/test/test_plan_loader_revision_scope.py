@@ -22,6 +22,24 @@ class _FakeStore:
         self.latest_calls = []
         self.active_calls = []
         self.constraint_calls = []
+        self.block_calls = []
+        self.plan_meta = {
+            "plan_id": "plan_001",
+            "zone_id": "zone_a",
+            "zone_version": 2,
+            "frame_id": "map",
+            "map_name": "demo_map",
+            "map_revision_id": "rev_demo_01",
+            "plan_profile_name": "cover_standard",
+            "constraint_version": "constraint_v1",
+            "blocks": 1,
+            "total_length_m": 3.5,
+            "map_id": "map_demo",
+            "map_md5": "md5_demo",
+            "planner_version": "planner_v1",
+            "exec_order_json": [0],
+        }
+        self.blocks_by_id = {}
 
     def get_zone_meta(self, zone_id, *, map_name="", map_revision_id="", map_version=""):
         self.zone_calls.append((zone_id, map_name, map_revision_id, map_version))
@@ -40,29 +58,19 @@ class _FakeStore:
         return ""
 
     def load_plan_meta(self, plan_id):
-        return {
-            "plan_id": str(plan_id or ""),
-            "zone_id": "zone_a",
-            "zone_version": 2,
-            "frame_id": "map",
-            "map_name": "demo_map",
-            "map_revision_id": "rev_demo_01",
-            "plan_profile_name": "cover_standard",
-            "constraint_version": "constraint_v1",
-            "blocks": 1,
-            "total_length_m": 3.5,
-            "map_id": "map_demo",
-            "map_md5": "md5_demo",
-            "planner_version": "planner_v1",
-            "exec_order_json": [0],
-        }
+        meta = dict(self.plan_meta)
+        meta["plan_id"] = str(plan_id or "")
+        return meta
 
     def get_active_constraint_version(self, map_id, map_revision_id=""):
         self.constraint_calls.append((map_id, map_revision_id))
         return "constraint_v1"
 
     def load_block(self, plan_id, block_id):
-        return {
+        self.block_calls.append((str(plan_id or ""), int(block_id)))
+        if self.blocks_by_id and int(block_id) not in self.blocks_by_id:
+            raise KeyError(f"block not found: {plan_id} block {block_id}")
+        block = {
             "block_id": int(block_id),
             "entry_x": 0.0,
             "entry_y": 0.0,
@@ -74,6 +82,8 @@ class _FakeStore:
             "length_m": 1.0,
             "point_count": 2,
         }
+        block.update(self.blocks_by_id.get(int(block_id), {}))
+        return block
 
 
 class PlanLoaderRevisionScopeTest(unittest.TestCase):
@@ -100,6 +110,25 @@ class PlanLoaderRevisionScopeTest(unittest.TestCase):
         self.assertEqual(
             self.loader.store.latest_calls[-1],
             ("zone_a", "cover_standard", None, "demo_map", "rev_demo_01"),
+        )
+
+    def test_load_for_zone_uses_exec_order_for_sparse_block_ids(self):
+        self.loader.store.plan_meta["blocks"] = 3
+        self.loader.store.plan_meta["exec_order_json"] = [0, 3, 2]
+        self.loader.store.blocks_by_id = {0: {}, 2: {}, 3: {}}
+
+        plan = self.loader.load_for_zone(
+            "zone_a",
+            plan_profile_name="cover_standard",
+            map_name="demo_map",
+            map_revision_id="rev_demo_01",
+        )
+
+        self.assertEqual(plan.exec_order, [0, 3, 2])
+        self.assertEqual([b.block_id for b in plan.blocks], [0, 3, 2])
+        self.assertEqual(
+            [block_id for _plan_id, block_id in self.loader.store.block_calls],
+            [0, 3, 2],
         )
 
     def test_get_active_constraint_version_passes_revision_scope(self):

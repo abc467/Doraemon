@@ -2760,35 +2760,6 @@ class SiteEditorServiceNode:
         outer_n, holes_n = normalize_polygon(list(outer or []), [list(r) for r in (holes or [])], prec=3)
         return _open_ring(outer_n or []), [_open_ring(h) for h in (holes_n or [])]
 
-    def _bbox_size(self, points: Sequence[Sequence[float]]) -> Tuple[float, float]:
-        pts = _open_ring(points)
-        if len(pts) < 3:
-            return 0.0, 0.0
-        xs = [float(pt[0]) for pt in pts]
-        ys = [float(pt[1]) for pt in pts]
-        return max(xs) - min(xs), max(ys) - min(ys)
-
-    def _safe_wall_margin_limit(self, outer: Sequence[Sequence[float]], params: PlannerParams) -> float:
-        width_m, height_m = self._bbox_size(outer)
-        short_side_m = min(float(width_m), float(height_m))
-        if short_side_m <= 1e-6:
-            return 0.0
-
-        edge_radius_m = float(params.edge_corner_radius_m or 0.0)
-        if edge_radius_m < 0.0:
-            edge_radius_m = float(self.default_robot_spec.min_turning_radius or 0.0)
-
-        # Keep enough inner span for one effective lane plus a modest
-        # maneuvering envelope. Larger margins on narrow regions are known to
-        # destabilize the Fields2Cover binding and can segfault the process.
-        min_safe_inner_span_m = max(
-            float(self.default_robot_spec.cov_width or 0.0) * 1.5,
-            float(self.default_robot_spec.width or 0.0)
-            + max(edge_radius_m, float(self.default_robot_spec.min_turning_radius or 0.0)) * 1.6,
-            0.25,
-        )
-        return max(0.0, (short_side_m - min_safe_inner_span_m) * 0.5)
-
     def _min_plannable_span_m(self, params: PlannerParams) -> float:
         return min_plannable_span_m(self.default_robot_spec, params)
 
@@ -2811,16 +2782,8 @@ class SiteEditorServiceNode:
         return kept
 
     def _planner_params_for_region(self, outer: Sequence[Sequence[float]], warnings: List[str]) -> PlannerParams:
-        params = replace(self.default_planner_params)
-        requested_wall_margin_m = max(0.0, float(params.wall_margin_m or 0.0))
-        safe_wall_margin_m = self._safe_wall_margin_limit(outer, params)
-        if requested_wall_margin_m > safe_wall_margin_m + 1e-9:
-            params.wall_margin_m = max(0.0, round(float(safe_wall_margin_m) - 0.01, 3))
-            warnings.append(
-                "wall_margin_m %.2fm reduced to %.2fm for narrow-region safety"
-                % (requested_wall_margin_m, float(params.wall_margin_m))
-            )
-        return params
+        del outer, warnings
+        return replace(self.default_planner_params)
 
     def _region_to_map_and_display(
         self,

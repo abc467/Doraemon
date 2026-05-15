@@ -520,6 +520,7 @@ runtime_ensure_frontend_service_session() {
   local enable_odometry_health
   local odometry_health_imu_topic
   local odometry_health_ekf_node_name
+  local start_own_roscore
 
   enable_odometry_health="${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-false}"
   odometry_health_imu_topic="${ODOMETRY_HEALTH_IMU_TOPIC:-/imu_corrected}"
@@ -536,7 +537,15 @@ runtime_ensure_frontend_service_session() {
     tmux kill-session -t "${FRONTEND_TMUX_SESSION}" || true
   fi
 
+  start_own_roscore="true"
   if runtime_ros_master_available; then
+    sleep 1
+    if runtime_ros_master_available; then
+      start_own_roscore="false"
+    fi
+  fi
+
+  if [[ "${start_own_roscore}" == "false" ]]; then
     tmux new-session -d -s "${FRONTEND_TMUX_SESSION}" -n roscore \
       "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; echo \"roscore already running\"; exec sleep infinity'"
   else

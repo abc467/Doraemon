@@ -20,8 +20,9 @@ options = {
   trajectory_builder = TRAJECTORY_BUILDER,
   map_frame = "map",
   tracking_frame = "gyro_link",--base_link --跟踪的坐标系，可以是imu、小车、雷达
-  --published_frame = "base_footprint",--base_footprint ----cartographer发布pose的坐标
-  published_frame = "base_footprint",
+  -- With external wheel odom TF, publish map -> odom and avoid attaching
+  -- base_footprint directly under map during mapping.
+  published_frame = "odom",
   odom_frame = "odom",--cartographer的里程计坐标系
   provide_odom_frame = false,-- cartographer是否发布里程计坐标
   publish_frame_projected_to_2d = false,
@@ -72,6 +73,6 @@ TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.2 --机器人每移�
 TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.) --机器人每旋转1度插入一个关键帧
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05 --地图分辨率
 
-POSE_GRAPH.constraint_builder.min_score = 0.6 -- 对局部子图进行回环检测时的最低分数阈值
+POSE_GRAPH.constraint_builder.min_score = 0.65 -- 收紧弱匹配，减少长通道中模糊约束被写进地图
 
 return options

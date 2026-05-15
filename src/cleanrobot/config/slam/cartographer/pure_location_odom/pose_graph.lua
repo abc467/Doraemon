@@ -15,26 +15,26 @@
 POSE_GRAPH = {
   optimize_every_n_nodes = 20,
   constraint_builder = {
-    sampling_ratio = 0.1, -- ORI:0.3
-    max_constraint_distance = 5., -- 152.
-    min_score = 0.6,
-    global_localization_min_score = 0.6,
+    sampling_ratio = 0.02, -- 继续下调约束采样，优先压低 pure localization 后端 queue
+    max_constraint_distance = 2.5, -- 再收紧约束距离，减少跨门洞/长走廊的模糊匹配
+    min_score = 0.65,
+    global_localization_min_score = 0.65,
     loop_closure_translation_weight = 1.1e4,
     loop_closure_rotation_weight = 1e5,
-    log_matches = true,
+    log_matches = false,
     fast_correlative_scan_matcher = {
-      linear_search_window = 5.,
-      angular_search_window = math.rad(15.),
+      linear_search_window = 3.,
+      angular_search_window = math.rad(10.),
       branch_and_bound_depth = 7,
     },
     ceres_scan_matcher = {
       occupied_space_weight = 20.,
-      translation_weight = 10.,
-      rotation_weight = 1., -- ORI: 1
+      translation_weight = 15.,
+      rotation_weight = 2.,
       ceres_solver_options = {
         use_nonmonotonic_steps = true,
         max_num_iterations = 10, -- ORI: 10
-        num_threads = 3, -- ORI:1
+        num_threads = 2, --减轻后端约束构建时的线程争抢
       },
     },
     fast_correlative_scan_matcher_3d = {
@@ -67,8 +67,8 @@ POSE_GRAPH = {
     rotation_weight = 1.6e4,
     local_slam_pose_translation_weight = 1e5,
     local_slam_pose_rotation_weight = 1e5,
-    odometry_translation_weight = 1e4,
-    odometry_rotation_weight = 1e4,
+    odometry_translation_weight = 3e4,
+    odometry_rotation_weight = 3e4,
     fixed_frame_pose_translation_weight = 1e1,
     fixed_frame_pose_rotation_weight = 1e2,
     fixed_frame_pose_use_tolerant_loss = false,
@@ -79,13 +79,13 @@ POSE_GRAPH = {
     fix_z_in_3d = false,
     ceres_solver_options = {
       use_nonmonotonic_steps = false,
-      max_num_iterations = 50, -- 50
-      num_threads = 7,
+      max_num_iterations = 30, -- pure localization 下先减少单次优化开销
+      num_threads = 4, --避免优化线程数过高挤占 controller/costmap 的 CPU 时间片
     },
   },
   max_num_final_iterations = 200,
   global_sampling_ratio = 0.05, -- ORI:0.05
-  log_residual_histograms = true,
+  log_residual_histograms = false,
   global_constraint_search_after_n_seconds = 10.,
    --overlapping_submaps_trimmer_2d = {
      --fresh_submaps_count = 1,

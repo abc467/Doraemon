@@ -9,6 +9,7 @@
 #include <costmap_2d/cost_values.h>
 #include <geometry_msgs/PointStamped.h>
 #include <pluginlib/class_list_macros.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 namespace coverage_constraints_nav {
 

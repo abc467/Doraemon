@@ -75,17 +75,17 @@ resolve_workspace_setup() {
     local repo_root="${1:-${_SOURCE_SLAM_RUNTIME_ENV_DIR}/..}"
     repo_root="$(cd "${repo_root}" && pwd)"
 
-    if [[ -f "${repo_root}/install/setup.bash" ]]; then
-        echo "${repo_root}/install/setup.bash"
-        return 0
-    fi
-
     if [[ -f "${repo_root}/devel/setup.bash" ]]; then
         echo "${repo_root}/devel/setup.bash"
         return 0
     fi
 
-    echo "[ERROR] Could not find install/setup.bash (preferred) or devel/setup.bash (source-workspace fallback) under ${repo_root}." >&2
+    if [[ -f "${repo_root}/install/setup.bash" ]]; then
+        echo "${repo_root}/install/setup.bash"
+        return 0
+    fi
+
+    echo "[ERROR] Could not find devel/setup.bash (preferred) or install/setup.bash (fallback) under ${repo_root}." >&2
     return 1
 }
 

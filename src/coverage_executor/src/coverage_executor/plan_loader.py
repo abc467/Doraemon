@@ -118,14 +118,18 @@ class PlanLoader:
 
         meta = self.store.load_plan_meta(plan_id)
         exec_order = meta.get("exec_order_json") or list(range(int(meta["blocks"])))
+        exec_order = [int(x) for x in exec_order]
         frame_id = meta.get("frame_id") or "map"
         plan_profile_name_loaded = meta.get("plan_profile_name") or "cover_standard"
 
         blocks: List[LoadedBlock] = []
-        # 按 block_id 全量读出，然后按 exec_order 排序
         block_map: Dict[int, LoadedBlock] = {}
-        for bid in range(int(meta["blocks"])):
-            b = self.store.load_block(plan_id, bid)
+        # Persisted block ids can be sparse after planner filtering; exec_order
+        # is the source of truth for which blocks should run.
+        for block_id in exec_order:
+            if block_id in block_map:
+                continue
+            b = self.store.load_block(plan_id, block_id)
             path = b["path_xyyaw"]
             entry = (float(b["entry_x"]), float(b["entry_y"]), float(b["entry_yaw"]))
             exitp = (float(b["exit_x"]), float(b["exit_y"]), float(b["exit_yaw"]))
@@ -155,7 +159,7 @@ class PlanLoader:
             map_revision_id=str(meta.get("map_revision_id") or ""),
             plan_profile_name=str(plan_profile_name_loaded),
             constraint_version=str(meta.get("constraint_version") or ""),
-            exec_order=[int(x) for x in exec_order],
+            exec_order=exec_order,
             blocks=blocks,
             total_length_m=float(meta["total_length_m"]),
             map_id=str(meta.get("map_id") or ""),

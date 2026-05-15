@@ -14,6 +14,23 @@ XY = Tuple[float, float]
 XYZ = Tuple[float, float, float]
 
 
+class _OrderedSwath:
+    def __init__(self, swath: Any, reverse: bool = False):
+        self.swath = swath
+        self.reverse = bool(reverse)
+
+
+def _finite_xy(p: Any) -> Optional[XY]:
+    try:
+        x = float(p[0])
+        y = float(p[1])
+    except Exception:
+        return None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
+
+
 # =========================
 # stderr hard mute (keeps your original behavior)
 # =========================
@@ -230,6 +247,9 @@ def _ls_point_at(ls, i: int):
 
 
 def swath_polyline_xyz(sw) -> List[XYZ]:
+    if isinstance(sw, _OrderedSwath):
+        pts = swath_polyline_xyz(sw.swath)
+        return list(reversed(pts)) if sw.reverse else pts
     if sw is None:
         return []
     for gname in ["getPath", "getCenterLine", "getLine", "path", "centerLine", "line"]:
@@ -266,6 +286,9 @@ def swath_polyline_xyz(sw) -> List[XYZ]:
 
 
 def swath_endpoints_xyz(sw) -> Tuple[Optional[XYZ], Optional[XYZ]]:
+    if isinstance(sw, _OrderedSwath):
+        a, b = swath_endpoints_xyz(sw.swath)
+        return (b, a) if sw.reverse else (a, b)
     pts = swath_polyline_xyz(sw)
     if len(pts) >= 2:
         return pts[0], pts[-1]
@@ -284,20 +307,77 @@ def swath_endpoints_xyz(sw) -> Tuple[Optional[XYZ], Optional[XYZ]]:
 
 
 # =========================
-# Official snake sorted swaths
+# Python snake sorted swaths
 # =========================
 def snake_sorted_swaths(swaths_b, mute: bool = True):
-    if not hasattr(f2c, "RP_Snake"):
-        return None
-    rp_snake = f2c.RP_Snake()
-    with suppress_stderr(enabled=mute):
-        for fn_name in ["genSortedSwaths", "genSortedSwath", "sortedSwaths"]:
-            if hasattr(rp_snake, fn_name):
-                try:
-                    return getattr(rp_snake, fn_name)(swaths_b)
-                except Exception:
-                    pass
-    return None
+    del mute
+    n = swaths_size(swaths_b)
+    if n <= 0:
+        return []
+
+    items = []
+    best_dir = (1.0, 0.0)
+    best_len = 0.0
+    for i in range(n):
+        sw = swath_at(swaths_b, i)
+        if sw is None:
+            continue
+        pts = swath_polyline_xyz(sw)
+        if len(pts) >= 2:
+            a = _finite_xy(pts[0])
+            b = _finite_xy(pts[-1])
+        else:
+            a3, b3 = swath_endpoints_xyz(sw)
+            a = _finite_xy(a3) if a3 is not None else None
+            b = _finite_xy(b3) if b3 is not None else None
+        if a is None or b is None:
+            continue
+
+        dx = float(b[0] - a[0])
+        dy = float(b[1] - a[1])
+        length = math.hypot(dx, dy)
+        if length <= 1e-9:
+            continue
+        if length > best_len:
+            best_len = length
+            best_dir = (dx / length, dy / length)
+        items.append({
+            "swath": sw,
+            "a": a,
+            "b": b,
+            "mid": ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5),
+        })
+
+    if not items:
+        return []
+    if len(items) == 1:
+        return [_OrderedSwath(items[0]["swath"], False)]
+
+    vx, vy = best_dir
+    if vx < -1e-9 or (abs(vx) <= 1e-9 and vy < 0.0):
+        vx, vy = -vx, -vy
+    nx, ny = -vy, vx
+
+    def _along(p: XY) -> float:
+        return float(p[0]) * vx + float(p[1]) * vy
+
+    def _across(p: XY) -> float:
+        return float(p[0]) * nx + float(p[1]) * ny
+
+    items.sort(key=lambda item: (_across(item["mid"]), _along(item["mid"])))
+
+    ordered = []
+    prev_end: Optional[XY] = None
+    for item in items:
+        a = item["a"]
+        b = item["b"]
+        if prev_end is None:
+            reverse = _along(b) < _along(a)
+        else:
+            reverse = dist_xy(prev_end, b) < dist_xy(prev_end, a)
+        ordered.append(_OrderedSwath(item["swath"], reverse))
+        prev_end = a if reverse else b
+    return ordered
 
 
 # =========================

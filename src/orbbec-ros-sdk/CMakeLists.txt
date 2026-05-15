@@ -89,6 +89,7 @@ find_package(Boost REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Boost COMPONENTS filesystem system REQUIRED)
+include(CheckIncludeFileCXX)
 # check if boost was found
 if(Boost_FOUND)
     message(STATUS "Boost found!")
@@ -96,6 +97,19 @@ if(Boost_FOUND)
     message(STATUS "Boost_LIBRARIES: ${Boost_LIBRARIES}")
 else()
     message(FATAL_ERROR "Boost not found!")
+endif()
+
+check_include_file_cxx(dwarf.h ORBBEC_HAS_DWARF_H)
+find_path(ORBBEC_LIBDW_INCLUDE_DIR elfutils/libdw.h)
+find_library(ORBBEC_LIBDW_LIBRARY dw)
+if(ORBBEC_HAS_DWARF_H AND ORBBEC_LIBDW_INCLUDE_DIR AND ORBBEC_LIBDW_LIBRARY)
+  set(ORBBEC_BACKWARD_DEFINITIONS BACKWARD_HAS_DW=1)
+  list(APPEND COMMON_LIBDW_INCLUDE_DIRS ${ORBBEC_LIBDW_INCLUDE_DIR})
+  list(APPEND COMMON_LIBDW_LIBRARIES ${ORBBEC_LIBDW_LIBRARY})
+  message(STATUS "Orbbec crash stack trace: using libdw")
+else()
+  set(ORBBEC_BACKWARD_DEFINITIONS BACKWARD_HAS_BACKTRACE_SYMBOL=1)
+  message(WARNING "Orbbec crash stack trace: libdw headers/library not found, using backtrace symbols")
 endif()
 
 # Additional dependencies based on options
@@ -145,6 +159,7 @@ set(COMMON_INCLUDE_DIRS
   ${Boost_INCLUDE_DIRS}
   ${OpenCV_INCLUDED_DIRS}
   ${ORBBEC_INCLUDE_DIR}
+  ${COMMON_LIBDW_INCLUDE_DIRS}
 )
 if (USE_NV_HW_DECODER)
   list(APPEND COMMON_INCLUDE_DIRS
@@ -207,7 +222,7 @@ set(COMMON_LINK_LIBRARIES
   -L${ORBBEC_LIBS_DIR}
   Threads::Threads
   -lrt
-  -ldw # for stack trace
+  ${COMMON_LIBDW_LIBRARIES}
 )
 
 if (USE_RK_HW_DECODER)
@@ -226,10 +241,12 @@ endif ()
 add_library(${PROJECT_NAME} ${SOURCE_FILES})
 target_link_libraries(${PROJECT_NAME} PRIVATE ${COMMON_LINK_LIBRARIES})
 target_include_directories(${PROJECT_NAME} PUBLIC ${COMMON_INCLUDE_DIRS})
+target_compile_definitions(${PROJECT_NAME} PRIVATE ${ORBBEC_BACKWARD_DEFINITIONS})
 
 add_library(${PROJECT_NAME}_nodelet ${SOURCE_FILES} src/ros_nodelet.cpp)
 target_link_libraries(${PROJECT_NAME}_nodelet ${COMMON_LINK_LIBRARIES})
 target_include_directories(${PROJECT_NAME}_nodelet PUBLIC ${COMMON_INCLUDE_DIRS})
+target_compile_definitions(${PROJECT_NAME}_nodelet PRIVATE ${ORBBEC_BACKWARD_DEFINITIONS})
 
 
 # Add dependencies
@@ -241,6 +258,7 @@ macro(add_orbbec_executable TARGET SOURCES)
   add_executable(${TARGET} ${SOURCES})
   target_link_libraries(${TARGET} ${COMMON_LINK_LIBRARIES} ${PROJECT_NAME})
   target_include_directories(${TARGET} PUBLIC ${COMMON_INCLUDE_DIRS})
+  target_compile_definitions(${TARGET} PRIVATE ${ORBBEC_BACKWARD_DEFINITIONS})
 endmacro()
 
 # Add nodes

@@ -34,7 +34,7 @@ options = {
   use_landmarks = false,
   num_laser_scans = 1,
   num_multi_echo_laser_scans = 0,
-  num_subdivisions_per_laser_scan = 1,
+  num_subdivisions_per_laser_scan = 2,
   num_point_clouds = 0,
   lookup_transform_timeout_sec = 0.2,
   submap_publish_period_sec = 0.3,
@@ -50,31 +50,36 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 
-TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
-TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 1.
+-- 工厂环境优先保证窄通道和长直道中的稳定性，减少 scan matcher 在重复结构上的过度跳动。
+TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 4
+-- 让激光栅格一致性在匹配里更有发言权，不再过度跟随 odom 先验。
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 8.
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 5.
-TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 10.
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 12.
 
 
 TRAJECTORY_BUILDER_2D.min_range = 0.1
-TRAJECTORY_BUILDER_2D.max_range = 25. --定位模式下可以下调此参数 使用更准确的数据且降低计算量，默认25
+TRAJECTORY_BUILDER_2D.max_range = 25. --回收远距量程，减少长走廊远端点云的计算量与重复结构歧义
 TRAJECTORY_BUILDER_2D.missing_data_ray_length = 1.
 TRAJECTORY_BUILDER_2D.use_imu_data = true
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 10.
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 1e-1
+TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.10
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(10.)
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 4.
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 1.5e-1
 
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 40 
+
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 80 
 POSE_GRAPH.optimization_problem.huber_scale = 1e1
-POSE_GRAPH.optimize_every_n_nodes = 40 --越小优化的频率快 相对的性能消耗越大,默认20
+POSE_GRAPH.optimize_every_n_nodes = 60 --进一步降低优化触发频率，减少长程运行中的后端追账
 POSE_GRAPH.global_sampling_ratio = 0.001 --回环检测的频率 （特别消耗性能资源,默认0.003
-POSE_GRAPH.constraint_builder.min_score = 0.6
-POSE_GRAPH.constraint_builder.global_localization_min_score = 0.6
+POSE_GRAPH.constraint_builder.min_score = 0.65
+POSE_GRAPH.constraint_builder.global_localization_min_score = 0.65
 
-TRAJECTORY_BUILDER.pure_localization_trimmer.max_submaps_to_keep = 3 --定位模式下维护的最大submap数量
-TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 1.0 --降低关键帧间隔，给纯定位更多激光约束
-TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.2 --
-TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.5)
+TRAJECTORY_BUILDER.pure_localization_trimmer.max_submaps_to_keep = 4 --trim 触发时保留更多上下文，减少 pure localization 重对齐跳变
+TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 0.7 --稍微减少节点生成密度，给 pure localization 留出更多实时性余量
+TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.15
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.7)
 TRAJECTORY_BUILDER_2D.submaps.grid_options_2d.resolution = 0.05 -- 默认0.05 
   
 
