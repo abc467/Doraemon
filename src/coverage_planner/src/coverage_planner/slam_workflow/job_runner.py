@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from coverage_planner.slam_workflow.api import operation_name, running_phase_for_operation
+from coverage_planner.slam_workflow.api import STOP_MAPPING, operation_name, running_phase_for_operation
 from coverage_planner.slam_workflow_semantics import (
     is_manual_assist_error_code,
     localization_is_ready,
@@ -29,6 +29,7 @@ class CartographerSlamJobRunner:
         operation = int(snapshot.get("operation") or 0)
         runtime_operation = int(snapshot.get("runtime_operation") or 0)
         op_name = str(snapshot.get("operation_name") or operation_name(operation))
+        stop_mapping_operation = bool(operation == STOP_MAPPING or op_name == "stop_mapping")
 
         snapshot = backend._job_state.update_job_fields(
             snapshot,
@@ -84,18 +85,22 @@ class CartographerSlamJobRunner:
         finished_status = "manual_assist_required" if manual_assist_required else ("succeeded" if result_success else "failed")
         finished_phase = "manual_assist_required" if manual_assist_required else ("done" if result_success else "failed")
         finished_progress_text = result_message if manual_assist_required else ("completed" if result_success else result_message)
-        resolved_map_name = str(getattr(resp, "map_name", "") or snapshot.get("requested_map_name") or "")
+        resolved_map_name = (
+            ""
+            if stop_mapping_operation
+            else str(getattr(resp, "map_name", "") or snapshot.get("requested_map_name") or "")
+        )
         response_map_revision_id = str(getattr(resp, "map_revision_id", "") or "").strip()
         runtime_revision_id = ""
         runtime_context = getattr(backend, "_runtime_context", None)
         runtime_revision_getter = getattr(runtime_context, "runtime_map_revision_id", None)
-        if callable(runtime_revision_getter):
+        if (not stop_mapping_operation) and callable(runtime_revision_getter):
             try:
                 runtime_revision_id = str(runtime_revision_getter() or "").strip()
             except Exception:
                 runtime_revision_id = ""
-        resolved_map_revision_id = response_map_revision_id or runtime_revision_id
-        if not resolved_map_revision_id:
+        resolved_map_revision_id = "" if stop_mapping_operation else (response_map_revision_id or runtime_revision_id)
+        if (not stop_mapping_operation) and not resolved_map_revision_id:
             resolver = getattr(backend._job_state, "resolve_map_revision_id", None)
             if callable(resolver):
                 try:
@@ -109,7 +114,7 @@ class CartographerSlamJobRunner:
                     ).strip()
                 except Exception:
                     resolved_map_revision_id = ""
-        if not resolved_map_revision_id:
+        if (not stop_mapping_operation) and not resolved_map_revision_id:
             resolved_map_revision_id = str(snapshot.get("requested_map_revision_id") or "").strip()
         runtime_map_match = bool(
             bool(getattr(resp, "success", False))

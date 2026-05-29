@@ -42,6 +42,7 @@ catkin_install_python(PROGRAMS
   scripts/slam_runtime_manager_node.py
   scripts/odometry_health_node.py
   scripts/localization_lifecycle_manager_node.py
+  scripts/manual_drive_service_node.py
   scripts/slam_api_service_node.py
   scripts/map_asset_service_node.py
   scripts/planner_server_node.py

@@ -62,6 +62,7 @@
   <arg name="camera2_bind_by_usb_port" default="false"/>
   <arg name="mechanical_connect_enable" default="false"/>
   <arg name="dock_pose_score_thresh" default="0.00012"/>
+  <arg name="dock_pose_score_topic" default="/dock_pose_score"/>
   <arg name="enable_mcore_bridge" default="true"/>
   <arg name="mcore_enable_cmd_vel" default="true"/>
   <arg name="mcore_server_ip" default="192.168.16.10"/>
@@ -99,6 +100,7 @@
     <arg name="enable_docking_stack" value="$(arg enable_docking_stack)"/>
     <arg name="mechanical_connect_enable" value="$(arg mechanical_connect_enable)"/>
     <arg name="dock_pose_score_thresh" value="$(arg dock_pose_score_thresh)"/>
+    <arg name="dock_pose_score_topic" value="$(arg dock_pose_score_topic)"/>
   </include>
 
   <group if="$(arg start_wheeltec_base)">
@@ -205,6 +207,8 @@
     <arg name="odometry_health_imu_topic" value="$(arg odometry_health_imu_topic)"/>
     <arg name="odometry_health_ekf_node_name" value="$(arg odometry_health_ekf_node_name)"/>
     <arg name="start_localization_lifecycle_manager" value="false"/>
+    <arg name="dock_calibration_score_topic" value="$(arg dock_pose_score_topic)"/>
+    <arg name="dock_calibration_score_threshold" value="$(arg dock_pose_score_thresh)"/>
     <arg name="run_map_migration" value="false"/>
   </include>
 

@@ -33,6 +33,13 @@ bool map_topic_fresh
 float32 map_age_s
 bool tracked_pose_fresh
 float32 tracked_pose_age_s
+string tracked_pose_frame
+float64 tracked_pose_x
+float64 tracked_pose_y
+float64 tracked_pose_theta
+time tracked_pose_stamp
+uint64 tracked_pose_stamp_ms
+string tracked_pose_source
 
 string mission_state
 string phase

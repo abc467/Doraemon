@@ -29,6 +29,11 @@
   <arg name="dock_supply_enable" default="true"/>
   <arg name="dock_supply_set_defer_exit_service" default="/dock_supply/set_defer_exit"/>
   <arg name="dock_supply_exit_service" default="/dock_supply/exit"/>
+  <arg name="enable_dock_calibration_service" default="true"/>
+  <arg name="dock_calibration_score_topic" default="/dock_pose_score"/>
+  <arg name="dock_calibration_storage_path" default="/data/coverage/dock_calibration.yaml"/>
+  <arg name="dock_calibration_score_threshold" default="0.00012"/>
+  <arg name="dock_calibration_target_dist" default="0.607"/>
   <arg name="app_restart_localization_service" default="/cartographer/runtime/app/restart_localization"/>
   <arg name="app_slam_submit_command_service" default="/clean_robot_server/app/submit_slam_command"/>
   <arg name="app_slam_get_job_service" default="/clean_robot_server/app/get_slam_job"/>
@@ -132,6 +137,11 @@
     <arg name="dock_supply_enable" value="$(arg dock_supply_enable)"/>
     <arg name="dock_supply_set_defer_exit_service" value="$(arg dock_supply_set_defer_exit_service)"/>
     <arg name="dock_supply_exit_service" value="$(arg dock_supply_exit_service)"/>
+    <arg name="enable_dock_calibration_service" value="$(arg enable_dock_calibration_service)"/>
+    <arg name="dock_calibration_score_topic" value="$(arg dock_calibration_score_topic)"/>
+    <arg name="dock_calibration_storage_path" value="$(arg dock_calibration_storage_path)"/>
+    <arg name="dock_calibration_score_threshold" value="$(arg dock_calibration_score_threshold)"/>
+    <arg name="dock_calibration_target_dist" value="$(arg dock_calibration_target_dist)"/>
     <arg name="scheduler_enable" value="$(arg scheduler_enable)"/>
     <arg name="load_schedules_yaml" value="$(arg load_schedules_yaml)"/>
     <arg name="schedules_yaml" value="$(arg schedules_yaml)"/>

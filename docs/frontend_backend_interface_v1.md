@@ -267,6 +267,8 @@
 - `add`：纳管外部地图资产
 - `modify`：修改地图元数据、启停状态、设为当前地图
 - `Delete`：软删除 / 禁用地图
+- `hardDelete`：物理删除一个已停用地图 revision，释放磁盘空间
+- `cleanupDisabled`：批量清理已停用地图 revision，释放磁盘空间
 
 核心数据类型：
 
@@ -277,6 +279,7 @@
 - 地图列表
 - 当前地图切换
 - 地图启停管理
+- 地图资产回收站 / 磁盘清理
 
 备注：
 
@@ -284,6 +287,15 @@
 - 地图资产是“纳管外部地图”，不是前端直接上传原始 SLAM 文件的完整产品化接口
 - 当前标准外部地图导入目录为：`/data/maps/imports`
 - 前端 `Import Current Map Asset` 应按 `map_name` 从该目录读取 `<map_name>.pbstream` 后纳管为正式地图资产
+- `Delete` 只做软删除 / 禁用，不删除 `.pbstream/.yaml/.pgm`
+- `hardDelete` 只允许删除已经软删除的 `map_revision_id`，建议前端先 `dry_run=true` 展示候选和阻断原因，再二次确认后用 `dry_run=false`
+- `hardDelete` 真正执行时，`confirm_token` 必须等于目标 `map_revision_id` 或 `DELETE:<map_revision_id>`
+- 回收站“永久删除地图 revision”应使用 `hardDelete + cascade=true`：dry-run 返回 `affected_zones_count / affected_plans_count / affected_tasks_count / affected_schedules_count / affected_zone_versions_count / reclaimable_bytes / confirm_token`
+- `cascade=true` 真正执行时，必须回传 dry-run 给出的 `confirm_token`，格式为 `CASCADE_DELETE:<map_revision_id>`
+- `cascade=true` 会删除该 revision 下属 `zones / zone_versions / plans / zone_active_plans / zone_editor_metadata` 以及绑定该 revision 的任务和调度，再删除地图文件；响应的 `deleted_business_refs` 是 JSON summary
+- `cleanupDisabled` 默认也是 dry-run；真正批量执行时，`confirm_token=CLEANUP_DISABLED`
+- `cleanupDisabled` 可选 `min_age_days` 和 `max_reclaim_bytes` 控制清理范围；`map_name` 为空表示全局扫描已停用 revision
+- 后端始终阻止硬删除 active map、runtime map、pending switch map 以及不在 `maps_root` 下的路径；普通 `hardDelete` 还会阻止有业务引用的 revision，`cascade=true` 则会把业务引用纳入影响范围并在确认后删除
 - 运行/运维口径可参考：`docs/slam_runtime_architecture_v1.md`
 
 ### 2.2 任务管理
@@ -626,6 +638,14 @@
 - `localization_valid`
 - `runtime_map_ready`
 - `active_map_match`
+- `tracked_pose_frame`
+- `tracked_pose_x`
+- `tracked_pose_y`
+- `tracked_pose_theta`
+- `tracked_pose_fresh`
+- `tracked_pose_age_s`
+- `tracked_pose_stamp_ms`
+- `tracked_pose_source`
 - `task_running`
 - `can_switch_map_and_localize`
 - `can_relocalize`
@@ -644,6 +664,12 @@
 - 此时 `warnings[]` 会带 `slam submit backend unavailable`
 - `can_switch_map_and_localize / can_relocalize` 还包含公共重定位前置条件：`localization backend available + odometry valid`
 - `can_start_mapping` 还包含 `mapping runtime available + odometry valid`
+- `can_stop_mapping` 只表示当前可退出建图运行时；停止建图不会自动切回 active map 或触发重定位
+- `tracked_pose_*` 来自后端订阅 Cartographer `/tracked_pose` 后归一化出的机器人实时位姿；`tracked_pose_frame == "map"` 时，`x/y` 单位为米，`theta` 为 ROS map 坐标系下弧度朝向
+- 前端绘制机器人位置时不要用 `/clean_robot_server/odometry_state`；该消息只表示 odom 链路健康，不是地图坐标系位姿
+- 前端可把 `tracked_pose_fresh && tracked_pose_frame == "map"` 作为“有可绘制位姿”；在定位模式下，后端已把 `localization_valid + active_map_match` 纳入 `tracked_pose_fresh`，定位丢失或地图不一致时会置为 false
+- 任务级可信定位仍建议显式检查 `localization_valid && active_map_match && current_mode == "localization"`，建图模式下的 fresh pose 只表示 SLAM session 内可绘制
+- Site Gateway 若要输出 camelCase，可归一化为 `robotPose = { frameId: tracked_pose_frame, mapName: runtime_map_name || active_map_name, x: tracked_pose_x, y: tracked_pose_y, theta: tracked_pose_theta, fresh: tracked_pose_fresh, ageS: tracked_pose_age_s, localized: localization_valid, stampMs: tracked_pose_stamp_ms, source: tracked_pose_source }`
 - 任务层 `can_start_task` 当前也会优先参考 fresh `slam_state.task_ready`，所以前后端不需要再自行拼一套“近似 SLAM ready”逻辑
 - 当 `slam_state` fresh 时，任务层本地 `active_map / runtime_map / odometry / localization` 更多作为诊断和 fallback，不再重复当成另一套正式 SLAM 判决
 
@@ -712,7 +738,68 @@
 - 自动恢复相关事件的流程语义见：
   - `docs/slam_runtime_architecture_v1.md`
 
-### 4.2 清扫进度：`coverage_msgs/RunProgress`
+### 4.2 手动移动 / 点动控制
+
+Site Gateway 对前端暴露：
+
+- `POST /api/manual-drive/command`
+- `GET /api/manual-drive/status`
+
+后端 ROS canonical 服务：
+
+- `/clean_robot_server/app/manual_drive_command -> cleanrobot_app_msgs/ManualDriveCommand`
+- `/clean_robot_server/app/get_manual_drive_status -> cleanrobot_app_msgs/GetManualDriveStatus`
+- 运动输出：`/cmd_vel -> geometry_msgs/Twist`
+
+坐标与底盘语义：
+
+- 当前默认按差速底盘处理，不支持横移
+- `forward/backward` 写 `Twist.linear.x`，单位 m/s
+- `turn_left/turn_right` 写 `Twist.angular.z`，单位 rad/s；左转为正，右转为负
+- 默认限幅：`linear_mps_limit=0.3`，`angular_radps_limit=0.5`
+- 默认后端发布频率：`20Hz`
+- 默认 watchdog / 单次 move 最大持续时间：`1000ms`；前端按住期间建议每 `250ms` 左右发送一次 `move`，`duration_ms=900` 可被后端完整使用
+
+`POST /api/manual-drive/command` 映射请求：
+
+```json
+{
+  "action": "move",
+  "direction": "forward",
+  "linear_mps": 0.12,
+  "angular_radps": 0.35,
+  "duration_ms": 300
+}
+```
+
+Gateway 必须把登录态补进 ROS 请求：
+
+- `caller_role`: `service | engineer | admin | operator`
+- `caller_capabilities`: 可包含 `manual_drive`
+
+后端默认允许 `operator / service / engineer / admin`，或具备 `manual_drive` capability。
+默认不要求前端传角色；即使 `caller_role` 缺失，手动点动也会放行到运动命令层。
+
+返回字段：
+
+- `success / accepted / message / error_code`
+- `blocked_reasons[]`
+- `enabled / active / allowed`
+- `last_direction / last_command_at`
+- `watchdog_timeout_ms / linear_mps_limit / angular_radps_limit`
+- `cmd_vel_topic / cmd_vel_type / supports_strafe / supported_directions[]`
+
+默认行为：
+
+- `stop` 幂等，任何状态下都会发布 0 速度
+- `move` 默认不再检查任务状态、SLAM 状态、定位状态、地图一致性、odom 状态、platform/combined status 或 caller role
+- 后端收到 `move` 后刷新“当前手动控制目标速度 + 过期时间”，并以固定频率持续发布 `/cmd_vel`，不会在两次 move 心跳之间主动清零
+- 后端仍会做方向校验、速度限幅、短时 watchdog，以及异常/超时自动 0 速度停车
+- 若超过 `duration_ms` 或 watchdog 超时时间未收到下一次 `move`，后端自动发布 0 速度
+- `stop` 优先清零目标速度；如果旧 move 请求在 stop 之后才进入处理，会被识别为 stale move 并忽略
+- 如现场需要恢复严格门禁，可通过 launch/rosparam 打开 `require_role / require_task_state / require_slam_state / require_odometry_state / require_combined_status`
+
+### 4.3 清扫进度：`coverage_msgs/RunProgress`
 
 关键字段：
 
@@ -753,7 +840,7 @@
 - 不要仅根据 `run_progress.state` 决定任务公共状态、按钮门禁或任务是否 ready
 - 如果 `run_progress` 与 `task_state.public_state / system_readiness` 冲突，应优先信任务快照与 readiness
 
-### 4.3 设备综合状态：`robot_platform_msgs/CombinedStatus`
+### 4.4 设备综合状态：`robot_platform_msgs/CombinedStatus`
 
 关键字段：
 
@@ -777,7 +864,7 @@
 
 - 当前 in-tree provider / consumer 已统一切到 `robot_platform_msgs/CombinedStatus`
 
-### 4.4 充电桩状态：`robot_platform_msgs/StationStatus`
+### 4.5 充电桩状态：`robot_platform_msgs/StationStatus`
 
 字段：
 

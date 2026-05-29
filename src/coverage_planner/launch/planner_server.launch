@@ -10,6 +10,7 @@
   <arg name="enable_rect_zone_planner" default="true"/>
   <arg name="enable_slam_runtime_manager" default="true"/>
   <arg name="enable_slam_api_service" default="true"/>
+  <arg name="enable_manual_drive_service" default="true"/>
   <arg name="enable_odometry_health" default="false"/>
   <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
   <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
@@ -61,6 +62,22 @@
   <arg name="odometry_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_odometry_status"/>
   <arg name="slam_submit_command_app_contract_param_ns" default="/clean_robot_server/contracts/app/submit_slam_command"/>
   <arg name="slam_get_job_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_slam_job"/>
+  <arg name="manual_drive_command_app_service_name" default="/clean_robot_server/app/manual_drive_command"/>
+  <arg name="manual_drive_status_app_service_name" default="/clean_robot_server/app/get_manual_drive_status"/>
+  <arg name="manual_drive_contract_param_ns" default="/clean_robot_server/contracts/app/manual_drive"/>
+  <arg name="manual_drive_command_contract_param_ns" default="/clean_robot_server/contracts/app/manual_drive_command"/>
+  <arg name="manual_drive_status_contract_param_ns" default="/clean_robot_server/contracts/app/get_manual_drive_status"/>
+  <arg name="manual_drive_cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="manual_drive_combined_status_topic" default="/combined_status"/>
+  <arg name="manual_drive_require_role" default="false"/>
+  <arg name="manual_drive_require_slam_state" default="false"/>
+  <arg name="manual_drive_require_task_state" default="false"/>
+  <arg name="manual_drive_require_odometry_state" default="false"/>
+  <arg name="manual_drive_require_combined_status" default="false"/>
+  <arg name="manual_drive_linear_mps_limit" default="0.3"/>
+  <arg name="manual_drive_angular_radps_limit" default="0.5"/>
+  <arg name="manual_drive_watchdog_timeout_ms" default="1000"/>
+  <arg name="manual_drive_publish_hz" default="20.0"/>
   <arg name="slam_runtime_manager_app_contract_param_ns" default="/cartographer/runtime/contracts/app/operate"/>
   <arg name="slam_runtime_submit_job_app_contract_param_ns" default="/cartographer/runtime/contracts/app/submit_job"/>
   <arg name="slam_runtime_get_job_app_contract_param_ns" default="/cartographer/runtime/contracts/app/get_job"/>
@@ -141,6 +158,31 @@
     <param name="default_plan_profile_name" value="$(arg default_plan_profile_name)"/>
     <param name="default_sys_profile_name" value="$(arg default_sys_profile_name)"/>
   </node>
+
+  <group if="$(arg enable_manual_drive_service)">
+    <node pkg="coverage_planner" type="manual_drive_service_node.py" name="manual_drive_service" output="screen" respawn="true" respawn_delay="2.0">
+      <param name="robot_id" value="$(arg robot_id)"/>
+      <param name="command_service_name" value="$(arg manual_drive_command_app_service_name)"/>
+      <param name="status_service_name" value="$(arg manual_drive_status_app_service_name)"/>
+      <param name="contract_param_ns" value="$(arg manual_drive_contract_param_ns)"/>
+      <param name="command_contract_param_ns" value="$(arg manual_drive_command_contract_param_ns)"/>
+      <param name="status_contract_param_ns" value="$(arg manual_drive_status_contract_param_ns)"/>
+      <param name="cmd_vel_topic" value="$(arg manual_drive_cmd_vel_topic)"/>
+      <param name="linear_mps_limit" value="$(arg manual_drive_linear_mps_limit)"/>
+      <param name="angular_radps_limit" value="$(arg manual_drive_angular_radps_limit)"/>
+      <param name="watchdog_timeout_ms" value="$(arg manual_drive_watchdog_timeout_ms)"/>
+      <param name="publish_hz" value="$(arg manual_drive_publish_hz)"/>
+      <param name="slam_state_topic" value="$(arg slam_state_topic_name)"/>
+      <param name="task_state_topic" value="$(arg task_state_topic_name)"/>
+      <param name="odometry_state_topic" value="$(arg odometry_state_topic_name)"/>
+      <param name="combined_status_topic" value="$(arg manual_drive_combined_status_topic)"/>
+      <param name="require_role" value="$(arg manual_drive_require_role)"/>
+      <param name="require_slam_state" value="$(arg manual_drive_require_slam_state)"/>
+      <param name="require_task_state" value="$(arg manual_drive_require_task_state)"/>
+      <param name="require_odometry_state" value="$(arg manual_drive_require_odometry_state)"/>
+      <param name="require_combined_status" value="$(arg manual_drive_require_combined_status)"/>
+    </node>
+  </group>
 
   <group if="$(arg enable_slam_runtime_manager)">
     <node pkg="coverage_planner" type="slam_runtime_manager_node.py" name="slam_runtime_manager" output="screen" respawn="true" respawn_delay="2.0">

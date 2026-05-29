@@ -14,6 +14,7 @@
   <arg name="start_map_asset_service" default="true"/>
   <arg name="enable_site_editor_service" default="true"/>
   <arg name="enable_rect_zone_planner" default="false"/>
+  <arg name="enable_manual_drive_service" default="true"/>
   <arg name="enable_odometry_health" default="true"/>
   <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
   <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
@@ -43,6 +44,22 @@
   <arg name="odometry_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_odometry_status"/>
   <arg name="slam_submit_command_app_contract_param_ns" default="/clean_robot_server/contracts/app/submit_slam_command"/>
   <arg name="slam_get_job_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_slam_job"/>
+  <arg name="manual_drive_command_app_service_name" default="/clean_robot_server/app/manual_drive_command"/>
+  <arg name="manual_drive_status_app_service_name" default="/clean_robot_server/app/get_manual_drive_status"/>
+  <arg name="manual_drive_contract_param_ns" default="/clean_robot_server/contracts/app/manual_drive"/>
+  <arg name="manual_drive_command_contract_param_ns" default="/clean_robot_server/contracts/app/manual_drive_command"/>
+  <arg name="manual_drive_status_contract_param_ns" default="/clean_robot_server/contracts/app/get_manual_drive_status"/>
+  <arg name="manual_drive_cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="manual_drive_combined_status_topic" default="/combined_status"/>
+  <arg name="manual_drive_require_role" default="false"/>
+  <arg name="manual_drive_require_slam_state" default="false"/>
+  <arg name="manual_drive_require_task_state" default="false"/>
+  <arg name="manual_drive_require_odometry_state" default="false"/>
+  <arg name="manual_drive_require_combined_status" default="false"/>
+  <arg name="manual_drive_linear_mps_limit" default="0.3"/>
+  <arg name="manual_drive_angular_radps_limit" default="0.5"/>
+  <arg name="manual_drive_watchdog_timeout_ms" default="1000"/>
+  <arg name="manual_drive_publish_hz" default="20.0"/>
 
   <include if="$(arg start_rosbridge)" file="$(find rosbridge_server)/launch/rosbridge_websocket.launch">
     <arg name="address" value="$(arg rosbridge_address)"/>
@@ -57,6 +74,7 @@
         respawn="true"
         respawn_delay="2.0">
     <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="ops_db_path" value="$(arg ops_db_path)"/>
     <param name="robot_id" value="$(arg robot_id)"/>
     <param name="maps_root" value="$(arg maps_root)"/>
     <param name="external_maps_root" value="$(arg external_maps_root)"/>
@@ -71,6 +89,7 @@
     <arg name="robot_id" value="$(arg robot_id)"/>
     <arg name="enable_rect_zone_planner" value="$(arg enable_rect_zone_planner)"/>
     <arg name="enable_site_editor_service" value="$(arg enable_site_editor_service)"/>
+    <arg name="enable_manual_drive_service" value="$(arg enable_manual_drive_service)"/>
     <arg name="enable_odometry_health" value="$(arg enable_odometry_health)"/>
     <arg name="odometry_health_imu_topic" value="$(arg odometry_health_imu_topic)"/>
     <arg name="odometry_health_ekf_node_name" value="$(arg odometry_health_ekf_node_name)"/>
@@ -100,5 +119,21 @@
     <arg name="odometry_status_app_contract_param_ns" value="$(arg odometry_status_app_contract_param_ns)"/>
     <arg name="slam_submit_command_app_contract_param_ns" value="$(arg slam_submit_command_app_contract_param_ns)"/>
     <arg name="slam_get_job_app_contract_param_ns" value="$(arg slam_get_job_app_contract_param_ns)"/>
+    <arg name="manual_drive_command_app_service_name" value="$(arg manual_drive_command_app_service_name)"/>
+    <arg name="manual_drive_status_app_service_name" value="$(arg manual_drive_status_app_service_name)"/>
+    <arg name="manual_drive_contract_param_ns" value="$(arg manual_drive_contract_param_ns)"/>
+    <arg name="manual_drive_command_contract_param_ns" value="$(arg manual_drive_command_contract_param_ns)"/>
+    <arg name="manual_drive_status_contract_param_ns" value="$(arg manual_drive_status_contract_param_ns)"/>
+    <arg name="manual_drive_cmd_vel_topic" value="$(arg manual_drive_cmd_vel_topic)"/>
+    <arg name="manual_drive_combined_status_topic" value="$(arg manual_drive_combined_status_topic)"/>
+    <arg name="manual_drive_require_role" value="$(arg manual_drive_require_role)"/>
+    <arg name="manual_drive_require_slam_state" value="$(arg manual_drive_require_slam_state)"/>
+    <arg name="manual_drive_require_task_state" value="$(arg manual_drive_require_task_state)"/>
+    <arg name="manual_drive_require_odometry_state" value="$(arg manual_drive_require_odometry_state)"/>
+    <arg name="manual_drive_require_combined_status" value="$(arg manual_drive_require_combined_status)"/>
+    <arg name="manual_drive_linear_mps_limit" value="$(arg manual_drive_linear_mps_limit)"/>
+    <arg name="manual_drive_angular_radps_limit" value="$(arg manual_drive_angular_radps_limit)"/>
+    <arg name="manual_drive_watchdog_timeout_ms" value="$(arg manual_drive_watchdog_timeout_ms)"/>
+    <arg name="manual_drive_publish_hz" value="$(arg manual_drive_publish_hz)"/>
   </include>
 </launch>

@@ -120,13 +120,16 @@ class WorkflowRuntimeExecutor:
         return self._restart(request, target_name)
 
     def stop_mapping(self, *, robot_id: str, map_name: str, map_revision_id: str = "", operation: int):
-        snapshot = self._get_runtime_snapshot(robot_id)
-        target_name = resolve_target_map_name(map_name, snapshot.active_map_name)
-        return self._restart_localization(
-            robot_id=robot_id,
-            map_name=target_name,
-            map_revision_id=str(map_revision_id or "").strip(),
+        del robot_id, map_name, map_revision_id
+        return self._response_factory(
+            success=True,
+            message="mapping stopped; localization not restored. Use switch_map_and_localize to select a map and relocalize",
+            error_code="",
             operation=operation,
+            map_name="",
+            map_revision_id="",
+            localization_state="not_localized",
+            current_mode="localization",
         )
 
     def _restart(self, request: LocalizationRequest, target_name: str):

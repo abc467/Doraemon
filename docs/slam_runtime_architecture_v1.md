@@ -433,9 +433,18 @@ flowchart LR
 Frontend / Gateway
   -> /clean_robot_server/app/get_slam_status
   -> slam_api_service
-  -> 聚合 plan_store + ops_store + odometry_state + runtime job state + /map fresh + /tracked_pose fresh
+  -> 聚合 plan_store + ops_store + odometry_state + runtime job state + /map fresh + /tracked_pose(map pose)
   -> 返回 SlamState
 ```
+
+`SlamState.tracked_pose_*` 是前端地图画布的 canonical 机器人位姿来源：
+
+- 后端订阅 Cartographer `/tracked_pose`，该 topic 在当前 Cartographer 配置中由 `map_frame = "map"` 和 `publish_tracked_pose = true` 产生
+- `tracked_pose_frame` 固定期望为 `map`；`tracked_pose_x / tracked_pose_y` 单位为米，`tracked_pose_theta` 为弧度
+- `/clean_robot_server/odometry_state` 只用于 odom 健康门禁，不应用作地图画布上的真实定位位姿
+- 前端判断可绘制：`tracked_pose_fresh && tracked_pose_frame == "map"`
+- 定位模式下，后端已把 `localization_valid + active_map_match` 纳入 `tracked_pose_fresh`；建图模式下，fresh 只表示 SLAM session 内有可绘制 pose
+- 前端判断可用于任务级可信定位：`localization_valid && active_map_match && current_mode == "localization"`
 
 ### 7.2 `prepare_for_task` 时序
 
@@ -444,7 +453,6 @@ sequenceDiagram
     participant FE as Frontend / Gateway
     participant API as slam_api_service
     participant RT as slam_runtime_manager
-    participant EX as WorkflowRuntimeExecutor
     participant AD as CartographerRuntimeAdapter
     participant TR as runtime_transport
     participant RF as robot_runtime_flags
@@ -587,12 +595,16 @@ sequenceDiagram
 
     FE->>API: submit_slam_command(stop_mapping)
     API->>RT: /cartographer/runtime/app/submit_job
-    RT->>EX: stop_mapping(active_map)
-    EX->>AD: restart_localization(active_map)
-    AD-->>RT: localized
+    RT->>AD: stop_mapping()
+    AD->>AD: stop_runtime + clear runtime map identity
+    AD-->>RT: localization / not_localized
     RT-->>API: job succeeded
-    API-->>FE: runtime returns to localization ready
+    API-->>FE: mapping stopped; use switch_map_and_localize to select a map and relocalize
 ```
+
+`stop_mapping` 只表达“退出建图运行时”。它不再隐式使用 active map 执行
+`restart_localization`，因此低匹配分数、人工辅助和地图激活结果应由后续
+`switch_map_and_localize / activate_map_revision / prepare_for_task` 流程承接。
 
 ## 8. 配置与资产真源
 
@@ -662,6 +674,14 @@ sequenceDiagram
 - `runtime_assets.py`
 
 统一负责。
+
+地图资产删除分两层：
+
+1. `Delete` 是软删除 / 禁用，只改变资产可用状态，不释放磁盘空间。
+2. `hardDelete / cleanupDisabled` 是受保护的物理清理，只允许清理已禁用、非 active、非 runtime、非 pending switch、无业务引用、且路径位于 `/data/maps` 下的 revision。
+3. 回收站永久删除使用 `hardDelete + cascade=true`，先 dry-run 展示影响范围和确认 token，再二次确认级联删除该 revision 下属业务资产与地图文件。
+
+前端和运维工具应先走 dry-run 获取候选、可回收空间和阻断原因，再二次确认执行物理删除。
 
 ## 9. 已退场或不再 canonical 的东西
 

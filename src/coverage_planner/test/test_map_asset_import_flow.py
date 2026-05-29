@@ -14,6 +14,7 @@ from nav_msgs.msg import OccupancyGrid
 from coverage_planner.map_asset_import import register_imported_map_asset
 from coverage_planner.map_asset_import import normalize_import_verification_mode
 from coverage_planner.map_io import write_occupancy_to_yaml_pgm
+from coverage_planner.ops_store.store import OperationsStore
 from coverage_planner.plan_store.store import PlanStore
 
 
@@ -60,6 +61,177 @@ def _make_occ():
     occ.info.origin.orientation.w = 1.0
     occ.data = [0, 100, -1, 0]
     return occ
+
+
+def _make_map_gc_req(
+    *,
+    operation: int,
+    map_name: str = "",
+    map_revision_id: str = "",
+    dry_run: bool = True,
+    cascade: bool = False,
+    confirm_token: str = "",
+    min_age_days: int = 0,
+    max_reclaim_bytes: int = 0,
+):
+    req = type("Req", (), {})()
+    req.get = 0
+    req.add = 1
+    req.modify = 2
+    req.Delete = 3
+    req.getAll = 4
+    req.hardDelete = 5
+    req.cleanupDisabled = 6
+    req.ENABLE_KEEP = 0
+    req.ENABLE_DISABLE = 1
+    req.ENABLE_ENABLE = 2
+    req.operation = int(operation)
+    req.map_name = str(map_name or "")
+    req.map = type(
+        "MapArg",
+        (),
+        {
+            "map_name": str(map_name or ""),
+            "map_revision_id": str(map_revision_id or ""),
+            "description": "",
+        },
+    )()
+    req.set_active = False
+    req.enabled_state = 0
+    req.dry_run = bool(dry_run)
+    req.force = False
+    req.cascade = bool(cascade)
+    req.min_age_days = int(min_age_days or 0)
+    req.max_reclaim_bytes = int(max_reclaim_bytes or 0)
+    req.confirm_token = str(confirm_token or "")
+    return req
+
+
+def _register_gc_asset(
+    store,
+    maps_root: str,
+    *,
+    map_name: str = "gc_demo",
+    revision_id: str = "rev_gc_demo_01",
+    enabled: bool = False,
+    lifecycle_status: str = "saved_unverified",
+    verification_status: str = "pending",
+):
+    artifact_dir = os.path.join(maps_root, "revisions", map_name, revision_id)
+    os.makedirs(artifact_dir, exist_ok=True)
+    pgm_path, yaml_path = write_occupancy_to_yaml_pgm(_make_occ(), artifact_dir, base_name=map_name)
+    pbstream_path = os.path.join(artifact_dir, map_name + ".pbstream")
+    with open(pbstream_path, "wb") as fh:
+        fh.write(b"pbstream-for-gc")
+    store.upsert_map_asset(
+        map_name=map_name,
+        revision_id=revision_id,
+        display_name=map_name,
+        enabled=bool(enabled),
+        description="gc",
+        yaml_path=yaml_path,
+        pgm_path=pgm_path,
+        pbstream_path=pbstream_path,
+        frame_id="map",
+        resolution=0.05,
+        origin=[0.0, 0.0, 0.0],
+        lifecycle_status=lifecycle_status,
+        verification_status=verification_status,
+    )
+    return store.resolve_map_asset(revision_id=revision_id) or {}
+
+
+def _attach_gc_business_refs(store, ops, *, revision_id: str, map_name: str = "gc_demo"):
+    store.conn.execute(
+        """
+        INSERT INTO zones(
+          map_revision_id, map_name, zone_id, display_name, enabled,
+          current_zone_version, updated_ts
+        ) VALUES(?,?,?,?,?,?,?);
+        """,
+        (revision_id, map_name, "zone_a", "zone_a", 1, 1, 1.0),
+    )
+    store.conn.execute(
+        """
+        INSERT INTO zone_versions(
+          map_revision_id, map_name, zone_id, zone_version, frame_id,
+          outer_json, holes_json, map_id, map_md5, created_ts
+        ) VALUES(?,?,?,?,?,?,?,?,?,?);
+        """,
+        (revision_id, map_name, "zone_a", 1, "map", "[]", "[]", "", "", 1.0),
+    )
+    store.conn.execute(
+        """
+        INSERT INTO plans(
+          plan_id, map_revision_id, map_name, zone_id, zone_version, frame_id,
+          plan_profile_name, params_json, robot_json, blocks, total_length_m,
+          exec_order_json, map_id, map_md5, constraint_version, planner_version, created_ts
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+        """,
+        (
+            "plan_gc",
+            revision_id,
+            map_name,
+            "zone_a",
+            1,
+            "map",
+            "cover_standard",
+            "{}",
+            "{}",
+            1,
+            1.0,
+            "[]",
+            "",
+            "",
+            "",
+            "test",
+            1.0,
+        ),
+    )
+    store.conn.execute(
+        """
+        INSERT INTO plan_blocks(
+          plan_id, block_id, point_count, length_m
+        ) VALUES(?,?,?,?);
+        """,
+        ("plan_gc", 0, 2, 1.0),
+    )
+    store.conn.execute(
+        """
+        INSERT INTO zone_active_plans(
+          map_revision_id, map_name, zone_id, plan_profile_name, active_plan_id, updated_ts
+        ) VALUES(?,?,?,?,?,?);
+        """,
+        (revision_id, map_name, "zone_a", "cover_standard", "plan_gc", 1.0),
+    )
+    store.conn.execute(
+        """
+        INSERT INTO zone_editor_metadata(
+          map_revision_id, map_name, zone_id, zone_version, updated_ts
+        ) VALUES(?,?,?,?,?);
+        """,
+        (revision_id, map_name, "zone_a", 1, 1.0),
+    )
+    store.conn.commit()
+    ops.upsert_job(
+        job_id="301",
+        job_name="gc task",
+        map_name=map_name,
+        map_revision_id=revision_id,
+        zone_id="zone_a",
+        plan_profile_name="cover_standard",
+        sys_profile_name="standard",
+        default_clean_mode="auto",
+        enabled=True,
+    )
+    ops.upsert_job_schedule(
+        schedule_id="sched_gc",
+        job_id="301",
+        enabled=True,
+        schedule_type="daily",
+        time_local="09:00",
+    )
+    ops.mark_schedule_fired("sched_gc", 1.0)
 
 
 class MapAssetImportFlowTest(unittest.TestCase):
@@ -964,6 +1136,274 @@ class MapAssetImportFlowTest(unittest.TestCase):
         self.assertEqual(node.store.disable_calls[0]["revision_id"], "rev_demo_head")
         self.assertFalse(bool(resp.map.is_active))
         self.assertEqual(str(resp.map.active_revision_id or ""), "rev_demo_active")
+
+    def test_map_asset_service_hard_delete_dry_run_keeps_files_and_revision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            asset = _register_gc_asset(store, maps_root, revision_id="rev_gc_dry_run", enabled=False)
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_dry_run",
+                    dry_run=True,
+                )
+            )
+
+            self.assertTrue(bool(resp.success))
+            self.assertIn("dry-run", str(resp.message or ""))
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_dry_run"))
+            self.assertTrue(os.path.exists(str(asset.get("pbstream_path") or "")))
+
+    def test_map_asset_service_hard_delete_requires_disabled_revision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_enabled", enabled=True)
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_enabled",
+                    dry_run=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertIn("blocked", str(resp.message or ""))
+
+    def test_map_asset_service_hard_delete_blocks_active_revision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            _register_gc_asset(
+                store,
+                maps_root,
+                revision_id="rev_gc_active",
+                enabled=True,
+                lifecycle_status="available",
+                verification_status="verified",
+            )
+            store.set_active_map_revision(revision_id="rev_gc_active", robot_id="robot_a")
+            store.disable_map_revision(revision_id="rev_gc_active", robot_id="robot_a")
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_active",
+                    dry_run=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertIn("blocked", str(resp.message or ""))
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_active"))
+
+    def test_map_asset_service_hard_delete_blocks_referenced_revision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_referenced", enabled=False)
+            store.conn.execute(
+                """
+                INSERT INTO zones(
+                  map_revision_id, map_name, zone_id, display_name, enabled,
+                  current_zone_version, updated_ts
+                ) VALUES(?,?,?,?,?,?,?);
+                """,
+                ("rev_gc_referenced", "gc_demo", "zone_a", "zone_a", 1, 1, 1.0),
+            )
+            store.conn.commit()
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_referenced",
+                    dry_run=False,
+                    confirm_token="rev_gc_referenced",
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertIn("blocked", str(resp.message or ""))
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_referenced"))
+
+    def test_map_asset_service_cascade_hard_delete_dry_run_reports_impact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            asset = _register_gc_asset(store, maps_root, revision_id="rev_gc_cascade_preview", enabled=False)
+            _attach_gc_business_refs(store, ops, revision_id="rev_gc_cascade_preview")
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_cascade_preview",
+                    dry_run=True,
+                    cascade=True,
+                )
+            )
+
+            self.assertTrue(bool(resp.success))
+            self.assertEqual(getattr(resp, "affected_zones_count", 1), 1)
+            self.assertEqual(getattr(resp, "affected_zone_versions_count", 1), 1)
+            self.assertEqual(getattr(resp, "affected_plans_count", 1), 1)
+            self.assertEqual(getattr(resp, "affected_tasks_count", 1), 1)
+            self.assertEqual(getattr(resp, "affected_schedules_count", 1), 1)
+            self.assertEqual(getattr(resp, "confirm_token", "CASCADE_DELETE:rev_gc_cascade_preview"), "CASCADE_DELETE:rev_gc_cascade_preview")
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_cascade_preview"))
+            self.assertTrue(os.path.exists(str(asset.get("pbstream_path") or "")))
+            self.assertEqual(len(ops.list_jobs()), 1)
+            self.assertEqual(len(ops.list_schedules()), 1)
+
+    def test_map_asset_service_cascade_hard_delete_requires_confirmation_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_cascade_token", enabled=False)
+            _attach_gc_business_refs(store, ops, revision_id="rev_gc_cascade_token")
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_cascade_token",
+                    dry_run=False,
+                    cascade=True,
+                    confirm_token="",
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertIn("confirmation", str(resp.message or ""))
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_cascade_token"))
+            self.assertEqual(len(ops.list_jobs()), 1)
+
+    def test_map_asset_service_cascade_hard_delete_removes_business_refs_and_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            asset = _register_gc_asset(store, maps_root, revision_id="rev_gc_cascade_delete", enabled=False)
+            _attach_gc_business_refs(store, ops, revision_id="rev_gc_cascade_delete")
+            paths = [
+                str(asset.get("pbstream_path") or ""),
+                str(asset.get("yaml_path") or ""),
+                str(asset.get("pgm_path") or ""),
+            ]
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_cascade_delete",
+                    dry_run=False,
+                    cascade=True,
+                    confirm_token="CASCADE_DELETE:rev_gc_cascade_delete",
+                )
+            )
+
+            self.assertTrue(bool(resp.success), str(resp.message or ""))
+            self.assertIsNone(store.resolve_map_revision(revision_id="rev_gc_cascade_delete"))
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM zones WHERE map_revision_id=?;", ("rev_gc_cascade_delete",)).fetchone()["count"], 0)
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) AS count FROM plans WHERE map_revision_id=?;", ("rev_gc_cascade_delete",)).fetchone()["count"], 0)
+            self.assertEqual(len(ops.list_jobs()), 0)
+            self.assertEqual(len(ops.list_schedules()), 0)
+            if hasattr(resp, "deleted_business_refs"):
+                self.assertIn('"tasks":1', str(resp.deleted_business_refs or ""))
+            for path in paths:
+                self.assertFalse(os.path.exists(path), path)
+
+    def test_map_asset_service_hard_delete_removes_disabled_revision_and_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            asset = _register_gc_asset(store, maps_root, revision_id="rev_gc_delete", enabled=False)
+            paths = [
+                str(asset.get("pbstream_path") or ""),
+                str(asset.get("yaml_path") or ""),
+                str(asset.get("pgm_path") or ""),
+            ]
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_delete",
+                    dry_run=False,
+                    confirm_token="rev_gc_delete",
+                )
+            )
+
+            self.assertTrue(bool(resp.success))
+            self.assertIsNone(store.resolve_map_revision(revision_id="rev_gc_delete"))
+            for path in paths:
+                self.assertFalse(os.path.exists(path), path)
+
+    def test_map_asset_service_cleanup_disabled_uses_confirmation_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_cleanup", enabled=False)
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            blocked = node._handle(
+                _make_map_gc_req(
+                    operation=6,
+                    dry_run=False,
+                    confirm_token="",
+                )
+            )
+            self.assertFalse(bool(blocked.success))
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_cleanup"))
+
+            cleaned = node._handle(
+                _make_map_gc_req(
+                    operation=6,
+                    dry_run=False,
+                    confirm_token="CLEANUP_DISABLED",
+                )
+            )
+            self.assertTrue(bool(cleaned.success))
+            self.assertIsNone(store.resolve_map_revision(revision_id="rev_gc_cleanup"))
 
     def test_migrate_map_assets_set_active_prefers_revision_pointer(self):
         fake_store = mock.Mock()

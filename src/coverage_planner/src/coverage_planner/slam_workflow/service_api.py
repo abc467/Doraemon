@@ -19,7 +19,7 @@ from cleanrobot_app_msgs.srv import (
 
 from coverage_planner.app_msg_clone import clone_app_slam_job_state
 from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
-from coverage_planner.slam_workflow.api import SUPPORTED_SUBMIT_OPERATIONS, normalize_map_name
+from coverage_planner.slam_workflow.api import STOP_MAPPING, SUPPORTED_SUBMIT_OPERATIONS, normalize_map_name
 from coverage_planner.slam_workflow.executor import LocalizationRequest
 
 
@@ -217,23 +217,27 @@ class SlamRuntimeServiceController:
         backend = self._backend
         runtime_adapter = backend._runtime_adapter
         workflow_executor = backend._workflow_executor
-        try:
-            effective_map_name = self._resolve_effective_map_name(
-                robot_id=robot_id,
-                map_name=map_name,
-                map_revision_id=map_revision_id,
-            )
-        except ValueError as exc:
-            return self.response(
-                success=False,
-                message=str(exc),
-                error_code="map_scope_mismatch",
-                operation=operation,
-                map_name=normalize_map_name(map_name),
-                map_revision_id=map_revision_id,
-                localization_state="not_localized",
-                current_mode="",
-            )
+        if int(operation) == STOP_MAPPING:
+            effective_map_name = ""
+            map_revision_id = ""
+        else:
+            try:
+                effective_map_name = self._resolve_effective_map_name(
+                    robot_id=robot_id,
+                    map_name=map_name,
+                    map_revision_id=map_revision_id,
+                )
+            except ValueError as exc:
+                return self.response(
+                    success=False,
+                    message=str(exc),
+                    error_code="map_scope_mismatch",
+                    operation=operation,
+                    map_name=normalize_map_name(map_name),
+                    map_revision_id=map_revision_id,
+                    localization_state="not_localized",
+                    current_mode="",
+                )
         if operation == int(AppOperateSlamRuntime._request_class.restart_localization):
             return runtime_adapter.restart_localization(
                 robot_id=robot_id,
@@ -373,27 +377,31 @@ class SlamRuntimeServiceController:
         backend = self._backend
         job_state = backend._job_state
         robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
+        operation = int(req.operation)
         raw_map_name = normalize_map_name(req.map_name)
         map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
-        try:
-            map_name = self._resolve_effective_map_name(
-                robot_id=robot_id,
-                map_name=raw_map_name,
-                map_revision_id=map_revision_id,
-            )
-        except ValueError as exc:
-            job = self._job_state_msg(None)
-            return AppSubmitSlamCommandResponse(
-                accepted=False,
-                message=str(exc),
-                error_code="map_scope_mismatch",
-                job_id="",
-                operation=int(req.operation),
-                map_name=raw_map_name,
-                job=job,
-            )
+        if operation == STOP_MAPPING:
+            map_name = ""
+            map_revision_id = ""
+        else:
+            try:
+                map_name = self._resolve_effective_map_name(
+                    robot_id=robot_id,
+                    map_name=raw_map_name,
+                    map_revision_id=map_revision_id,
+                )
+            except ValueError as exc:
+                job = self._job_state_msg(None)
+                return AppSubmitSlamCommandResponse(
+                    accepted=False,
+                    message=str(exc),
+                    error_code="map_scope_mismatch",
+                    job_id="",
+                    operation=operation,
+                    map_name=raw_map_name,
+                    job=job,
+                )
         save_map_name = normalize_map_name(getattr(req, "save_map_name", ""))
-        operation = int(req.operation)
         if operation not in SUPPORTED_SUBMIT_OPERATIONS:
             job = self._job_state_msg(None)
             return AppSubmitSlamCommandResponse(

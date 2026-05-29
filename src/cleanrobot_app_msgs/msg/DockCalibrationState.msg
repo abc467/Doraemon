@@ -1,0 +1,58 @@
+string robot_id
+time stamp
+string frame_id
+
+string active_map_name
+string active_map_id
+string active_map_md5
+string runtime_map_name
+string runtime_map_id
+string runtime_map_md5
+bool runtime_map_ready
+bool active_map_match
+string localization_state
+bool localization_valid
+
+bool tracked_pose_fresh
+float32 tracked_pose_age_s
+string tracked_pose_frame
+float64 current_x
+float64 current_y
+float64 current_yaw
+
+bool stage1_set
+float64 stage1_x
+float64 stage1_y
+float64 stage1_yaw
+
+bool stage2_set
+float64 stage2_x
+float64 stage2_y
+float64 stage2_yaw
+
+bool dock_pose_fresh
+float32 dock_pose_age_s
+string dock_pose_frame
+float64 dock_pose_x
+float64 dock_pose_y
+float64 dock_pose_yaw
+
+bool dock_score_fresh
+float32 dock_score_age_s
+float32 dock_score
+float32 dock_score_threshold
+bool dock_score_lower_is_better
+
+float32 dock_target_dist
+float32 stage2_min_extra_dist_m
+float32 stage2_min_dock_pose_x
+float32 stage2_abs_y_max
+float32 stage2_abs_yaw_max_rad
+bool dock_pose_quality_ok
+bool stage2_save_recommended
+
+string saved_map_name
+string saved_map_id
+string saved_map_md5
+string storage_path
+string[] warnings

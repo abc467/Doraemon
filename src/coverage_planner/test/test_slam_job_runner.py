@@ -66,11 +66,11 @@ class _FakeServiceApi:
         return SimpleNamespace(
             success=True,
             error_code="",
-            message="mapping stopped; localization requires manual assist",
-            map_name="demo_map",
-            map_revision_id="rev_demo_01",
+            message="mapping stopped; localization not restored. Use switch_map_and_localize to select a map and relocalize",
+            map_name="",
+            map_revision_id="",
             current_mode="localization",
-            localization_state="manual_assist_required",
+            localization_state="not_localized",
         )
 
     def response(self, **kwargs):
@@ -83,7 +83,7 @@ class _FakeRuntimeContext:
 
 
 class SlamJobRunnerTest(unittest.TestCase):
-    def test_successful_stop_mapping_keeps_manual_assist_state(self):
+    def test_successful_stop_mapping_finishes_without_map_relocalization(self):
         backend = SimpleNamespace(
             robot_id="local_robot",
             _lock=threading.Lock(),
@@ -98,10 +98,12 @@ class SlamJobRunnerTest(unittest.TestCase):
 
         finished = backend._job_events.finished[-1]
         self.assertTrue(finished["success"])
-        self.assertEqual(finished["status"], "manual_assist_required")
-        self.assertEqual(finished["phase"], "manual_assist_required")
-        self.assertEqual(finished["localization_state"], "manual_assist_required")
-        self.assertTrue(finished["manual_assist_required"])
+        self.assertEqual(finished["status"], "succeeded")
+        self.assertEqual(finished["phase"], "done")
+        self.assertEqual(finished["localization_state"], "not_localized")
+        self.assertEqual(finished["resolved_map_name"], "")
+        self.assertEqual(finished["resolved_map_revision_id"], "")
+        self.assertFalse(finished["manual_assist_required"])
         self.assertFalse(finished["localization_valid"])
 
     def test_persisted_success_manual_assist_snapshot_normalizes_status(self):
@@ -135,7 +137,7 @@ class SlamJobRunnerTest(unittest.TestCase):
         self.assertTrue(snapshot["manual_assist_required"])
         self.assertFalse(snapshot["localization_valid"])
 
-    def test_stop_mapping_manual_assist_retry_action_prepares_for_task(self):
+    def test_stop_mapping_manual_assist_retry_action_uses_switch_map(self):
         metadata = manual_assist_metadata(
             required=True,
             operation_name="stop_mapping",
@@ -143,8 +145,8 @@ class SlamJobRunnerTest(unittest.TestCase):
             map_revision_id="rev_demo_01",
         )
 
-        self.assertEqual(metadata["retry_action"], "prepare_for_task")
-        self.assertIn("retry prepare_for_task", metadata["guidance"])
+        self.assertEqual(metadata["retry_action"], "switch_map_and_localize")
+        self.assertIn("retry switch_map_and_localize", metadata["guidance"])
 
 
 if __name__ == "__main__":

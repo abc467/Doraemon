@@ -3,6 +3,7 @@
 
 import os
 import sys
+import math
 import time
 import unittest
 from unittest import mock
@@ -16,9 +17,11 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from cleanrobot_app_msgs.msg import OdometryState, SlamJobState
+from geometry_msgs.msg import PoseStamped
 
 from coverage_planner.ops_store.store import RobotRuntimeStateRecord
 from coverage_planner.slam_workflow.api_state import SlamApiStateController
+from coverage_planner.slam_workflow.node_wiring import SlamApiNodeWiring
 
 
 class _FakePlanStore:
@@ -100,7 +103,12 @@ class _FakeBackend:
         self._odometry_state_ts = time.time()
         self._map_ts = time.time()
         self._tracked_pose_ts = time.time()
+        self._tracked_pose_frame = "map"
+        self._tracked_pose_xyyaw = (1.25, -2.5, 0.75)
+        self._tracked_pose_stamp_s = 1779000000.123
+        self._tracked_pose_source = "topic:/tracked_pose"
         self.map_topic = "/map"
+        self.tracked_pose_topic = "/tracked_pose"
         self.map_identity_timeout_s = 2.0
         self.map_fresh_timeout_s = 10.0
         self.tracked_pose_fresh_timeout_s = 2.0
@@ -120,6 +128,26 @@ class SlamApiStateControllerTest(unittest.TestCase):
     def setUp(self):
         self.backend = _FakeBackend()
         self.controller = SlamApiStateController(self.backend)
+
+    def test_api_wiring_caches_tracked_pose_values(self):
+        msg = PoseStamped()
+        msg.header.frame_id = "/map"
+        msg.header.stamp.secs = 10
+        msg.header.stamp.nsecs = 500000000
+        msg.pose.position.x = 3.0
+        msg.pose.position.y = 4.0
+        yaw = 1.2
+        msg.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.orientation.w = math.cos(yaw / 2.0)
+
+        SlamApiNodeWiring(self.backend, rospy_module=mock.Mock()).on_tracked_pose(msg)
+
+        self.assertEqual(self.backend._tracked_pose_frame, "map")
+        self.assertEqual(self.backend._tracked_pose_source, "topic:/tracked_pose")
+        self.assertAlmostEqual(self.backend._tracked_pose_stamp_s, 10.5)
+        self.assertEqual(self.backend._tracked_pose_xyyaw[0], 3.0)
+        self.assertEqual(self.backend._tracked_pose_xyyaw[1], 4.0)
+        self.assertAlmostEqual(self.backend._tracked_pose_xyyaw[2], yaw)
 
     @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
     @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
@@ -151,6 +179,56 @@ class SlamApiStateControllerTest(unittest.TestCase):
     @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
     @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
     @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
+    def test_build_state_exposes_map_frame_tracked_pose(self, get_param, time_now, _scope, _identity):
+        time_now.return_value = mock.Mock()
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/mode": "localization",
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "localized",
+            "/cartographer/runtime/localization_valid": True,
+        }.get(key, default)
+
+        msg = self.controller.build_state(robot_id="local_robot", refresh_map_identity=False)
+
+        self.assertTrue(msg.tracked_pose_fresh)
+        self.assertEqual(msg.tracked_pose_frame, "map")
+        self.assertEqual(msg.tracked_pose_x, 1.25)
+        self.assertEqual(msg.tracked_pose_y, -2.5)
+        self.assertEqual(msg.tracked_pose_theta, 0.75)
+        self.assertEqual(msg.tracked_pose_stamp_ms, 1779000000123)
+        self.assertEqual(msg.tracked_pose_source, "topic:/tracked_pose")
+
+    @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
+    @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
+    def test_build_state_marks_tracked_pose_not_fresh_when_localization_not_ready(
+        self,
+        get_param,
+        time_now,
+        _scope,
+        _identity,
+    ):
+        time_now.return_value = mock.Mock()
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/mode": "localization",
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "not_localized",
+            "/cartographer/runtime/localization_valid": False,
+        }.get(key, default)
+
+        msg = self.controller.build_state(robot_id="local_robot", refresh_map_identity=False)
+
+        self.assertFalse(msg.localization_valid)
+        self.assertFalse(msg.tracked_pose_fresh)
+        self.assertEqual(msg.tracked_pose_frame, "map")
+        self.assertEqual(msg.tracked_pose_x, 1.25)
+        self.assertIn("tracked_pose not trusted because localization is not ready", list(msg.warnings))
+
+    @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
+    @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
     def test_build_state_task_ready_false_when_odometry_invalid(self, get_param, time_now, _scope, _identity):
         time_now.return_value = mock.Mock()
         self.backend._odometry_state_msg.odom_valid = False
@@ -172,6 +250,34 @@ class SlamApiStateControllerTest(unittest.TestCase):
         self.assertFalse(msg.can_verify_map_revision)
         self.assertFalse(msg.can_activate_map_revision)
         self.assertFalse(msg.can_start_mapping)
+
+    @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("", "", False))
+    @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("", ""))
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
+    def test_build_state_allows_stop_mapping_without_odometry_or_restart_backend(
+        self,
+        get_param,
+        time_now,
+        _scope,
+        _identity,
+    ):
+        time_now.return_value = mock.Mock()
+        self.backend._odometry_state_msg.odom_valid = False
+        self.backend._runtime_client.restart_backend_available = lambda: False
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/mode": "mapping",
+            "/cartographer/runtime/current_mode": "mapping",
+            "/cartographer/runtime/localization_state": "not_localized",
+            "/cartographer/runtime/localization_valid": False,
+        }.get(key, default)
+
+        msg = self.controller.build_state(robot_id="local_robot", refresh_map_identity=False)
+
+        self.assertTrue(msg.can_stop_mapping)
+        self.assertFalse(msg.can_start_mapping)
+        self.assertFalse(msg.can_switch_map_and_localize)
+        self.assertFalse(msg.can_relocalize)
 
     @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
     @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))

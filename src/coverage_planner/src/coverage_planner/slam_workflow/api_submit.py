@@ -19,6 +19,7 @@ from coverage_planner.slam_workflow.api import (
     ASSET_MUST_NOT_EXIST_OPERATIONS,
     PATH_CONFLICT_CHECK_OPERATIONS,
     SUPPORTED_SUBMIT_OPERATIONS,
+    STOP_MAPPING,
     SubmitValidationContext,
     normalize_map_name,
     validate_submit_request,
@@ -75,7 +76,7 @@ class SlamApiSubmitController:
         map_name = normalize_map_name(req.map_name)
         map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
         save_map_name = normalize_map_name(getattr(req, "save_map_name", ""))
-        if map_revision_id:
+        if map_revision_id and operation != STOP_MAPPING:
             try:
                 resolved_revision_asset = backend._runtime_assets.resolve_asset(
                     robot_id=robot_id,
@@ -109,6 +110,9 @@ class SlamApiSubmitController:
                         map_name=map_name,
                     )
                 map_name = resolved_map_name or map_name
+        if operation == STOP_MAPPING:
+            map_name = ""
+            map_revision_id = ""
         state = state_controller.build_state(robot_id=robot_id, refresh_map_identity=False)
         odometry_state = state_controller.live_odometry_state()
         odometry_valid = bool(getattr(odometry_state, "odom_valid", False)) if odometry_state is not None else False

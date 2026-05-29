@@ -20,6 +20,11 @@ from coverage_planner.slam_workflow import (
     resolve_target_map_name,
     should_restart_localization_after_save,
 )
+from coverage_planner.slam_workflow.api import (
+    STOP_MAPPING,
+    SubmitValidationContext,
+    validate_submit_request,
+)
 
 
 class SlamWorkflowExecutorTest(unittest.TestCase):
@@ -227,19 +232,26 @@ class SlamWorkflowExecutorTest(unittest.TestCase):
         self.assertEqual(len(restart_calls), 1)
         self.assertEqual(restart_calls[0]["map_revision_id"], "rev_demo_03")
 
-    def test_stop_mapping_allows_empty_active_map_for_first_mapping_cycle(self):
+    def test_stop_mapping_does_not_restart_localization(self):
         restart_calls = []
         executor = WorkflowRuntimeExecutor(
             response_factory=lambda **kwargs: dict(kwargs),
-            get_runtime_snapshot=lambda _robot_id: RuntimeLocalizationSnapshot(),
+            get_runtime_snapshot=lambda _robot_id: RuntimeLocalizationSnapshot(active_map_name="active_map"),
             restart_localization=lambda **kwargs: restart_calls.append(dict(kwargs)) or {"success": True, **kwargs},
         )
 
-        result = executor.stop_mapping(robot_id="local_robot", map_name="", operation=5)
+        result = executor.stop_mapping(
+            robot_id="local_robot",
+            map_name="demo_map",
+            map_revision_id="rev_demo_01",
+            operation=5,
+        )
 
         self.assertTrue(result["success"])
-        self.assertEqual(len(restart_calls), 1)
-        self.assertEqual(restart_calls[0]["map_name"], "")
+        self.assertEqual(result["localization_state"], "not_localized")
+        self.assertEqual(result["map_name"], "")
+        self.assertEqual(result["map_revision_id"], "")
+        self.assertEqual(restart_calls, [])
 
     def test_resolve_target_map_name_uses_active_map_when_request_map_missing(self):
         self.assertEqual(resolve_target_map_name("", "active_map"), "active_map")
@@ -258,6 +270,21 @@ class SlamWorkflowExecutorTest(unittest.TestCase):
                 relocalize_after_switch=True,
             )
         )
+
+    def test_stop_mapping_submit_validation_does_not_require_map_asset(self):
+        result = validate_submit_request(
+            operation=STOP_MAPPING,
+            context=SubmitValidationContext(
+                active_map_name="active_map",
+                current_mode="mapping",
+                can_stop_mapping=True,
+            ),
+            map_name="ignored_map",
+            map_asset_exists=False,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.effective_map_name, "")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,19 @@
+# Filled by Site Gateway from the authenticated user/session.
+string caller_role
+string[] caller_capabilities
+---
+bool success
+string message
+bool enabled
+bool active
+bool allowed
+string[] blocked_reasons
+string last_direction
+uint64 last_command_at
+uint32 watchdog_timeout_ms
+float32 linear_mps_limit
+float32 angular_radps_limit
+string cmd_vel_topic
+string cmd_vel_type
+bool supports_strafe
+string[] supported_directions

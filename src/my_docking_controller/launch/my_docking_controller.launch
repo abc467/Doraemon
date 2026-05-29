@@ -3,6 +3,7 @@
     <arg name="base_frame" default="base_link" />
     <arg name="scan_topic" default="/scan" />
     <arg name="dock_pose_topic" default="/dock_pose" />
+    <arg name="dock_pose_score_topic" default="/dock_pose_score" />
     <arg name="cmd_vel_topic" default="/cmd_vel" />
 
     <arg name="dock_backwards" default="false" />
@@ -18,6 +19,7 @@
             <param name="scan_topic" value="$(arg scan_topic)" />
             <param name="base_frame" value="$(arg base_frame)" />
             <param name="dock_pose_topic" value="$(arg dock_pose_topic)" />
+            <param name="dock_pose_score_topic" value="$(arg dock_pose_score_topic)" />
             <param name="icp_fitness_thresh" value="$(arg dock_pose_score_thresh)" />
         </node>
     </group>

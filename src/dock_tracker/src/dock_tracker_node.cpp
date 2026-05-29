@@ -12,6 +12,7 @@
 #include <sensor_msgs/LaserScan.h>
 #include <sensor_msgs/PointCloud2.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <std_msgs/Float32.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -35,6 +36,7 @@ public:
         pnh_.param<std::string>("scan_topic", scan_topic_, "/scan");
         pnh_.param<std::string>("base_frame", base_frame_, "base_link");
         pnh_.param<std::string>("dock_pose_topic", dock_pose_topic_, "/dock_pose");
+        pnh_.param<std::string>("dock_pose_score_topic", dock_pose_score_topic_, "/dock_pose_score");
         pnh_.param<std::string>("debug_cloud_topic", debug_cloud_topic_, "/dock_debug_cloud");
         pnh_.param<std::string>("roi_cloud_topic", roi_cloud_topic_, "/dock_roi_cloud");
         pnh_.param("roi_x_min", roi_x_min_, 0.3);
@@ -51,13 +53,15 @@ public:
 
         // 2. 发布
         pub_dock_pose_ = nh_.advertise<geometry_msgs::PoseStamped>(dock_pose_topic_, 1);
+        pub_dock_pose_score_ = nh_.advertise<std_msgs::Float32>(dock_pose_score_topic_, 1);
         pub_debug_cloud_ = nh_.advertise<sensor_msgs::PointCloud2>(debug_cloud_topic_, 1);
         pub_roi_cloud_ = nh_.advertise<sensor_msgs::PointCloud2>(roi_cloud_topic_, 1);
 
         // 3. 生成模板
         template_cloud_ = generateTrapezoidTemplate();
-        ROS_INFO("Dock Tracker Started. scan=%s dock_pose=%s base_frame=%s icp_fitness_thresh=%.5f",
-                 scan_topic_.c_str(), dock_pose_topic_.c_str(), base_frame_.c_str(), icp_fitness_thresh_);
+        ROS_INFO("Dock Tracker Started. scan=%s dock_pose=%s score=%s base_frame=%s icp_fitness_thresh=%.5f",
+                 scan_topic_.c_str(), dock_pose_topic_.c_str(), dock_pose_score_topic_.c_str(),
+                 base_frame_.c_str(), icp_fitness_thresh_);
     }
 
     // 生成梯形模板
@@ -199,6 +203,10 @@ public:
         // 7. 结果判定
         if (icp.hasConverged()) {
             double score = icp.getFitnessScore();
+            std_msgs::Float32 score_msg;
+            score_msg.data = static_cast<float>(score);
+            pub_dock_pose_score_.publish(score_msg);
+
             Eigen::Matrix4f transform = icp.getFinalTransformation();
             
             float x = transform(0, 3);
@@ -265,11 +273,13 @@ private:
     ros::Publisher pub_debug_cloud_;
     ros::Publisher pub_roi_cloud_;
     ros::Publisher pub_dock_pose_;
+    ros::Publisher pub_dock_pose_score_;
     tf::TransformListener tf_listener_;
     PointCloudT::Ptr template_cloud_;
     std::string scan_topic_;
     std::string base_frame_;
     std::string dock_pose_topic_;
+    std::string dock_pose_score_topic_;
     std::string debug_cloud_topic_;
     std::string roi_cloud_topic_;
     double roi_x_min_;

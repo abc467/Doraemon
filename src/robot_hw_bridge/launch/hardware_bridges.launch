@@ -6,6 +6,7 @@
   <arg name="dock_base_frame" default="base_link"/>
   <arg name="dock_scan_topic" default="/scan"/>
   <arg name="dock_pose_topic" default="/dock_pose"/>
+  <arg name="dock_pose_score_topic" default="/dock_pose_score"/>
   <arg name="dock_cmd_vel_topic" default="/cmd_vel"/>
   <arg name="dock_backwards" default="false"/>
   <arg name="dock_target_dist" default="0.607"/>
@@ -129,6 +130,7 @@
       <arg name="base_frame" value="$(arg dock_base_frame)"/>
       <arg name="scan_topic" value="$(arg dock_scan_topic)"/>
       <arg name="dock_pose_topic" value="$(arg dock_pose_topic)"/>
+      <arg name="dock_pose_score_topic" value="$(arg dock_pose_score_topic)"/>
       <arg name="cmd_vel_topic" value="$(arg dock_cmd_vel_topic)"/>
       <arg name="dock_backwards" value="$(arg dock_backwards)"/>
       <arg name="target_dist" value="$(arg dock_target_dist)"/>

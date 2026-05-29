@@ -14,7 +14,7 @@ from cleanrobot_app_msgs.msg import SlamJobState
 
 from coverage_planner.ops_store.store import SlamJobRecord
 from coverage_planner.runtime_gate_messages import manual_assist_metadata
-from coverage_planner.slam_workflow.api import operation_name, submit_to_runtime_operation
+from coverage_planner.slam_workflow.api import STOP_MAPPING, operation_name, submit_to_runtime_operation
 from coverage_planner.slam_workflow_semantics import (
     is_manual_assist_error_code,
     localization_is_ready,
@@ -338,6 +338,9 @@ class CartographerSlamJobController:
         )
         requested_map_name = str(map_name or "")
         explicit_revision_id = str(map_revision_id or "").strip()
+        if int(operation) == STOP_MAPPING:
+            requested_map_name = ""
+            explicit_revision_id = ""
         if explicit_revision_id and not requested_map_name:
             try:
                 revision = backend._plan_store.resolve_map_revision(
@@ -349,11 +352,14 @@ class CartographerSlamJobController:
             requested_map_name = str(revision.get("map_name") or "")
         current_mode = str(rospy.get_param(runtime_param("current_mode"), "") or "").strip()
         localization_state = str(rospy.get_param(runtime_param("localization_state"), "") or "").strip()
-        requested_map_revision_id = explicit_revision_id or self.resolve_map_revision_id(
-            robot_id=str(robot_id or backend.robot_id),
-            map_name=str(requested_map_name or ""),
-            allow_active_fallback=not bool(str(requested_map_name or "").strip()),
-        )
+        if int(operation) == STOP_MAPPING:
+            requested_map_revision_id = ""
+        else:
+            requested_map_revision_id = explicit_revision_id or self.resolve_map_revision_id(
+                robot_id=str(robot_id or backend.robot_id),
+                map_name=str(requested_map_name or ""),
+                allow_active_fallback=not bool(str(requested_map_name or "").strip()),
+            )
         return {
             "job_id": job_id,
             "robot_id": str(robot_id or backend.robot_id),

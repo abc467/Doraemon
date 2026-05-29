@@ -25,6 +25,7 @@ catkin_package(
 )
 
 catkin_install_python(PROGRAMS
+  scripts/dock_calibration_service_node.py
   scripts/task_manager_node.py
   scripts/task_api_service_node.py
   scripts/schedule_api_service_node.py

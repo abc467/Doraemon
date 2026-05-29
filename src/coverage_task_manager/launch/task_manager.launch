@@ -70,6 +70,16 @@
   <!-- 第二预对接点（靠近充电桩，随后进入精准对接） -->
   <arg name="dock_xyyaw" default="[-1.007252,1.073770,1.562763]"/>
 
+  <!-- Dock calibration app interface -->
+  <arg name="enable_dock_calibration_service" default="true"/>
+  <arg name="dock_calibration_status_service_name" default="/clean_robot_server/app/get_dock_calibration_status"/>
+  <arg name="dock_calibration_command_service_name" default="/clean_robot_server/app/dock_calibration_command"/>
+  <arg name="dock_calibration_state_topic" default="/clean_robot_server/dock_calibration_state"/>
+  <arg name="dock_calibration_score_topic" default="/dock_pose_score"/>
+  <arg name="dock_calibration_storage_path" default="/data/coverage/dock_calibration.yaml"/>
+  <arg name="dock_calibration_score_threshold" default="0.00012"/>
+  <arg name="dock_calibration_target_dist" default="0.607"/>
+
   <!-- Scheduler：打开并加载 schedules -->
   <arg name="scheduler_enable" default="true"/>
   <arg name="scheduler_window_s" default="60.0"/>
@@ -232,6 +242,29 @@
     <param name="scheduler_reload_period_s" value="$(arg scheduler_reload_period_s)"/>
     <param name="load_schedules_yaml" value="$(arg load_schedules_yaml)"/>
     <param name="sched_debug_snapshot_period_s" value="2.0"/>
+  </node>
+
+  <node if="$(arg enable_dock_calibration_service)"
+        pkg="coverage_task_manager"
+        type="dock_calibration_service_node.py"
+        name="dock_calibration_service"
+        output="screen"
+        respawn="$(arg respawn_nodes)"
+        respawn_delay="$(arg respawn_delay_s)">
+    <param name="robot_id" value="$(arg robot_id)"/>
+    <param name="frame_id" value="$(arg frame_id)"/>
+    <param name="slam_state_topic" value="$(arg slam_state_topic)"/>
+    <param name="dock_pose_topic" value="/dock_pose"/>
+    <param name="dock_score_topic" value="$(arg dock_calibration_score_topic)"/>
+    <param name="state_topic" value="$(arg dock_calibration_state_topic)"/>
+    <param name="status_service_name" value="$(arg dock_calibration_status_service_name)"/>
+    <param name="command_service_name" value="$(arg dock_calibration_command_service_name)"/>
+    <param name="stage1_param_name" value="/coverage_task_manager/dock_stage1_xyyaw"/>
+    <param name="stage2_param_name" value="/coverage_task_manager/dock_xyyaw"/>
+    <param name="docking_target_dist_param_name" value="/dock_supply_manager/docking_target_dist"/>
+    <param name="storage_path" value="$(arg dock_calibration_storage_path)"/>
+    <param name="dock_score_threshold" value="$(arg dock_calibration_score_threshold)"/>
+    <param name="dock_target_dist" value="$(arg dock_calibration_target_dist)"/>
   </node>
 
   <node pkg="coverage_task_manager" type="task_api_service_node.py" name="task_api_service" output="screen"

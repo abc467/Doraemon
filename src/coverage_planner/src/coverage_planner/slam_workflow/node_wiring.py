@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -22,6 +23,27 @@ from cleanrobot_app_msgs.srv import (
 from coverage_msgs.msg import TaskState as TaskStateMsg
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid
+
+
+def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _stamp_to_sec(stamp, *, fallback_s: float) -> float:
+    try:
+        value = float(stamp.to_sec())
+    except Exception:
+        try:
+            value = float(getattr(stamp, "secs", 0) or 0) + float(getattr(stamp, "nsecs", 0) or 0) / 1e9
+        except Exception:
+            value = 0.0
+    if value <= 0.0:
+        return float(fallback_s)
+    return value
+
+
+def _normalize_frame_id(frame_id: str) -> str:
+    return str(frame_id or "").strip().lstrip("/")
 
 
 class SlamApiNodeWiring:
@@ -82,8 +104,26 @@ class SlamApiNodeWiring:
     def on_map(self, _msg: OccupancyGrid):
         self._backend._map_ts = time.time()
 
-    def on_tracked_pose(self, _msg: PoseStamped):
-        self._backend._tracked_pose_ts = time.time()
+    def on_tracked_pose(self, msg: PoseStamped):
+        backend = self._backend
+        now = time.time()
+        backend._tracked_pose_ts = now
+        backend._tracked_pose_frame = _normalize_frame_id(getattr(msg.header, "frame_id", ""))
+        backend._tracked_pose_stamp_s = _stamp_to_sec(getattr(msg.header, "stamp", None), fallback_s=now)
+        backend._tracked_pose_source = "topic:%s" % str(getattr(backend, "tracked_pose_topic", "/tracked_pose") or "")
+        try:
+            backend._tracked_pose_xyyaw = (
+                float(msg.pose.position.x),
+                float(msg.pose.position.y),
+                _quat_to_yaw(
+                    float(msg.pose.orientation.x),
+                    float(msg.pose.orientation.y),
+                    float(msg.pose.orientation.z),
+                    float(msg.pose.orientation.w),
+                ),
+            )
+        except Exception:
+            backend._tracked_pose_xyyaw = None
 
     def on_task_state(self, msg: TaskStateMsg):
         backend = self._backend

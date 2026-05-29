@@ -494,7 +494,7 @@ def load_slam_api_service_bootstrap(node_file: str, rospy_module=rospy) -> SlamA
             ),
         ),
         command_timeout_s=max(1.0, float(rospy_module.get_param("~command_timeout_s", 60.0))),
-        state_publish_hz=max(0.2, float(rospy_module.get_param("~state_publish_hz", 1.0))),
+        state_publish_hz=max(1.0, float(rospy_module.get_param("~state_publish_hz", 2.0))),
         task_state_fresh_timeout_s=max(1.0, float(rospy_module.get_param("~task_state_fresh_timeout_s", 10.0))),
         odometry_state_fresh_timeout_s=max(
             1.0, float(rospy_module.get_param("~odometry_state_fresh_timeout_s", 10.0))

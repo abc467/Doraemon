@@ -39,6 +39,10 @@ class SlamApiServiceNode:
         self._wiring = SlamApiNodeWiring(self)
         self._map_ts = 0.0
         self._tracked_pose_ts = 0.0
+        self._tracked_pose_frame = ""
+        self._tracked_pose_xyyaw = None
+        self._tracked_pose_stamp_s = 0.0
+        self._tracked_pose_source = ""
         self._task_state_ts = 0.0
         self._task_state_msg = None
         self._odometry_state_ts = 0.0

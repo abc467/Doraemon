@@ -11,7 +11,7 @@ _MANUAL_ASSIST_RETRY_ACTION_BY_OPERATION = {
     "relocalize": "relocalize",
     "verify_map_revision": "verify_map_revision",
     "activate_map_revision": "activate_map_revision",
-    "stop_mapping": "prepare_for_task",
+    "stop_mapping": "switch_map_and_localize",
 }
 
 

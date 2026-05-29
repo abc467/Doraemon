@@ -44,6 +44,33 @@ _TASK_NON_RUNNING_EXECUTOR_STATES = (
 )
 
 
+def _normalize_frame_id(frame_id: str) -> str:
+    return str(frame_id or "").strip().lstrip("/")
+
+
+def _ros_time_from_sec(stamp_s: float) -> rospy.Time:
+    try:
+        value = float(stamp_s or 0.0)
+    except Exception:
+        value = 0.0
+    if value <= 0.0:
+        return rospy.Time()
+    try:
+        return rospy.Time.from_sec(value)
+    except Exception:
+        return rospy.Time()
+
+
+def _stamp_ms_from_sec(stamp_s: float) -> int:
+    try:
+        value = float(stamp_s or 0.0)
+    except Exception:
+        value = 0.0
+    if value <= 0.0:
+        return 0
+    return int(round(value * 1000.0))
+
+
 def _active_map_matches_runtime(
     *,
     active_map: Dict[str, object],
@@ -237,9 +264,33 @@ class SlamApiStateController:
         map_age_s = float(max(0.0, now - backend._map_ts)) if backend._map_ts > 0.0 else -1.0
         tracked_pose_age_s = float(max(0.0, now - backend._tracked_pose_ts)) if backend._tracked_pose_ts > 0.0 else -1.0
         map_topic_fresh = bool(backend._map_ts > 0.0 and map_age_s <= backend.map_fresh_timeout_s)
-        tracked_pose_fresh = bool(
+        tracked_pose_frame = _normalize_frame_id(getattr(backend, "_tracked_pose_frame", ""))
+        tracked_pose_xyyaw = getattr(backend, "_tracked_pose_xyyaw", None)
+        tracked_pose_available = bool(tracked_pose_frame == "map" and tracked_pose_xyyaw is not None)
+        tracked_pose_data_fresh = bool(
             backend._tracked_pose_ts > 0.0 and tracked_pose_age_s <= backend.tracked_pose_fresh_timeout_s
+            and tracked_pose_available
         )
+        tracked_pose_x = 0.0
+        tracked_pose_y = 0.0
+        tracked_pose_theta = 0.0
+        if tracked_pose_xyyaw is not None:
+            try:
+                tracked_pose_x = float(tracked_pose_xyyaw[0])
+                tracked_pose_y = float(tracked_pose_xyyaw[1])
+                tracked_pose_theta = float(tracked_pose_xyyaw[2])
+            except Exception:
+                tracked_pose_x = 0.0
+                tracked_pose_y = 0.0
+                tracked_pose_theta = 0.0
+                tracked_pose_available = False
+                tracked_pose_data_fresh = False
+        tracked_pose_stamp_s = float(getattr(backend, "_tracked_pose_stamp_s", 0.0) or 0.0)
+        if tracked_pose_stamp_s <= 0.0 and backend._tracked_pose_ts > 0.0:
+            tracked_pose_stamp_s = float(backend._tracked_pose_ts)
+        tracked_pose_source = str(getattr(backend, "_tracked_pose_source", "") or "").strip()
+        if not tracked_pose_source and backend._tracked_pose_ts > 0.0:
+            tracked_pose_source = "topic:%s" % str(getattr(backend, "tracked_pose_topic", "/tracked_pose") or "")
 
         if current_mode == "mapping":
             localization_state = "mapping"
@@ -349,6 +400,9 @@ class SlamApiStateController:
                 or "runtime map does not match active map"
             )
         localization_ready = localization_is_ready(localization_state, localization_valid)
+        tracked_pose_fresh = bool(tracked_pose_data_fresh)
+        if current_mode != "mapping":
+            tracked_pose_fresh = bool(tracked_pose_fresh and localization_ready and active_map_match)
         if current_mode != "mapping" and (not localization_ready):
             if active_map_name:
                 blockers.append(
@@ -369,7 +423,14 @@ class SlamApiStateController:
                 )
             )
         if current_mode != "mapping" and not tracked_pose_fresh:
-            warnings.append("tracked_pose stale or missing")
+            if not tracked_pose_data_fresh:
+                warnings.append("tracked_pose stale or missing")
+            elif not localization_ready:
+                warnings.append("tracked_pose not trusted because localization is not ready")
+            elif not active_map_match:
+                warnings.append("tracked_pose not trusted because runtime map does not match active map")
+            else:
+                warnings.append("tracked_pose not trusted")
         if not odometry_status_available:
             warnings.append("odometry health state unavailable")
         elif not odometry_valid:
@@ -436,8 +497,6 @@ class SlamApiStateController:
             (not task_running)
             and (not slam_job_running)
             and current_mode == "mapping"
-            and restart_available
-            and odometry_valid
         )
         projection = project_workflow_state(
             current_mode=current_mode,
@@ -491,6 +550,13 @@ class SlamApiStateController:
         msg.map_age_s = float(map_age_s)
         msg.tracked_pose_fresh = bool(tracked_pose_fresh)
         msg.tracked_pose_age_s = float(tracked_pose_age_s)
+        msg.tracked_pose_frame = str(tracked_pose_frame or "")
+        msg.tracked_pose_x = float(tracked_pose_x)
+        msg.tracked_pose_y = float(tracked_pose_y)
+        msg.tracked_pose_theta = float(tracked_pose_theta)
+        msg.tracked_pose_stamp = _ros_time_from_sec(tracked_pose_stamp_s)
+        msg.tracked_pose_stamp_ms = _stamp_ms_from_sec(tracked_pose_stamp_s)
+        msg.tracked_pose_source = str(tracked_pose_source or "")
         msg.mission_state = mission_state
         msg.phase = phase
         msg.public_state = public_state

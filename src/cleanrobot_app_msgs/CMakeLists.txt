@@ -13,6 +13,7 @@ add_message_files(
   CleanSchedule.msg
   CleanTask.msg
   CleanTaskCell.msg
+  DockCalibrationState.msg
   MapAlignmentConfig.msg
   MapNoGoArea.msg
   MapVirtualWall.msg
@@ -32,8 +33,10 @@ add_service_files(
   CommitCoverageRegion.srv
   ConfirmMapAlignmentByPoints.srv
   ExeTask.srv
+  GetDockCalibrationStatus.srv
   GetOdometryStatus.srv
   GetProfileCatalog.srv
+  GetManualDriveStatus.srv
   GetSlamJob.srv
   GetSlamStatus.srv
   GetSystemReadiness.srv
@@ -49,6 +52,8 @@ add_service_files(
   PreviewAlignedRectSelection.srv
   PreviewCoverageRegion.srv
   RestartLocalization.srv
+  ManualDriveCommand.srv
+  OperateDockCalibration.srv
   SubmitSlamCommand.srv
 )
 

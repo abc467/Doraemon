@@ -48,7 +48,6 @@ SUPPORTED_SUBMIT_OPERATIONS = frozenset(
 
 ASSET_MUST_EXIST_OPERATIONS = frozenset(
     {
-        STOP_MAPPING,
         PREPARE_FOR_TASK,
         SWITCH_MAP_AND_LOCALIZE,
         RELOCALIZE,
@@ -192,7 +191,9 @@ def compute_effective_submit_map_name(
 
     if int(operation) == SAVE_MAPPING:
         return normalized_save_map_name or normalized_map_name
-    if int(operation) in (STOP_MAPPING, PREPARE_FOR_TASK, RELOCALIZE):
+    if int(operation) == STOP_MAPPING:
+        return ""
+    if int(operation) in (PREPARE_FOR_TASK, RELOCALIZE):
         return normalized_map_name or normalized_active_map_name
     return normalized_map_name
 
@@ -313,8 +314,6 @@ def validate_submit_request(
     if int(operation) == STOP_MAPPING:
         if not context.can_stop_mapping:
             return SubmitValidationResult(effective_map_name, "stop_mapping_blocked", "stop_mapping is blocked")
-        if effective_map_name and not map_asset_exists:
-            return SubmitValidationResult(effective_map_name, "map_asset_not_found", "map asset not found")
 
     if int(operation) == PREPARE_FOR_TASK:
         if not effective_map_name:
