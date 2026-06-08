@@ -62,6 +62,9 @@ public:
   int how_many_corners_;
   /// 设置规划器是否可以通过未知空间进行规划
   bool allow_unknown_;
+  /// Maximum raw costmap cost that Theta* may traverse. Values above this are
+  /// treated as blocked so the global path keeps clearance from inflated areas.
+  int max_allowed_cost_;
   /// 地图在 x 方向和 y 方向上的长度
   int size_x_, size_y_;
   /// 规划器检查是否已被取消的时间间隔
@@ -89,9 +92,11 @@ public:
    */
   inline bool isSafe(const int & cx, const int & cy) const
   {
-    return (costmap_->getCost(
-             cx,
-             cy) == UNKNOWN_COST && allow_unknown_) || costmap_->getCost(cx, cy) < LETHAL_COST;
+    const unsigned char raw_cost = costmap_->getCost(cx, cy);
+    if (raw_cost == UNKNOWN_COST) {
+      return allow_unknown_;
+    }
+    return static_cast<int>(raw_cost) <= max_allowed_cost_;
   }
 
   /**
@@ -187,16 +192,22 @@ protected:
    */
   bool isSafe(const int & cx, const int & cy, double & cost) const
   {
-    double curr_cost = getCost(cx, cy);
-    if ((costmap_->getCost(cx, cy) == UNKNOWN_COST && allow_unknown_) || curr_cost < LETHAL_COST) {
-      if (costmap_->getCost(cx, cy) == UNKNOWN_COST) {
-        curr_cost = OBS_COST - 1;
+    const unsigned char raw_cost = costmap_->getCost(cx, cy);
+    if (raw_cost == UNKNOWN_COST) {
+      if (!allow_unknown_) {
+        return false;
       }
-      cost += w_traversal_cost_ * curr_cost * curr_cost / LETHAL_COST / LETHAL_COST;
+      const double unknown_cost = OBS_COST - 1;
+      cost += w_traversal_cost_ * unknown_cost * unknown_cost / LETHAL_COST / LETHAL_COST;
       return true;
-    } else {
+    }
+    if (static_cast<int>(raw_cost) > max_allowed_cost_) {
       return false;
     }
+
+    const double curr_cost = getCost(cx, cy);
+    cost += w_traversal_cost_ * curr_cost * curr_cost / LETHAL_COST / LETHAL_COST;
+    return true;
   }
 
   /**

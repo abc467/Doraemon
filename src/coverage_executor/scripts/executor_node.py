@@ -56,6 +56,7 @@ def main():
 
     planner = rospy.get_param("~mbf_planner", "")
     controller = rospy.get_param("~mbf_controller", "")
+    connect_controller = rospy.get_param("~mbf_connect_controller", "")
     recovery = rospy.get_param("~mbf_recovery", "")
 
     water_off_distance = rospy.get_param("~water_off_distance", 2.0)
@@ -147,6 +148,7 @@ def main():
         exe_path_action=mbf_exe_path_action,
         planner=planner,
         controller=controller,
+        connect_controller=connect_controller,
         recovery=recovery,
         clear_costmaps_service=str(clear_costmaps_service),
     )

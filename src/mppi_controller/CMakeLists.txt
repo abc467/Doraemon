@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf
 )
 find_package(Eigen3 REQUIRED)
+find_package(OpenMP REQUIRED)
 find_package(pluginlib REQUIRED)
 
 catkin_package(
@@ -70,7 +71,8 @@ target_include_directories(mppi_critics_lib  PUBLIC
   "$<INSTALL_INTERFACE:include/${PROJECT_NAME}>")
 
 target_link_libraries(mppi_critics_lib
-  ${catkin_LIBRARIES})
+  ${catkin_LIBRARIES}
+  OpenMP::OpenMP_CXX)
 
 
 install(TARGETS mppi_controller_lib mppi_critics_lib

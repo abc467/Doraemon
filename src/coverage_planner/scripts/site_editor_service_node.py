@@ -444,6 +444,12 @@ class SiteEditorServiceNode:
         self.default_no_go_buffer_m = float(
             rospy.get_param("~default_no_go_buffer_m", 0.30)
         )
+        self.default_no_go_long_edge_normal_buffer_m = float(
+            rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.15)
+        )
+        self.default_no_go_short_edge_normal_buffer_m = float(
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+        )
         self.default_plan_profile_name = str(rospy.get_param("~default_plan_profile_name", "cover_standard")).strip() or "cover_standard"
         self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)
         self.degraded_preview_on_planner_crash = bool(
@@ -2974,6 +2980,12 @@ class SiteEditorServiceNode:
             virtual_walls=raw_constraints.get("virtual_walls") or [],
             default_buffer_m=float(self.default_virtual_wall_buffer_m),
             default_no_go_buffer_m=float(self.default_no_go_buffer_m),
+            default_no_go_long_edge_normal_buffer_m=float(
+                self.default_no_go_long_edge_normal_buffer_m
+            ),
+            default_no_go_short_edge_normal_buffer_m=float(
+                self.default_no_go_short_edge_normal_buffer_m
+            ),
             prec=3,
         )
         zone_constraints = compile_zone_constraints(

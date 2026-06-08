@@ -3,6 +3,7 @@
 #include <ros/ros.h>
 #include <costmap_2d/costmap_2d_ros.h>
 #include <costmap_2d/costmap_2d.h>
+#include <base_local_planner/costmap_model.h>
 #include <mbf_costmap_core/costmap_planner.h>  // mbf接口
 #include <mbf_msgs/GetPathResult.h>
 #include <geometry_msgs/PoseStamped.h>
@@ -48,6 +49,7 @@ protected:
     double goal_tolerance_ = 0.05;  // 终点位置容忍误差（米），可从参数加载
     double path_check_interval_ = 0.05;  // 路径碰撞检查的间隔（米）
     double path_max_age_ = 20.0;
+    bool use_footprint_path_check_ = true;
 
     static std::vector<geometry_msgs::PoseStamped> linearInterpolation(
         const std::vector<coordsW> & raw_path, const double & dist_bw_points);
@@ -56,6 +58,7 @@ protected:
     std::vector<geometry_msgs::PoseStamped> downsamplePath(const std::vector<geometry_msgs::PoseStamped>& orig_global_plan, double sampling_distance);
     std::optional<std::vector<geometry_msgs::PoseStamped>> smoothPath(const std::vector<geometry_msgs::PoseStamped>& orig_global_plan);
     void printPoseStampedVector(const std::vector<geometry_msgs::PoseStamped>& poses);
+    void applyFinalGoalOrientation(std::vector<geometry_msgs::PoseStamped>& plan, const geometry_msgs::PoseStamped& goal);
 
     bool canReusePath(const geometry_msgs::PoseStamped& current_start, 
                                         const geometry_msgs::PoseStamped& current_goal) {
@@ -90,6 +93,9 @@ protected:
     }
 
     bool isPathCollisionFree(const std::vector<geometry_msgs::PoseStamped>& path) {
+        base_local_planner::CostmapModel collision_checker(*costmap_);
+        const auto footprint = costmap_ros_ ? costmap_ros_->getRobotFootprint() : std::vector<geometry_msgs::Point>{};
+
         // 遍历路径点（按间隔检查，避免重复计算）
         for (size_t i = 0; i < path.size(); i += std::max(1, (int)(path_check_interval_ / costmap_->getResolution()))) {
             const auto& pose = path[i];
@@ -99,11 +105,35 @@ protected:
                 ROS_DEBUG("Path point out of costmap bounds: (%.2f, %.2f)", pose.pose.position.x, pose.pose.position.y);
                 return false;  // 路径点超出地图范围 → 不安全
             }
-            // 检查成本是否为致命障碍物（LETHAL_OBSTACLE）
             unsigned char cost = costmap_->getCost(mx, my);
-            if (cost >= costmap_2d::LETHAL_OBSTACLE) {
-                ROS_DEBUG("Path point (%.2f, %.2f) is in obstacle (cost: %d)", pose.pose.position.x, pose.pose.position.y, cost);
-                return false;  // 路径点在障碍物上 → 不安全
+            if (cost != UNKNOWN_COST && static_cast<int>(cost) > planner_->max_allowed_cost_) {
+                ROS_DEBUG(
+                    "Path point (%.2f, %.2f) exceeds max allowed cost: %d > %d",
+                    pose.pose.position.x, pose.pose.position.y, static_cast<int>(cost),
+                    planner_->max_allowed_cost_);
+                return false;
+            }
+            if (cost == UNKNOWN_COST && !planner_->allow_unknown_) {
+                ROS_DEBUG("Path point (%.2f, %.2f) is unknown", pose.pose.position.x, pose.pose.position.y);
+                return false;
+            }
+
+            if (use_footprint_path_check_ && !footprint.empty()) {
+                const double yaw = tf2::getYaw(pose.pose.orientation);
+                const double footprint_cost = collision_checker.footprintCost(
+                    pose.pose.position.x,
+                    pose.pose.position.y,
+                    yaw,
+                    footprint);
+                if (footprint_cost < 0.0) {
+                    if (footprint_cost == -2.0 && planner_->allow_unknown_) {
+                        continue;
+                    }
+                    ROS_DEBUG(
+                        "Path footprint collision at (%.2f, %.2f, %.2f), footprint_cost=%.1f",
+                        pose.pose.position.x, pose.pose.position.y, yaw, footprint_cost);
+                    return false;
+                }
             }
         }
         return true;  // 所有检查点均安全

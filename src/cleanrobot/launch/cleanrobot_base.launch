@@ -2,10 +2,20 @@
 <launch>
    <arg name="start_robot_state_publisher" default="true"/>
    <arg name="start_joint_state_publisher" default="false"/>
-   <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/clean_robot.urdf"/>
+   <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/a26022_clean_robot.urdf"/>
    <arg name="start_lidar" default="true"/>
-   <arg name="start_ahrs" default="true"/>
-   <arg name="start_depth_cameras" default="true"/>
+   <arg name="lidar_ntp_ip" default="192.168.16.11"/>
+   <arg name="lidar_ntp_port" default="5678"/>
+   <arg name="lidar_ntp_enable" default="-1"/>
+   <arg name="start_imu" default="true"/>
+   <arg name="imu_port" default="/dev/serial/by-path/pci-0000:65:00.3-usb-0:3:1.0-port0"/>
+   <arg name="imu_baud" default="115200"/>
+   <arg name="imu_slave_address" default="1"/>
+   <arg name="imu_publish_raw" default="true"/>
+   <arg name="imu_publish_during_calibration" default="true"/>
+   <arg name="start_ahrs" default="false"/>
+   <arg name="start_depth_cameras" default="false"/>
+   <arg name="publish_a26022_static_tf" default="true"/>
    <arg name="publish_base_footprint_to_base_link" default="false"/>
    <arg name="base_footprint_to_base_link_z" default="0.0"/>
    <arg name="publish_base_footprint_to_gyro_link" default="false"/>
@@ -21,6 +31,20 @@
          <param name="rate" value="10.0"/>
       </node>
    </group>
+   <group if="$(arg publish_a26022_static_tf)">
+      <node pkg="tf"
+            type="static_transform_publisher"
+            name="a26022_base_footprint_to_base_link"
+            args="0 0 0 0 0 0 base_footprint base_link 100"/>
+      <node pkg="tf"
+            type="static_transform_publisher"
+            name="a26022_base_link_to_gyro_link"
+            args="0.502 0 0.385 0 0 0 base_link gyro_link 100"/>
+      <node pkg="tf"
+            type="static_transform_publisher"
+            name="a26022_base_link_to_laser"
+            args="0.50195 0 1.0503 0 0 0 base_link laser 100"/>
+   </group>
    <node if="$(arg publish_base_footprint_to_base_link)"
          pkg="tf"
          type="static_transform_publisher"
@@ -32,7 +56,20 @@
          name="base_footprint_to_gyro_link"
          args="0 0 0 0 0 0 base_footprint gyro_link 100"/>
    <group if="$(arg start_lidar)">
-      <include file="$(find vanjee_lidar_sdk)/launch/start.launch"/>
+      <include file="$(find bluesea2)/launch/LDS-50C-E.launch">
+         <arg name="ntp_ip" value="$(arg lidar_ntp_ip)"/>
+         <arg name="ntp_port" value="$(arg lidar_ntp_port)"/>
+         <arg name="ntp_enable" value="$(arg lidar_ntp_enable)"/>
+      </include>
+   </group>
+   <group if="$(arg start_imu)">
+      <include file="$(find modbus_imu_driver)/launch/modbus_imu_serial.launch">
+         <arg name="port" value="$(arg imu_port)"/>
+         <arg name="baud" value="$(arg imu_baud)"/>
+         <arg name="slave_address" value="$(arg imu_slave_address)"/>
+         <arg name="publish_raw_imu" value="$(arg imu_publish_raw)"/>
+         <arg name="publish_during_calibration" value="$(arg imu_publish_during_calibration)"/>
+      </include>
    </group>
    <group if="$(arg start_ahrs)">
       <include file="$(find fdilink_ahrs)/launch/ahrs_data.launch"/>

@@ -27,16 +27,23 @@ void ThetaStarPlanner::initialize(std::string name, costmap_2d::Costmap2DROS* co
         private_nh.param("w_traversal_cost", planner_->w_traversal_cost_, 1.0); // costmap中单元格遍历成本的权重
         private_nh.param("w_euc_cost", planner_->w_euc_cost_, 2.0); // 欧几里得距离成本的权重（用于计算 g_cost）
         private_nh.param("w_heuristic_cost", planner_->w_heuristic_cost_, 1.0); // 启发式成本的权重（用于 h_cost 的计算）
+        private_nh.param("max_allowed_cost", planner_->max_allowed_cost_, LETHAL_COST - 1);
+        planner_->max_allowed_cost_ = std::clamp(planner_->max_allowed_cost_, 0, OBS_COST - 1);
 
         // 新增：加载路径复用相关参数
         private_nh.param("goal_tolerance", goal_tolerance_, 0.05);  // 终点位置误差容忍度
         private_nh.param("path_check_interval", path_check_interval_, 0.1);  // 路径碰撞检查间隔
         private_nh.param("path_max_age", path_max_age_, 20.0);  // 路径最大有效期（秒，可选）
+        private_nh.param("use_footprint_path_check", use_footprint_path_check_, true);
 
         path_pub_ = private_nh.advertise<nav_msgs::Path>("theta_star_plan", 1);
 
         initialized_ = true;
-        ROS_INFO("mbf theta* planner is initialized... ");
+        ROS_INFO(
+            "mbf theta* planner is initialized: max_allowed_cost=%d w_traversal_cost=%.2f footprint_check=%s",
+            planner_->max_allowed_cost_,
+            planner_->w_traversal_cost_,
+            use_footprint_path_check_ ? "true" : "false");
     }else{
         ROS_WARN("This planner has already been initialized, doing nothing.");
     }
@@ -63,14 +70,19 @@ uint32_t ThetaStarPlanner::makePlan(const geometry_msgs::PoseStamped& start, con
     if (canReusePath(start, goal)) {
         // 裁剪历史路径并复用
         if (cropPathToStart(start, last_valid_path_, plan)) {
-            ROS_DEBUG("Reusing existing path (goal unchanged and collision-free)");
-            publishPath(plan);
-            is_planning_ = false;
-            message = "reused cached path";
-            for (size_t i = 1; i < plan.size(); ++i) {
-                cost += path_tools::euclidean_distance(plan[i - 1], plan[i]);
+            if (!isPathCollisionFree(plan)) {
+                ROS_DEBUG("Cropped cached path is not collision-free, replanning");
+                plan.clear();
+            } else {
+                ROS_DEBUG("Reusing existing path (goal unchanged and collision-free)");
+                publishPath(plan);
+                is_planning_ = false;
+                message = "reused cached path";
+                for (size_t i = 1; i < plan.size(); ++i) {
+                    cost += path_tools::euclidean_distance(plan[i - 1], plan[i]);
+                }
+                return mbf_msgs::GetPathResult::SUCCESS;
             }
-            return mbf_msgs::GetPathResult::SUCCESS;
         }
     }
 
@@ -122,58 +134,41 @@ uint32_t ThetaStarPlanner::makePlan(const geometry_msgs::PoseStamped& start, con
             return mbf_msgs::GetPathResult::CANCELED;
         }
         std::cout << "theta* raw_path.size(): " << raw_path.size() << std::endl;
-        plan = linearInterpolation(raw_path, planner_->costmap_->getResolution());
-        plan.back().pose.position = goal.pose.position;
-        std::cout << "theta* interpolate plan.size(): " << plan.size() << std::endl;
+        auto dense_path = linearInterpolation(raw_path, planner_->costmap_->getResolution());
+        if (dense_path.empty()) {
+            is_planning_ = false;
+            message = "theta* generated an empty interpolated path";
+            return mbf_msgs::GetPathResult::NO_PATH_FOUND;
+        }
+        dense_path.back().pose.position = goal.pose.position;
+        std::cout << "theta* interpolate plan.size(): " << dense_path.size() << std::endl;
         // 降采样路径
-        auto downsampled_path = downsamplePath(plan, 0.4);
+        auto downsampled_path = downsamplePath(dense_path, 0.4);
         std::cout << "theta* downsampled path.size(): " << downsampled_path.size() << std::endl;
+        std::vector<geometry_msgs::PoseStamped> candidate_path = dense_path;
         if(downsampled_path.size() > 5){
             // 平滑路径
             auto s_path = smoothPath(downsampled_path);
             if(s_path.has_value()){
-                plan = s_path.value();
-                std::cout << "theta* smoothed plan.size(): " << plan.size() << std::endl;
+                candidate_path = s_path.value();
+                std::cout << "theta* smoothed plan.size(): " << candidate_path.size() << std::endl;
             }
         }
 
-        if(1){
-            publishPath(plan);
-        }
-
-        // 计算路径角度
-        // for(unsigned int i = 0; i < plan.size() - 1; ++i){
-        //     double angle = std::atan2(plan[i + 1].pose.position.y - plan[i].pose.position.y,
-        //                                 plan[i + 1].pose.position.x - plan[i].pose.position.x);
-        //     plan[i].pose.orientation = tf::createQuaternionMsgFromYaw(angle);
-        // }
-        // plan.back().pose.orientation = goal.pose.orientation;
-// --- 推荐的修改 ---
-        // 1. 确保路径至少有两个点
-        if (plan.size() >= 2) {
-            // 2. 像以前一样，计算从[0]到[n-2]（倒数第二个点）的所有朝向
-            for (unsigned int i = 0; i < plan.size() - 1; ++i) {
-                double angle = std::atan2(plan[i + 1].pose.position.y - plan[i].pose.position.y,
-                                            plan[i + 1].pose.position.x - plan[i].pose.position.x);
-                plan[i].pose.orientation = tf::createQuaternionMsgFromYaw(angle);
+        applyFinalGoalOrientation(candidate_path, goal);
+        if (!isPathCollisionFree(candidate_path)) {
+            ROS_WARN("ThetaStarPlanner: smoothed/global candidate rejected by clearance check; trying dense raw path");
+            candidate_path = dense_path;
+            applyFinalGoalOrientation(candidate_path, goal);
+            if (!isPathCollisionFree(candidate_path)) {
+                is_planning_ = false;
+                message = "planned path violates footprint or clearance constraints";
+                return mbf_msgs::GetPathResult::NO_PATH_FOUND;
             }
-
-            // 3. 创建一个新点，作为“原地旋转”的目标
-            geometry_msgs::PoseStamped final_goal_pose = plan.back();
-            // 4. 将这个新点的朝向设置为最终的朝向
-            final_goal_pose.pose.orientation = goal.pose.orientation;
-
-            // 5. 将“原始”最后一个点(plan.back())的朝向设置为与倒数第二个点一致，以确保平滑到达
-            plan.back().pose.orientation = plan[plan.size() - 2].pose.orientation;
-            
-            // 6. 将“原地旋转”的目标点添加到路径的末尾
-            plan.push_back(final_goal_pose);
-
-        } else if (!plan.empty()) {
-            // 路径只有一个点，直接设置其朝向
-            plan.back().pose.orientation = goal.pose.orientation;
         }
-        // --- 修改结束 ---
+
+        plan = candidate_path;
+        publishPath(plan);
         // printPoseStampedVector(plan);
 
         auto stop_time = std::chrono::steady_clock::now();
@@ -303,6 +298,31 @@ std::optional<std::vector<geometry_msgs::PoseStamped>>  ThetaStarPlanner::smooth
     return smoothed_path;
 }
 
+void ThetaStarPlanner::applyFinalGoalOrientation(
+    std::vector<geometry_msgs::PoseStamped>& plan,
+    const geometry_msgs::PoseStamped& goal)
+{
+    if (plan.empty()) {
+        return;
+    }
+
+    if (plan.size() >= 2) {
+        for (size_t i = 0; i + 1 < plan.size(); ++i) {
+            const double angle = std::atan2(
+                plan[i + 1].pose.position.y - plan[i].pose.position.y,
+                plan[i + 1].pose.position.x - plan[i].pose.position.x);
+            plan[i].pose.orientation = tf::createQuaternionMsgFromYaw(angle);
+        }
+
+        geometry_msgs::PoseStamped final_goal_pose = plan.back();
+        final_goal_pose.pose.orientation = goal.pose.orientation;
+        plan.back().pose.orientation = plan[plan.size() - 2].pose.orientation;
+        plan.push_back(final_goal_pose);
+        return;
+    }
+
+    plan.back().pose.orientation = goal.pose.orientation;
+}
 
 // 打印 std::vector<geometry_msgs::PoseStamped> 数据的函数
 void ThetaStarPlanner::printPoseStampedVector(const std::vector<geometry_msgs::PoseStamped>& poses) {

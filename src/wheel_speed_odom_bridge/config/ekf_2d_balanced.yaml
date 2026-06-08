@@ -5,7 +5,7 @@
 # 3. imu 只提供角速度 wz
 # 适合 odom 的角速度还比较可信，但又不想直接把 odom pose 喂进 EKF 的情况。
 
-frequency: 50
+frequency: 25
 sensor_timeout: 0.1
 two_d_mode: true
 publish_tf: false
@@ -30,7 +30,7 @@ odom0_config: [false, false, false,
                false, false, true,
                false, false, false]
 
-imu0: /imu_corrected
+imu0: /imu
 imu0_queue_size: 50
 imu0_nodelay: true
 imu0_differential: false

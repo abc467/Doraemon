@@ -102,6 +102,12 @@ class CoveragePlannerActionServer:
         self.default_no_go_buffer_m = float(
             rospy.get_param("~default_no_go_buffer_m", 0.30)
         )
+        self.default_no_go_long_edge_normal_buffer_m = float(
+            rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.15)
+        )
+        self.default_no_go_short_edge_normal_buffer_m = float(
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+        )
         self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)
 
         if self.auto_map_identity_enable:
@@ -456,6 +462,12 @@ class CoveragePlannerActionServer:
                 virtual_walls=raw_constraints.get("virtual_walls") or [],
                 default_buffer_m=float(self.default_virtual_wall_buffer_m),
                 default_no_go_buffer_m=float(self.default_no_go_buffer_m),
+                default_no_go_long_edge_normal_buffer_m=float(
+                    self.default_no_go_long_edge_normal_buffer_m
+                ),
+                default_no_go_short_edge_normal_buffer_m=float(
+                    self.default_no_go_short_edge_normal_buffer_m
+                ),
                 prec=prec,
             )
             compiled_zone_constraints = compile_zone_constraints(

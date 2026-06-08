@@ -21,6 +21,7 @@ namespace mppi
   PathHandler::getGlobalPlanConsideringBoundsInCostmapFrame(
       const geometry_msgs::PoseStamped &global_pose)
   {
+    transformed_path_ends_at_goal_ = false;
     auto begin = global_plan_up_to_inversion_.poses.begin();
 
     // 搜索最近点（限制搜索范围）
@@ -38,16 +39,46 @@ namespace mppi
     // 从最近点开始，保留累计距离不超过 prune_distance_ 的路径点，避免处理过长路径
     auto pruned_plan_end = utils::first_after_integrated_distance(closest_point, global_plan_up_to_inversion_.poses.end(), prune_distance_);
 
+    const std::string & plan_frame = global_plan_.header.frame_id;
+    const std::string & costmap_frame = costmap_->getGlobalFrameID();
+    const bool transform_required = plan_frame != costmap_frame;
+    geometry_msgs::TransformStamped plan_to_costmap;
+
+    if (transform_required)
+    {
+      try
+      {
+        // All path poses share a frame and timestamp, so one TF lookup is
+        // sufficient for the entire local path.
+        plan_to_costmap = tf_buffer_->lookupTransform(
+            costmap_frame, plan_frame, global_pose.header.stamp, ros::Duration(0.5));
+      }
+      catch (const tf2::TransformException & ex)
+      {
+        ROS_ERROR("Unable to transform global plan to costmap frame: %s", ex.what());
+        throw;
+      }
+    }
+
     unsigned int mx, my;
     // 考虑代价地图边界，裁剪出局部路径
     // 将路径点从全局坐标系转换到代价地图坐标系
     for (auto global_plan_pose = closest_point; global_plan_pose != pruned_plan_end; ++global_plan_pose)
     {
-      // Transform from global plan frame to costmap frame
+      geometry_msgs::PoseStamped plan_pose = *global_plan_pose;
+      plan_pose.header.stamp = global_pose.header.stamp;
+      plan_pose.header.frame_id = plan_frame;
+
       geometry_msgs::PoseStamped costmap_plan_pose;
-      global_plan_pose->header.stamp = global_pose.header.stamp;
-      global_plan_pose->header.frame_id = global_plan_.header.frame_id;
-      transformPose(costmap_->getGlobalFrameID(), *global_plan_pose, costmap_plan_pose);
+      if (transform_required)
+      {
+        tf2::doTransform(plan_pose, costmap_plan_pose, plan_to_costmap);
+      }
+      else
+      {
+        costmap_plan_pose = plan_pose;
+        costmap_plan_pose.header.frame_id = costmap_frame;
+      }
 
       // 检查是否在costmap内
       if (!costmap_->getCostmap()->worldToMap(
@@ -60,6 +91,8 @@ namespace mppi
       transformed_plan.poses.push_back(costmap_plan_pose);
     }
 
+    transformed_path_ends_at_goal_ =
+        pruned_plan_end == global_plan_up_to_inversion_.poses.end();
     return {transformed_plan, closest_point};
   }
 
@@ -71,13 +104,37 @@ namespace mppi
       throw std::invalid_argument("Received plan with zero length");
     }
 
-    geometry_msgs::PoseStamped robot_pose;
-    if (!transformPose(global_plan_up_to_inversion_.header.frame_id, pose, robot_pose))
+    const std::string & plan_frame = global_plan_up_to_inversion_.header.frame_id;
+    if (pose.header.frame_id == plan_frame)
     {
-      throw std::runtime_error(std::string("Unable to transform robot pose into global plan's frame: "));
+      return pose;
     }
 
-    return robot_pose;
+    try
+    {
+      // Use the newest localization transform instead of waiting for a future
+      // transform at ros::Time::now(). Reject stale localization explicitly.
+      const auto transform = tf_buffer_->lookupTransform(
+          plan_frame, pose.header.frame_id, ros::Time(0),
+          ros::Duration(transform_tolerance_));
+
+      const ros::Duration transform_age = ros::Time::now() - transform.header.stamp;
+      if (transform.header.stamp.isZero() ||
+          transform_age.toSec() > transform_tolerance_)
+      {
+        throw std::runtime_error(
+            "Latest localization transform is older than transform_tolerance");
+      }
+
+      geometry_msgs::PoseStamped robot_pose;
+      tf2::doTransform(pose, robot_pose, transform);
+      return robot_pose;
+    }
+    catch (const tf2::TransformException & ex)
+    {
+      ROS_ERROR("Unable to transform robot pose into global plan frame: %s", ex.what());
+      throw;
+    }
   }
 
   nav_msgs::Path PathHandler::transformPath(
@@ -134,6 +191,11 @@ namespace mppi
   }
 
   nav_msgs::Path &PathHandler::getPath() { return global_plan_; }
+
+  bool PathHandler::transformedPathEndsAtGoal() const
+  {
+    return transformed_path_ends_at_goal_;
+  }
 
   void PathHandler::prunePlan(nav_msgs::Path &plan, const PathIterator end)
   {

@@ -36,6 +36,10 @@ public:
   void initialize(const ros::NodeHandle& nh , const std::string & name,
     const std::string & frame_id);
 
+  bool hasTrajectorySubscribers() const;
+  bool hasOptimalPathSubscribers() const;
+  bool hasTransformedPathSubscribers() const;
+  bool hasSubscribers() const;
 
   /**
     * @brief 添加最优轨迹用于可视化
@@ -80,4 +84,3 @@ protected:
 };
 
 }  // namespace mppi
-

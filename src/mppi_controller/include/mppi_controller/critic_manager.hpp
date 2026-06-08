@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -67,7 +68,10 @@ protected:
   std::vector<std::string> critic_names_;
   std::unique_ptr<pluginlib::ClassLoader<critics::CriticFunction>> loader_;
   Critics critics_;
+
+  bool timing_diagnostics_{false};
+  mutable size_t timing_cycles_{0};
+  mutable std::vector<double> critic_time_totals_ms_;
 };
 
 }  // namespace mppi
-

@@ -1,6 +1,6 @@
-
-
+#include <algorithm>
 #include <cmath>
+#include <omp.h>
 #include "mppi_controller/critics/cost_critic.hpp"
 
 namespace mppi::critics
@@ -18,13 +18,13 @@ void CostCritic::initialize()
   nh_.param(param_prefix + "near_goal_distance", near_goal_distance_, 0.5f);
   nh_.param(param_prefix + "inflation_layer_name", inflation_layer_name_, std::string(""));
   nh_.param(param_prefix + "trajectory_point_step", trajectory_point_step_, 2);
+  nh_.param(param_prefix + "parallel_threads", parallel_threads_, 1);
+  trajectory_point_step_ = std::max(1, trajectory_point_step_);
+  parallel_threads_ = std::clamp(parallel_threads_, 1, omp_get_max_threads());
 
   // 将权重归一化到与其他权重相同范围内
   weight_ /= 254.0f;
 
-  // When footprint collision checking is disabled, there is no reason to
-  // inspect the layered costmap at startup. That extra walk is both slow and,
-  // in some bringup sequences, can observe an invalid plugin pointer.
   if (consider_footprint_) {
     possible_collision_cost_ = findCircumscribedCost(costmap_ros_);
   } else {
@@ -41,10 +41,41 @@ void CostCritic::initialize()
   }
 
   ROS_INFO(
-    "Cost Critic with %d power and %f / %f weights. "
+    "Cost Critic with %d power and %f / %f weights, using %d thread(s). "
     "Critic will collision check based on %s cost.",
-    power_, critical_cost_, weight_, consider_footprint_ ?
+    power_, critical_cost_, weight_, parallel_threads_, consider_footprint_ ?
     "footprint" : "circular ");
+}
+
+bool CostCritic::inCollision(
+  float cost, float x, float y, float theta,
+  base_local_planner::CostmapModel & collision_checker,
+  const std::vector<geometry_msgs::Point> & footprint)
+{
+  if (consider_footprint_ &&
+    (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f))
+  {
+    const double footprint_cost = collision_checker.footprintCost(
+      static_cast<double>(x), static_cast<double>(y), static_cast<double>(theta),
+      footprint);
+
+    if (footprint_cost < 0.0) {
+      // CostmapModel returns -2 for unknown cells. Preserve the existing
+      // track_unknown_space behavior while treating lethal and out-of-map
+      // footprint poses as collisions.
+      return !(footprint_cost == -2.0 && is_tracking_unknown_);
+    }
+  }
+
+  switch (static_cast<unsigned char>(cost)) {
+    case (costmap_2d::LETHAL_OBSTACLE):
+    case (costmap_2d::INSCRIBED_INFLATED_OBSTACLE):
+      return true;
+    case (costmap_2d::NO_INFORMATION):
+      return !is_tracking_unknown_;
+  }
+
+  return false;
 }
 
 float CostCritic::findCircumscribedCost(
@@ -142,7 +173,7 @@ void CostCritic::score(CriticData & data)
 
   Eigen::ArrayXf repulsive_cost(data.costs.rows());
   repulsive_cost.setZero();
-  bool all_trajectories_collide = true;
+  int collision_free_trajectories = 0;
 
   int strided_traj_cols = floor((data.trajectories.x.cols() - 1) / trajectory_point_step_) + 1;
   int strided_traj_rows = data.trajectories.x.rows();
@@ -159,52 +190,59 @@ void CostCritic::score(CriticData & data)
       Eigen::Stride<-1, -1>>(data.trajectories.yaws.data(), strided_traj_rows, strided_traj_cols,
       Eigen::Stride<-1, -1>(outer_stride, 1));
 
-  for (int i = 0; i < strided_traj_rows; ++i) {
-    bool trajectory_collide = false;
-    float pose_cost = 0.0f;
-    float & traj_cost = repulsive_cost(i);
+  // Snapshot the footprint once per cycle. Each thread gets its own stateless
+  // CostmapModel wrapper while reading the costmap held by MBF's controller lock.
+  const auto footprint = costmap_ros_->getRobotFootprint();
 
-    for (int j = 0; j < strided_traj_cols; j++) {
-      float Tx = traj_x(i, j);
-      float Ty = traj_y(i, j);
-      unsigned int x_i = 0u, y_i = 0u;
+#pragma omp parallel num_threads(parallel_threads_) reduction(+:collision_free_trajectories)
+  {
+    base_local_planner::CostmapModel thread_collision_checker(*costmap_);
 
-      // The getCost doesn't use orientation
-      // The footprintCostAtPose will always return "INSCRIBED" if footprint is over it
-      // So the center point has more information than the footprint
-      // 直接使用中心点代价，而不是使用footprint
-      if (!worldToMapFloat(Tx, Ty, x_i, y_i)) {
-        if (!is_tracking_unknown_) {
-          traj_cost = collision_cost_;
-          trajectory_collide = true;
-          break;
+#pragma omp for schedule(static)
+    for (int i = 0; i < strided_traj_rows; ++i) {
+      bool trajectory_collide = false;
+      float pose_cost = 0.0f;
+      float & traj_cost = repulsive_cost(i);
+
+      for (int j = 0; j < strided_traj_cols; j++) {
+        float Tx = traj_x(i, j);
+        float Ty = traj_y(i, j);
+        unsigned int x_i = 0u, y_i = 0u;
+
+        if (!worldToMapFloat(Tx, Ty, x_i, y_i)) {
+          if (!is_tracking_unknown_) {
+            traj_cost = collision_cost_;
+            trajectory_collide = true;
+            break;
+          }
+          pose_cost = 255.0f;  // NO_INFORMATION in float
+        } else {
+          pose_cost = static_cast<float>(costmap->getCost(x_i, y_i));
+          if (pose_cost < 1.0f) {
+            continue;  // In free space
+          }
+          if (inCollision(
+              pose_cost, Tx, Ty, traj_yaw(i, j),
+              thread_collision_checker, footprint))
+          {
+            traj_cost = collision_cost_;
+            trajectory_collide = true;
+            break;
+          }
         }
-        pose_cost = 255.0f;  // NO_INFORMATION in float
-      } else {
-        pose_cost = static_cast<float>(costmap->getCost(x_i, y_i));
-        if (pose_cost < 1.0f) {
-          continue;  // In free space
-        }
-        if (inCollision(pose_cost, Tx, Ty, traj_yaw(i, j))) {
-          traj_cost = collision_cost_;
-          trajectory_collide = true;
-          break;
+
+        // Keep center-point inflation cost for smooth obstacle repulsion. The
+        // footprint check above supplies the hard collision boundary.
+        if (pose_cost >= 253.0f /*INSCRIBED_INFLATED_OBSTACLE in float*/) {
+          traj_cost += critical_cost_;
+        } else if (!near_goal) {
+          traj_cost += pose_cost;
         }
       }
 
-      // Let near-collision trajectory points be punished severely
-      // Note that we collision check based on the footprint actual,
-      // but score based on the center-point cost regardless
-      // 远离靠近障碍的轨迹点
-      if (pose_cost >= 253.0f /*INSCRIBED_INFLATED_OBSTACLE in float*/) {
-        traj_cost += critical_cost_;
-      } else if (!near_goal) {
-        traj_cost += pose_cost;
+      if (!trajectory_collide) {
+        ++collision_free_trajectories;
       }
-    }
-
-    if (!trajectory_collide) {
-      all_trajectories_collide = false;
     }
   }
 
@@ -215,7 +253,7 @@ void CostCritic::score(CriticData & data)
     data.costs += repulsive_cost * (weight_ / static_cast<float>(strided_traj_cols));
   }
 
-  data.fail_flag = all_trajectories_collide;
+  data.fail_flag = collision_free_trajectories == 0;
 }
 
 }  // namespace mppi::critics

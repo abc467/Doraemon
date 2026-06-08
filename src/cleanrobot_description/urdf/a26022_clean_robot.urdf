@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.5.1-0-g916b5db  Build Version: 1.5.7152.31018
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot name="a26022_clean_robot">
+  <link name="base_footprint" />
+  <joint name="base_footprint_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base_footprint" />
+    <child link="base_link" />
+  </joint>
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.196490826186498 -9.35553781750022E-06 0.280052603248387"
+        rpy="0 0 0" />
+      <mass
+        value="25.3088663609194" />
+      <inertia
+        ixx="1.00046416956501"
+        ixy="7.10447792619379E-05"
+        ixz="-0.105698131930891"
+        iyy="1.45058994792139"
+        iyz="1.97984884068599E-05"
+        izz="1.76363762646327" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="left_wheel_link">
+    <inertial>
+      <origin
+        xyz="-0.000177496449434461 -0.0319229440709368 0.000425975292963177"
+        rpy="0 0 0" />
+      <mass
+        value="1.06112992026122" />
+      <inertia
+        ixx="0.00375826267218946"
+        ixy="-1.24034915524197E-05"
+        ixz="-4.77579123538151E-06"
+        iyy="0.00360047804436064"
+        iyz="1.96023661304929E-05"
+        izz="0.00390777880698007" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/left_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/left_wheel_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_wheel_joint"
+    type="fixed">
+    <origin
+      xyz="0 0.23 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_wheel_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_wheel_link">
+    <inertial>
+      <origin
+        xyz="0.000177496449434128 0.0319229440709367 0.000425975292963066"
+        rpy="0 0 0" />
+      <mass
+        value="1.06112992026122" />
+      <inertia
+        ixx="0.00375826267218946"
+        ixy="-1.24034915524187E-05"
+        ixz="4.77579123538122E-06"
+        iyy="0.00360047804436064"
+        iyz="-1.96023661304912E-05"
+        izz="0.00390777880698008" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/right_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/right_wheel_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_wheel_joint"
+    type="fixed">
+    <origin
+      xyz="0 -0.23 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_wheel_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="gyro_link">
+    <inertial>
+      <origin
+        xyz="-5.55111512312578E-17 -1.67810691686865E-17 -0.000733507653597906"
+        rpy="0 0 0" />
+      <mass
+        value="0.140620716682058" />
+      <inertia
+        ixx="7.21282900021027E-05"
+        ixy="6.64032925611099E-21"
+        ixz="-2.36980739856974E-21"
+        iyy="5.56598991748656E-05"
+        iyz="5.45843797695993E-21"
+        izz="9.75103372952217E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/gyro_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/gyro_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="gyro_joint"
+    type="fixed">
+    <origin
+      xyz="0.502 0 0.385"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="gyro_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="laser">
+    <inertial>
+      <origin
+        xyz="2.95092711307121E-05 -1.74498448169635E-07 -0.0156131409395789"
+        rpy="0 0 0" />
+      <mass
+        value="0.108631598127293" />
+      <inertia
+        ixx="4.26587363028909E-05"
+        ixy="1.21745038868189E-10"
+        ixz="-2.09117590861523E-08"
+        iyy="4.26596479187506E-05"
+        iyz="4.87004859337588E-10"
+        izz="4.01202971317793E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/laser.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/a26022/laser.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="laser_joint"
+    type="fixed">
+    <origin
+      xyz="0.50195 0 1.0503"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="laser" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cmath>
 #include <angles/angles.h>
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <nav_msgs/Odometry.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Twist.h>
+#include <base_local_planner/costmap_model.h>
 #include <costmap_2d/costmap_2d_ros.h>
 
 #include <tf2_ros/transform_listener.h>
@@ -49,6 +51,10 @@ private:
     bool isGoalReached(const geometry_msgs::Pose &robot_pose,
                      const geometry_msgs::Pose &goal_pose);
 
+    // Check the footprint sweep before issuing an in-place goal alignment.
+    bool isRotationCollisionFree(
+        const geometry_msgs::Pose &robot_pose, double angular_velocity) const;
+
     // 可视化
     void visualize(nav_msgs::Path path);
 
@@ -70,9 +76,19 @@ private:
     bool initialized_ = false;
     bool reach_goal_ = false;
     bool first_rotate_ = false;
+    bool timing_diagnostics_ = false;
+    size_t timing_cycles_ = 0;
+    double path_time_total_ms_ = 0.0;
+    double optimizer_time_total_ms_ = 0.0;
 
     double goal_tolerance_;
     double angle_tolerance_;
+    bool rotate_to_goal_enabled_ = true;
+    double rotate_to_goal_kp_ = 0.8;
+    double rotate_to_goal_min_angular_speed_ = 0.12;
+    double rotate_to_goal_max_angular_speed_ = 0.4;
+    double rotate_to_goal_collision_horizon_ = 0.5;
+    double rotate_to_goal_collision_step_ = 0.05;
 
 };
 

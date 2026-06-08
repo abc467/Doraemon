@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 
+#include <cstddef>
 #include <string>
 #include <memory>
 
@@ -221,6 +222,12 @@ protected:
   models::Path path_;
   geometry_msgs::Pose goal_;
   Eigen::ArrayXf costs_;
+
+  bool timing_diagnostics_{false};
+  size_t timing_cycles_{0};
+  double rollout_time_total_ms_{0.0};
+  double critics_time_total_ms_{0.0};
+  double update_time_total_ms_{0.0};
 
   CriticData critics_data_ = {
     state_, generated_trajectories_, path_, goal_,

@@ -16,8 +16,12 @@ map_identity_timeout_s: 2.0
 planner_version: "coverage_planner_v1"
 # 当虚拟墙没有单独配置 buffer 时使用的默认缓冲距离，单位米。
 default_virtual_wall_buffer_m: 0.25
-# 当禁行区没有单独配置 buffer 时，规划侧额外膨胀的安全缓冲距离，单位米。
+# 旧版等距膨胀参数；非矩形或显式等距配置的兼容兜底，单位米。
 default_no_go_buffer_m: 0.05
+# 矩形禁行区长边的法向外扩距离，不是沿长边方向延长，单位米。
+default_no_go_long_edge_normal_buffer_m: 0.15
+# 矩形禁行区短边的法向外扩距离，不是沿短边方向延长，单位米。
+default_no_go_short_edge_normal_buffer_m: 0.40
 robot:
   # Fields2Cover 使用的覆盖条带宽度；它更接近相邻清扫路径间距，而不是路径点间距，单位米。
   cov_width: 0.60
@@ -47,7 +51,7 @@ planner:
   validate_effective_region_path: false
   # 生成覆盖路径前，路径中心相对墙体 / 边界的收缩安全距离，单位米。
   # 狭窄区域如果无法满足该安全边距，应规划失败，而不是自动降低安全距离。
-  wall_margin_m: 0.33
+  wall_margin_m: 0.38
   # 在插入转弯前，从每条覆盖条带两端裁掉的预留距离，单位米。
   turn_margin_m: 1.20
   # 约束切分后的子区域短边小于该值时，不送入 Fields2Cover，单位米。

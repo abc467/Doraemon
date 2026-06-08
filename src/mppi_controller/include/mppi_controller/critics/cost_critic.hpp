@@ -2,7 +2,9 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "base_local_planner/costmap_model.h"
 #include "costmap_2d/inflation_layer.h"
 #include <costmap_2d/footprint.h>
 
@@ -34,36 +36,13 @@ public:
 
 protected:
   /**
-    * @brief  检查代价值是否表示碰撞, 不考虑footprint
-    * @param cost Point cost at pose center
-    * @param x X of pose
-    * @param y Y of pose
-    * @param theta theta of pose
-    * @return bool if in collision
+    * @brief Check a trajectory pose for collision using either the center point
+    * or the configured robot footprint.
     */
-  inline bool inCollision(float cost, float x, float y, float theta)
-  {
-    // If consider_footprint_ check footprint scort for collision
-    float score_cost = cost;
-    // if (consider_footprint_ &&
-    //   (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f))
-    // {
-    //   score_cost = static_cast<float>(collision_checker_.footprintCostAtPose(
-    //       static_cast<double>(x), static_cast<double>(y), static_cast<double>(theta),
-    //       costmap_ros_->getRobotFootprint()));
-    // }
-
-    switch (static_cast<unsigned char>(score_cost)) {
-      case (costmap_2d::LETHAL_OBSTACLE):
-        return true;
-      case (costmap_2d::INSCRIBED_INFLATED_OBSTACLE):
-        return consider_footprint_ ? false : true;
-      case (costmap_2d::NO_INFORMATION):
-        return is_tracking_unknown_ ? false : true;
-    }
-
-    return false;
-  }
+  bool inCollision(
+    float cost, float x, float y, float theta,
+    base_local_planner::CostmapModel & collision_checker,
+    const std::vector<geometry_msgs::Point> & footprint);
 
   /**
     * @brief (默认不使用该函数)找到机器人在任何方向下可能处于碰撞的最小代价
@@ -122,6 +101,7 @@ protected:
 
   float near_goal_distance_;
   std::string inflation_layer_name_;
+  int parallel_threads_{1};
 
   int power_{0};
 };

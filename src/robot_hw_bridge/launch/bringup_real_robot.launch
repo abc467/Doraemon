@@ -19,37 +19,38 @@
   <arg name="cartographer_mode" default="localization"/>
   <arg name="cartographer_runtime_ns" default="/cartographer/runtime"/>
   <arg name="cartographer_config_root" default=""/>
+  <arg name="start_base_runtime" default="true"/>
+  <arg name="start_lidar" default="true"/>
+  <arg name="lidar_ntp_ip" default="192.168.16.11"/>
+  <arg name="lidar_ntp_port" default="5678"/>
+  <arg name="lidar_ntp_enable" default="-1"/>
+  <arg name="start_imu" default="true"/>
+  <arg name="imu_port" default="/dev/serial/by-path/pci-0000:65:00.3-usb-0:3:1.0-port0"/>
+  <arg name="imu_baud" default="115200"/>
+  <arg name="imu_slave_address" default="1"/>
   <arg name="start_odometry_runtime" default="true"/>
-  <arg name="odom_serial_device" default="/dev/odom"/>
+  <arg name="odom_serial_device" default="/dev/serial/by-path/pci-0000:65:00.3-usb-0:1:1.0-port0"/>
   <arg name="odom_serial_baudrate" default="115200"/>
-  <arg name="odom_wheel_separation" default="0.7307"/>
+  <arg name="odom_protocol_mode" default="framed_434c"/>
+  <arg name="odom_use_device_timestamp" default="false"/>
+  <arg name="odom_publish_raw_tf" default="false"/>
+  <arg name="odom_wheel_separation" default="0.46"/>
   <arg name="odom_wheel_diameter" default="0.165"/>
   <arg name="odom_gear_ratio" default="9.0"/>
   <arg name="odom_encoder_ppr" default="10000.0"/>
-  <arg name="odom_left_wheel_scale" default="0.9995"/>
-  <arg name="odom_right_wheel_scale" default="1.0010"/>
+  <arg name="odom_left_encoder_sign" default="1.0"/>
+  <arg name="odom_right_encoder_sign" default="-1.0"/>
+  <arg name="odom_left_wheel_scale" default="1.0"/>
+  <arg name="odom_right_wheel_scale" default="1.0"/>
   <arg name="odom_angular_velocity_sign" default="-1.0"/>
-  <arg name="start_wheeltec_base" default="false"/>
-  <arg name="wheeltec_serial_device" default="/dev/wheeltec_controller"/>
-  <arg name="wheeltec_serial_baudrate" default="115200"/>
-  <arg name="wheeltec_car_mode" default="senior_diff"/>
-  <arg name="wheeltec_cmd_vel_topic" default="/cmd_vel"/>
-  <arg name="wheeltec_odom_frame_id" default="odom"/>
-  <arg name="wheeltec_robot_frame_id" default="base_footprint"/>
-  <arg name="wheeltec_gyro_frame_id" default="gyro_link"/>
-  <arg name="wheeltec_publish_odom_tf" default="true"/>
-  <arg name="wheeltec_odom_x_scale" default="1.0"/>
-  <arg name="wheeltec_odom_y_scale" default="1.0"/>
-  <arg name="wheeltec_odom_z_scale_positive" default="1.0"/>
-  <arg name="wheeltec_odom_z_scale_negative" default="1.0"/>
-  <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/clean_robot.urdf"/>
+  <arg name="robot_description_path" default="$(find cleanrobot_description)/urdf/a26022_clean_robot.urdf"/>
   <arg name="publish_base_footprint_to_base_link" default="false"/>
   <arg name="base_footprint_to_base_link_z" default="0.0"/>
   <arg name="publish_base_footprint_to_gyro_link" default="false"/>
   <arg name="start_planner_server" default="true"/>
   <arg name="enable_rect_zone_planner" default="true"/>
-  <arg name="enable_depth_obstacle_tracking" default="true"/>
-  <arg name="start_depth_camera_runtime" default="true"/>
+  <arg name="enable_depth_obstacle_tracking" default="false"/>
+  <arg name="start_depth_camera_runtime" default="false"/>
   <arg name="publish_robot_tf_for_depth_cameras" default="true"/>
   <arg name="enable_depth_left_cam" default="true"/>
   <arg name="enable_depth_right_cam" default="true"/>
@@ -63,13 +64,16 @@
   <arg name="mechanical_connect_enable" default="false"/>
   <arg name="dock_pose_score_thresh" default="0.00012"/>
   <arg name="dock_pose_score_topic" default="/dock_pose_score"/>
-  <arg name="enable_mcore_bridge" default="true"/>
-  <arg name="mcore_enable_cmd_vel" default="true"/>
+  <arg name="enable_mcore_bridge" default="false"/>
+  <arg name="enable_mcore_velocity_sender" default="true"/>
+  <arg name="mcore_serial_device" default="/dev/serial/by-path/pci-0000:67:00.4-usb-0:1.3:1.0-port0"/>
+  <arg name="mcore_serial_baudrate" default="115200"/>
+  <arg name="mcore_enable_cmd_vel" default="false"/>
   <arg name="mcore_server_ip" default="192.168.16.10"/>
   <arg name="mcore_server_port" default="5001"/>
   <arg name="mcore_cmd_vel_topic" default="/cmd_vel"/>
-  <arg name="mcore_linear_velocity_scale" default="1.0"/>
-  <arg name="mcore_angular_velocity_scale" default="1.0"/>
+  <arg name="mcore_linear_velocity_scale" default="1000.0"/>
+  <arg name="mcore_angular_velocity_scale" default="1000.0"/>
   <arg name="mcore_linear_velocity_sign" default="1.0"/>
   <arg name="mcore_angular_velocity_sign" default="1.0"/>
   <arg name="mcore_max_abs_linear_velocity" default="0.0"/>
@@ -79,8 +83,25 @@
   <arg name="enable_docking_stack" default="true"/>
   <arg name="restart_localization_app_service_name" default="/cartographer/runtime/app/restart_localization"/>
   <arg name="restart_localization_app_contract_param_ns" default="/cartographer/runtime/contracts/app/restart_localization"/>
-  <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
+  <arg name="odometry_health_imu_topic" default="/imu"/>
   <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
+
+  <group if="$(arg start_base_runtime)">
+    <include file="$(find cleanrobot)/launch/cleanrobot_base.launch">
+      <arg name="start_robot_state_publisher" value="true"/>
+      <arg name="robot_description_path" value="$(arg robot_description_path)"/>
+      <arg name="start_lidar" value="$(arg start_lidar)"/>
+      <arg name="lidar_ntp_ip" value="$(arg lidar_ntp_ip)"/>
+      <arg name="lidar_ntp_port" value="$(arg lidar_ntp_port)"/>
+      <arg name="lidar_ntp_enable" value="$(arg lidar_ntp_enable)"/>
+      <arg name="start_imu" value="$(arg start_imu)"/>
+      <arg name="imu_port" value="$(arg imu_port)"/>
+      <arg name="imu_baud" value="$(arg imu_baud)"/>
+      <arg name="imu_slave_address" value="$(arg imu_slave_address)"/>
+      <arg name="start_ahrs" value="false"/>
+      <arg name="start_depth_cameras" value="false"/>
+    </include>
+  </group>
 
   <!-- start TCP bridges + supply manager -->
   <include file="$(find robot_hw_bridge)/launch/hardware_bridges.launch">
@@ -103,33 +124,37 @@
     <arg name="dock_pose_score_topic" value="$(arg dock_pose_score_topic)"/>
   </include>
 
-  <group if="$(arg start_wheeltec_base)">
-    <include file="$(find robot_hw_bridge)/launch/wheeltec_senior_diff_base.launch">
-      <arg name="serial_device" value="$(arg wheeltec_serial_device)"/>
-      <arg name="serial_baudrate" value="$(arg wheeltec_serial_baudrate)"/>
-      <arg name="car_mode" value="$(arg wheeltec_car_mode)"/>
-      <arg name="cmd_vel_topic" value="$(arg wheeltec_cmd_vel_topic)"/>
-      <arg name="odom_frame_id" value="$(arg wheeltec_odom_frame_id)"/>
-      <arg name="robot_frame_id" value="$(arg wheeltec_robot_frame_id)"/>
-      <arg name="gyro_frame_id" value="$(arg wheeltec_gyro_frame_id)"/>
-      <arg name="publish_odom_tf" value="$(arg wheeltec_publish_odom_tf)"/>
-      <arg name="odom_x_scale" value="$(arg wheeltec_odom_x_scale)"/>
-      <arg name="odom_y_scale" value="$(arg wheeltec_odom_y_scale)"/>
-      <arg name="odom_z_scale_positive" value="$(arg wheeltec_odom_z_scale_positive)"/>
-      <arg name="odom_z_scale_negative" value="$(arg wheeltec_odom_z_scale_negative)"/>
+  <group if="$(arg enable_mcore_velocity_sender)">
+    <include file="$(find mcore_chassis_bridge)/launch/mcore_velocity_sender.launch">
+      <arg name="serial_device" value="$(arg mcore_serial_device)"/>
+      <arg name="serial_baudrate" value="$(arg mcore_serial_baudrate)"/>
+      <arg name="cmd_vel_topic" value="$(arg mcore_cmd_vel_topic)"/>
+      <arg name="linear_velocity_scale" value="$(arg mcore_linear_velocity_scale)"/>
+      <arg name="angular_velocity_scale" value="$(arg mcore_angular_velocity_scale)"/>
+      <arg name="linear_velocity_sign" value="$(arg mcore_linear_velocity_sign)"/>
+      <arg name="angular_velocity_sign" value="$(arg mcore_angular_velocity_sign)"/>
+      <arg name="max_abs_linear_velocity" value="$(arg mcore_max_abs_linear_velocity)"/>
+      <arg name="max_abs_angular_velocity" value="$(arg mcore_max_abs_angular_velocity)"/>
+      <arg name="enable_tx_log" value="false"/>
+      <arg name="enable_rx_log" value="true"/>
     </include>
   </group>
 
   <group if="$(arg start_navigation)">
     <group if="$(arg start_odometry_runtime)">
-      <include file="$(find wheel_speed_odom_bridge)/launch/imu_bias_correction.launch"/>
       <include file="$(find wheel_speed_odom_bridge)/launch/wheel_speed_odom.launch">
         <arg name="serial_device" value="$(arg odom_serial_device)"/>
         <arg name="serial_baudrate" value="$(arg odom_serial_baudrate)"/>
+        <arg name="protocol_mode" value="$(arg odom_protocol_mode)"/>
+        <arg name="use_device_timestamp" value="$(arg odom_use_device_timestamp)"/>
+        <arg name="publish_raw_odom_tf" value="$(arg odom_publish_raw_tf)"/>
+        <arg name="imu_topic" value="/imu"/>
         <arg name="wheel_separation" value="$(arg odom_wheel_separation)"/>
         <arg name="wheel_diameter" value="$(arg odom_wheel_diameter)"/>
         <arg name="gear_ratio" value="$(arg odom_gear_ratio)"/>
         <arg name="encoder_pulses_per_motor_revolution" value="$(arg odom_encoder_ppr)"/>
+        <arg name="left_encoder_sign" value="$(arg odom_left_encoder_sign)"/>
+        <arg name="right_encoder_sign" value="$(arg odom_right_encoder_sign)"/>
         <arg name="left_wheel_scale" value="$(arg odom_left_wheel_scale)"/>
         <arg name="right_wheel_scale" value="$(arg odom_right_wheel_scale)"/>
         <arg name="angular_velocity_sign" value="$(arg odom_angular_velocity_sign)"/>

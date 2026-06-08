@@ -8,6 +8,7 @@ ThetaStar::ThetaStar()
   w_heuristic_cost_(1.0),
   how_many_corners_(8),
   allow_unknown_(true),
+  max_allowed_cost_(LETHAL_COST - 1),
   size_x_(0),
   size_y_(0),
   terminal_checking_interval_(5000),

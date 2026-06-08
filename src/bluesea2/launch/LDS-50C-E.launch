@@ -1,0 +1,48 @@
+<launch>
+  <arg name="scan_topic" default="/scan"/>
+  <arg name="time_mode" default="0"/>
+  <arg name="ntp_ip" default="192.168.16.88"/>
+  <arg name="ntp_port" default="5678"/>
+  <arg name="ntp_enable" default="-1"/>
+
+  <node name="bluesea2_laser_publisher" pkg="bluesea2" type="bluesea2_node" output="screen">
+    <param name="scan_topic" value="$(arg scan_topic)"/>
+    <param name="cloud_topic" value="cloud"/>
+    <param name="frame_id" value="laser"/>
+
+    <param name="min_dist" value="0.001"/>
+    <param name="max_dist" value="40.0"/>
+    <param name="output_scan" value="true"/>
+    <param name="output_cloud" value="false"/>
+    <param name="output_cloud2" value="true"/>
+    <param name="output_360" value="true"/>
+    <param name="reversed" value="false"/>
+    <param name="hard_resample" value="false"/>
+    <param name="soft_resample" value="false"/>
+    <param name="with_angle_filter" value="false"/>
+    <param name="min_angle" value="-1"/>
+    <param name="max_angle" value="2"/>
+    <param name="log_enable" value="false"/>
+    <param name="log_path" value="/tmp/ros_log.txt"/>
+
+    <param name="type" value="udp"/>
+    <param name="lidar_port" value="6543"/>
+    <param name="local_port" value="6668"/>
+    <param name="lidar_ip" value="192.168.16.88"/>
+
+    <param name="uuid" value="1"/>
+
+    <param name="rpm" value="-1"/>
+    <param name="resample_res" value="-1"/>
+    <param name="with_smooth" value="-1"/>
+    <param name="with_deshadow" value="-1"/>
+    <param name="alarm_msg" value="-1"/>
+    <param name="ats" value="-1"/>
+    <param name="direction" value="-1"/>
+
+    <param name="time_mode" value="$(arg time_mode)"/>
+    <param name="ntp_ip" value="$(arg ntp_ip)"/>
+    <param name="ntp_port" value="$(arg ntp_port)"/>
+    <param name="ntp_enable" value="$(arg ntp_enable)"/>
+  </node>
+</launch>

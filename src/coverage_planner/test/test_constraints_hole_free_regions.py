@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import math
 import os
 import sys
 import unittest
@@ -150,6 +151,105 @@ class ConstraintHoleFreeRegionTest(unittest.TestCase):
         self.assertAlmostEqual(maxy, 3.5, places=3)
         self.assertEqual(len(zone_constraints.effective_regions), 1)
         self.assertEqual(len(zone_constraints.effective_regions[0].get("holes") or []), 1)
+
+    def test_rectangular_keepout_expands_outward_normal_to_each_edge_type(self):
+        no_go_outer = [[3.0, 1.5], [7.0, 1.5], [7.0, 3.5], [3.0, 3.5]]
+        map_constraints = compile_map_constraints(
+            map_id="map_demo",
+            map_md5="demo-md5",
+            constraint_version="constraints-demo",
+            no_go_areas=[{"area_id": "nogo_rect", "polygon": no_go_outer, "enabled": True}],
+            virtual_walls=[],
+            default_no_go_long_edge_normal_buffer_m=0.15,
+            default_no_go_short_edge_normal_buffer_m=0.40,
+            prec=3,
+        )
+
+        area = map_constraints.no_go_polygons[0]
+        ring = area["geometry"][0]["outer"]
+        minx, miny, maxx, maxy = _ring_bounds(ring)
+        self.assertAlmostEqual(minx, 2.60, places=3)
+        self.assertAlmostEqual(maxx, 7.40, places=3)
+        self.assertAlmostEqual(miny, 1.35, places=3)
+        self.assertAlmostEqual(maxy, 3.65, places=3)
+        self.assertEqual(area["buffer_mode"], "rect_anisotropic")
+        self.assertAlmostEqual(area["long_edge_normal_buffer_m"], 0.15, places=3)
+        self.assertAlmostEqual(area["short_edge_normal_buffer_m"], 0.40, places=3)
+
+    def test_rotated_rectangular_keepout_uses_local_edge_normals(self):
+        angle = math.radians(31.0)
+        axis_u = (math.cos(angle), math.sin(angle))
+        axis_v = (-math.sin(angle), math.cos(angle))
+        center = (4.0, -2.0)
+        half_long = 2.0
+        half_short = 0.6
+
+        no_go_outer = []
+        for u, v in (
+            (-half_long, -half_short),
+            (half_long, -half_short),
+            (half_long, half_short),
+            (-half_long, half_short),
+        ):
+            no_go_outer.append(
+                [
+                    center[0] + u * axis_u[0] + v * axis_v[0],
+                    center[1] + u * axis_u[1] + v * axis_v[1],
+                ]
+            )
+
+        map_constraints = compile_map_constraints(
+            map_id="map_demo",
+            map_md5="demo-md5",
+            constraint_version="constraints-demo",
+            no_go_areas=[{"area_id": "nogo_rotated_rect", "polygon": no_go_outer, "enabled": True}],
+            virtual_walls=[],
+            default_no_go_long_edge_normal_buffer_m=0.15,
+            default_no_go_short_edge_normal_buffer_m=0.40,
+            prec=4,
+        )
+
+        ring = map_constraints.no_go_polygons[0]["geometry"][0]["outer"]
+        projections_u = []
+        projections_v = []
+        for x, y in ring:
+            dx = float(x) - center[0]
+            dy = float(y) - center[1]
+            projections_u.append(dx * axis_u[0] + dy * axis_u[1])
+            projections_v.append(dx * axis_v[0] + dy * axis_v[1])
+
+        self.assertAlmostEqual(max(projections_u), half_long + 0.40, places=3)
+        self.assertAlmostEqual(min(projections_u), -half_long - 0.40, places=3)
+        self.assertAlmostEqual(max(projections_v), half_short + 0.15, places=3)
+        self.assertAlmostEqual(min(projections_v), -half_short - 0.15, places=3)
+
+    def test_explicit_isotropic_buffer_overrides_anisotropic_defaults(self):
+        no_go_outer = [[3.0, 1.5], [7.0, 1.5], [7.0, 3.5], [3.0, 3.5]]
+        map_constraints = compile_map_constraints(
+            map_id="map_demo",
+            map_md5="demo-md5",
+            constraint_version="constraints-demo",
+            no_go_areas=[
+                {
+                    "area_id": "nogo_rect",
+                    "polygon": no_go_outer,
+                    "enabled": True,
+                    "buffer_m": 0.20,
+                }
+            ],
+            virtual_walls=[],
+            default_no_go_long_edge_normal_buffer_m=0.15,
+            default_no_go_short_edge_normal_buffer_m=0.40,
+            prec=3,
+        )
+
+        area = map_constraints.no_go_polygons[0]
+        minx, miny, maxx, maxy = _ring_bounds(area["geometry"][0]["outer"])
+        self.assertAlmostEqual(minx, 2.80, places=3)
+        self.assertAlmostEqual(maxx, 7.20, places=3)
+        self.assertAlmostEqual(miny, 1.30, places=3)
+        self.assertAlmostEqual(maxy, 3.70, places=3)
+        self.assertEqual(area["buffer_mode"], "isotropic")
 
 
 if __name__ == "__main__":

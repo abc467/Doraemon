@@ -1,20 +1,25 @@
 <launch>
   <!-- 这个 launch 只负责“原始轮速里程计 + 单 EKF”。
-       IMU 零漂修正与协方差覆盖由 imu_bias_correction.launch 独立负责。 -->
+       EKF 直接消费 Modbus IMU 发布的 /imu。 -->
   <!-- 是否启用 EKF 融合链路。关闭后只保留原始轮速里程计节点。 -->
   <arg name="enable_ekf" default="true"/>
   <!-- 工厂默认走生产态：关闭诊断 CSV，仅在排障时显式开启 debug_mode:=true。 -->
-  <arg name="debug_mode" default="false"/>
+  <arg name="debug_mode" default="true"/>
 
   <!-- 轮速里程计串口输入。当前协议固定为 43 4C + 40 01 数据帧。
        payload = [last_wheel_update_ms, left_encoder_count, right_encoder_count,
-                  left_speed, right_speed, seq, status]
-       status 位定义：
-       bit0 左轮数据有效，bit1 右轮数据有效
-       bit2 左轮数据超时 >50 ms，bit3 右轮数据超时 >50 ms
-       bit4 左右轮采样时间偏差 >15 ms -->
-  <arg name="serial_device" default="/dev/odom"/>
+                  left_speed, right_speed, seq]
+       字段类型均为 4 字节整数：
+       last_wheel_update_ms 为 uint32，无符号；
+       left_encoder_count/right_encoder_count/left_speed/right_speed 为 int32，有符号；
+       seq 为 uint32，无符号。 -->
+  <arg name="serial_device" default="/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"/>
   <arg name="serial_baudrate" default="115200"/>
+  <!-- 里程计串口协议：
+       framed_434c      = 43 4C + length + 40 01 + payload + checksum + tail
+       bare_payload_24  = 直接循环发送 24 字节 payload，无帧头/校验/帧尾。
+       bare_payload_20/bare20 仍作为旧参数别名兼容。 -->
+  <arg name="protocol_mode" default="framed_434c"/>
 
   <!-- 原始里程计和 EKF 输出话题。
        调试态下会额外输出 balanced/aggressive 两套 EKF 对比话题。 -->
@@ -23,11 +28,11 @@
   <arg name="ekf_balanced_topic" default="/odom_ekf_balanced"/>
   <arg name="ekf_aggressive_topic" default="/odom_ekf_aggressive"/>
   <arg name="imu_topic" default="/imu"/>
-  <arg name="corrected_imu_topic" default="/imu_corrected"/>
 
   <!-- 时间同步参数：
        1. use_device_timestamp=true 时，使用协议里的 stamp_ms 映射到 ROS 时间
-       2. false 时，直接使用主机收到串口帧的时间 -->
+       2. false 时，直接使用主机收到串口帧的时间
+       默认使用设备时间；若 stamp_ms 异常，节点会重同步时间基并跳过该帧积分。 -->
   <arg name="use_device_timestamp" default="true"/>
   <arg name="stamp_unit_to_sec" default="0.001"/>
   <arg name="stamp_resync_threshold_sec" default="0.5"/>
@@ -44,21 +49,25 @@
        1. encoder_distance_per_count > 0 时，直接使用该值作为“每个编码值对应的米数”
        2. encoder_distance_per_count = 0 时，按下面公式自动计算
        距离系数 = pi * wheel_diameter / (gear_ratio * encoder_pulses_per_motor_revolution)
-       3. left_wheel_scale / right_wheel_scale 用于单独微调左右轮比例 -->
+       3. left_encoder_sign / right_encoder_sign 只修正编码器方向，取 1 或 -1
+       4. left_wheel_scale / right_wheel_scale 用于单独微调左右轮比例，必须为正数 -->
   <arg name="encoder_distance_per_count" default="0.0"/>
-  <arg name="left_wheel_scale" default="0.9995"/>
-  <arg name="right_wheel_scale" default="1.0010"/>
+  <arg name="left_encoder_sign" default="1.0"/>
+  <arg name="right_encoder_sign" default="-1.0"/>
+  <arg name="left_wheel_scale" default="1.0"/>
+  <arg name="right_wheel_scale" default="1.0"/>
   <arg name="wheel_diameter" default="0.165"/>
   <arg name="gear_ratio" default="9.0"/>
   <arg name="encoder_pulses_per_motor_revolution" default="10000.0"/>
-  <arg name="wheel_separation" default="0.7307"/>
+  <arg name="wheel_separation" default="0.46"/>
 
   <!-- 运动保护参数：
-       用于限制异常的线速度、角速度、线加速度、角加速度。 -->
+       当前只对线速度、角速度做限幅。
+       线加速度、角加速度参数仅保留给诊断日志，不再触发拒帧。 -->
   <arg name="max_abs_linear_speed" default="2.0"/>
   <arg name="max_abs_angular_speed" default="1.5"/>
-  <arg name="max_abs_linear_accel" default="3.0"/>
-  <arg name="max_abs_angular_accel" default="6.0"/>
+  <arg name="max_abs_linear_accel" default="0.0"/>
+  <arg name="max_abs_angular_accel" default="0.0"/>
   <arg name="motion_guard_mode" default="reject"/>
 
   <!-- 原始轮速里程计节点：
@@ -67,6 +76,7 @@
         name="wheel_speed_odom" output="screen">
     <param name="serial_device" value="$(arg serial_device)"/>
     <param name="serial_baudrate" value="$(arg serial_baudrate)"/>
+    <param name="protocol_mode" value="$(arg protocol_mode)"/>
 
     <!-- 原始 Odometry 消息的输出配置。 -->
     <param name="publish_topic" value="$(arg raw_odom_topic)"/>
@@ -87,6 +97,8 @@
     <!-- 编码器积分与底盘几何参数。 -->
     <param name="angular_velocity_sign" value="$(arg angular_velocity_sign)"/>
     <param name="encoder_distance_per_count" value="$(arg encoder_distance_per_count)"/>
+    <param name="left_encoder_sign" value="$(arg left_encoder_sign)"/>
+    <param name="right_encoder_sign" value="$(arg right_encoder_sign)"/>
     <param name="left_wheel_scale" value="$(arg left_wheel_scale)"/>
     <param name="right_wheel_scale" value="$(arg right_wheel_scale)"/>
     <param name="wheel_diameter" value="$(arg wheel_diameter)"/>
@@ -104,7 +116,7 @@
     <!-- 合法时间间隔范围：
          若相邻两帧的 dt 超出该区间，会触发时间基重同步并跳过当前积分。 -->
     <param name="min_valid_odom_dt_sec" value="0.005"/>
-    <param name="max_valid_odom_dt_sec" value="0.06"/>
+    <param name="max_valid_odom_dt_sec" value="0.12"/>
 
     <!-- 原始里程计协方差。 -->
     <rosparam param="odom_pose_covariance_diagonal">[0.05, 0.05, 1000000.0, 1000000.0, 1000000.0, 0.1]</rosparam>
@@ -115,7 +127,7 @@
   </node>
 
   <!-- EKF 融合链路：
-       wheel_speed_odom.launch 不再启动 IMU 修正节点，这里直接消费外部提供的 corrected_imu_topic。
+       这里直接消费外部提供的 imu_topic。
        调试态会额外拉起 balanced/aggressive 两套 EKF，仅输出对比 odom 话题，不发布 TF。 -->
   <group if="$(arg enable_ekf)">
     <node pkg="robot_localization" type="ekf_localization_node"
@@ -123,7 +135,7 @@
           output="screen" clear_params="true">
       <rosparam command="load" file="$(find wheel_speed_odom_bridge)/config/ekf_2d.yaml"/>
       <param name="odom0" value="$(arg raw_odom_topic)"/>
-      <param name="imu0" value="$(arg corrected_imu_topic)"/>
+      <param name="imu0" value="$(arg imu_topic)"/>
       <param name="print_diagnostics" value="$(arg debug_mode)"/>
       <param name="publish_tf"
              value="$(eval arg('ekf_topic') == '/odom' or arg('ekf_topic') == 'odom')"/>
@@ -136,7 +148,7 @@
           output="screen" clear_params="true">
       <rosparam command="load" file="$(find wheel_speed_odom_bridge)/config/ekf_2d_balanced.yaml"/>
       <param name="odom0" value="$(arg raw_odom_topic)"/>
-      <param name="imu0" value="$(arg corrected_imu_topic)"/>
+      <param name="imu0" value="$(arg imu_topic)"/>
       <param name="print_diagnostics" value="$(arg debug_mode)"/>
       <param name="publish_tf" value="false"/>
       <remap from="odometry/filtered" to="$(arg ekf_balanced_topic)"/>
@@ -148,7 +160,7 @@
           output="screen" clear_params="true">
       <rosparam command="load" file="$(find wheel_speed_odom_bridge)/config/ekf_2d_aggressive.yaml"/>
       <param name="odom0" value="$(arg raw_odom_topic)"/>
-      <param name="imu0" value="$(arg corrected_imu_topic)"/>
+      <param name="imu0" value="$(arg imu_topic)"/>
       <param name="print_diagnostics" value="$(arg debug_mode)"/>
       <param name="publish_tf" value="false"/>
       <remap from="odometry/filtered" to="$(arg ekf_aggressive_topic)"/>

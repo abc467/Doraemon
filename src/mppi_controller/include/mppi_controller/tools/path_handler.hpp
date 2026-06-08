@@ -64,6 +64,12 @@ public:
     nav_msgs::Path transformPath(const geometry_msgs::PoseStamped &robot_pose);
 
     /**
+     * @brief Whether the latest transformed local window contains the final
+     *        pose of the remaining global path.
+     */
+    bool transformedPathEndsAtGoal() const;
+
+    /**
      * @brief 将全局坐标系下的goal转换到局部坐标系
      * @return 转换后的goal坐标(局部地图的globalframe)
      */
@@ -124,5 +130,6 @@ protected:
     float inversion_yaw_tolerance{0.4};
     bool enforce_path_inversion_{false};
     unsigned int inversion_locale_{0u};
+    bool transformed_path_ends_at_goal_{false};
 };
 }

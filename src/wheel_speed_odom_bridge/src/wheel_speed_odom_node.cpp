@@ -27,6 +27,8 @@
 
 namespace {
 
+constexpr char kDefaultSerialDevice[] =
+    "/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0";
 constexpr uint8_t kHeader0 = 0x43;
 constexpr uint8_t kHeader1 = 0x4C;
 constexpr uint8_t kTail = 0xDA;
@@ -43,21 +45,22 @@ constexpr double kPi = 3.14159265358979323846;
 constexpr size_t kStampMsOffset = 0;
 constexpr size_t kLeftEncoderCountOffset = 4;
 constexpr size_t kRightEncoderCountOffset = 8;
+constexpr size_t kLeftSpeedOffset = 12;
+constexpr size_t kRightSpeedOffset = 16;
 constexpr size_t kSeqOffset = 20;
-constexpr size_t kStatusOffset = 24;
-constexpr size_t kPayloadBytes = 28;
+constexpr size_t kPayloadBytes = 24;
 
 constexpr double kTimeJumpWarnSec = 10.0;
-constexpr uint32_t kStatusLeftValidMask = 1u << 0;
-constexpr uint32_t kStatusRightValidMask = 1u << 1;
-constexpr uint32_t kStatusLeftTimeoutMask = 1u << 2;
-constexpr uint32_t kStatusRightTimeoutMask = 1u << 3;
-constexpr uint32_t kStatusSampleSkewMask = 1u << 4;
 
 enum class MotionGuardMode {
   kReject,
   kWarnOnly,
   kOff,
+};
+
+enum class OdomProtocolMode {
+  kFramed434c,
+  kBarePayload24,
 };
 
 struct ProtocolTimestampState {
@@ -242,43 +245,12 @@ std::string FormatVector(const std::vector<double>& values) {
   return oss.str();
 }
 
-std::string FormatStatusFlags(uint32_t status) {
-  std::vector<std::string> flags;
-  if ((status & kStatusLeftValidMask) == 0U) {
-    flags.emplace_back("left_invalid");
-  }
-  if ((status & kStatusRightValidMask) == 0U) {
-    flags.emplace_back("right_invalid");
-  }
-  if ((status & kStatusLeftTimeoutMask) != 0U) {
-    flags.emplace_back("left_timeout");
-  }
-  if ((status & kStatusRightTimeoutMask) != 0U) {
-    flags.emplace_back("right_timeout");
-  }
-  if ((status & kStatusSampleSkewMask) != 0U) {
-    flags.emplace_back("sample_skew_gt_15ms");
-  }
-  if (flags.empty()) {
-    return "ok";
-  }
-
-  std::ostringstream oss;
-  for (size_t i = 0; i < flags.size(); ++i) {
-    if (i > 0) {
-      oss << "|";
-    }
-    oss << flags[i];
-  }
-  return oss.str();
-}
-
 }  // namespace
 
 class WheelSpeedOdomNode {
  public:
   WheelSpeedOdomNode() : nh_(), pnh_("~") {
-    pnh_.param<std::string>("serial_device", serial_device_, "/dev/odom");
+    pnh_.param<std::string>("serial_device", serial_device_, kDefaultSerialDevice);
     pnh_.param<int>("serial_baudrate", serial_baudrate_, 115200);
     pnh_.param<std::string>("publish_topic", publish_topic_, "/odom");
     pnh_.param<std::string>("frame_id", frame_id_, "odom");
@@ -289,13 +261,17 @@ class WheelSpeedOdomNode {
     pnh_.param<double>("reconnect_interval_sec", reconnect_interval_sec_, 1.0);
     pnh_.param<double>("warn_interval_sec", warn_interval_sec_, 5.0);
     pnh_.param<double>("loop_rate_hz", loop_rate_hz_, 100.0);
+    pnh_.param<std::string>("protocol_mode", protocol_mode_name_, "framed_434c");
     pnh_.param<bool>("enable_imu_diagnostic", enable_imu_diagnostic_, true);
     pnh_.param<std::string>("imu_topic", imu_topic_, "/imu");
     pnh_.param<bool>("use_device_timestamp", use_device_timestamp_, true);
+    pnh_.param<double>("debug_rx_stats_interval_sec", debug_rx_stats_interval_sec_, 2.0);
 
     pnh_.param<double>("angular_velocity_sign", angular_velocity_sign_, 1.0);
     pnh_.param<double>("wheel_separation", wheel_separation_, 0.725);
     pnh_.param<double>("encoder_distance_per_count", encoder_distance_per_count_, 0.0);
+    pnh_.param<double>("left_encoder_sign", left_encoder_sign_, 1.0);
+    pnh_.param<double>("right_encoder_sign", right_encoder_sign_, 1.0);
     pnh_.param<double>("left_wheel_scale", left_wheel_scale_, 1.0);
     pnh_.param<double>("right_wheel_scale", right_wheel_scale_, 1.0);
     pnh_.param<double>("wheel_diameter", wheel_diameter_, 0.18);
@@ -342,6 +318,20 @@ class WheelSpeedOdomNode {
       motion_guard_mode_ = MotionGuardMode::kReject;
     }
 
+    protocol_mode_name_ = ToLowerCopy(protocol_mode_name_);
+    if (protocol_mode_name_ == "bare_payload_24" || protocol_mode_name_ == "bare24" ||
+        protocol_mode_name_ == "bare_payload_20" || protocol_mode_name_ == "bare20") {
+      protocol_mode_name_ = "bare_payload_24";
+      protocol_mode_ = OdomProtocolMode::kBarePayload24;
+    } else {
+      if (protocol_mode_name_ != "framed_434c" && protocol_mode_name_ != "framed") {
+        ROS_WARN_STREAM("Invalid parameter: protocol_mode must be framed_434c or "
+                        "bare_payload_24. Fallback to framed_434c.");
+      }
+      protocol_mode_name_ = "framed_434c";
+      protocol_mode_ = OdomProtocolMode::kFramed434c;
+    }
+
     if (!std::isfinite(reconnect_interval_sec_) || reconnect_interval_sec_ <= 0.0) {
       ROS_WARN_STREAM(
           "Invalid parameter: reconnect_interval_sec must be > 0. Fallback to 1.0.");
@@ -384,6 +374,18 @@ class WheelSpeedOdomNode {
                       "Fallback to auto-compute from wheel_diameter / gear_ratio / "
                       "encoder_pulses_per_motor_revolution.");
       encoder_distance_per_count_ = 0.0;
+    }
+    if (!std::isfinite(left_encoder_sign_) || left_encoder_sign_ == 0.0) {
+      ROS_WARN_STREAM("Invalid parameter: left_encoder_sign must be non-zero. Fallback to 1.0.");
+      left_encoder_sign_ = 1.0;
+    } else {
+      left_encoder_sign_ = left_encoder_sign_ > 0.0 ? 1.0 : -1.0;
+    }
+    if (!std::isfinite(right_encoder_sign_) || right_encoder_sign_ == 0.0) {
+      ROS_WARN_STREAM("Invalid parameter: right_encoder_sign must be non-zero. Fallback to 1.0.");
+      right_encoder_sign_ = 1.0;
+    } else {
+      right_encoder_sign_ = right_encoder_sign_ > 0.0 ? 1.0 : -1.0;
     }
     if (!std::isfinite(left_wheel_scale_) || left_wheel_scale_ <= 0.0) {
       ROS_WARN_STREAM("Invalid parameter: left_wheel_scale must be > 0. Fallback to 1.0.");
@@ -442,9 +444,18 @@ class WheelSpeedOdomNode {
       ROS_INFO_STREAM("odom TF publish enabled: " << (publish_odom_tf_ ? "true" : "false"));
       ROS_INFO_STREAM("raw odom publish policy=publish once per accepted frame");
     }
-    ROS_INFO_STREAM("raw odom protocol=header 43 4C, cmd 40 01, payload="
-                    << "[last_wheel_update_ms,left_encoder_count,right_encoder_count,left_speed,"
-                    << "right_speed,seq,status], checksum+tail unchanged");
+    ROS_INFO_STREAM("raw odom protocol_mode=" << protocol_mode_name_);
+    if (protocol_mode_ == OdomProtocolMode::kFramed434c) {
+      ROS_INFO_STREAM("raw odom protocol=header 43 4C, cmd 40 01, payload="
+                      << "[last_wheel_update_ms,left_encoder_count,right_encoder_count,"
+                      << "left_speed,right_speed,seq], checksum+tail unchanged");
+    } else {
+      ROS_INFO_STREAM("raw odom protocol=bare 24-byte payload="
+                      << "[last_wheel_update_ms,left_encoder_count,right_encoder_count,"
+                      << "left_speed,right_speed,seq], no header/checksum/tail");
+    }
+    ROS_INFO_STREAM("raw odom payload types=uint32 last_wheel_update_ms,seq; int32 "
+                    << "left_encoder_count,right_encoder_count,left_speed,right_speed");
     ROS_INFO_STREAM("timestamp sync params: use_device_timestamp="
                     << (use_device_timestamp_ ? "true" : "false")
                     << ", stamp_unit_to_sec=" << stamp_unit_to_sec_
@@ -455,6 +466,8 @@ class WheelSpeedOdomNode {
                     << ", encoder_distance_source="
                     << (encoder_distance_per_count_ > 0.0 ? "launch_override"
                                                          : "wheel_diameter/gear_ratio/ppr")
+                    << ", left_encoder_sign=" << left_encoder_sign_
+                    << ", right_encoder_sign=" << right_encoder_sign_
                     << ", left_wheel_scale=" << left_wheel_scale_
                     << ", right_wheel_scale=" << right_wheel_scale_
                     << ", wheel_diameter=" << wheel_diameter_
@@ -465,8 +478,8 @@ class WheelSpeedOdomNode {
                     << ", max_valid_odom_dt_sec=" << max_valid_odom_dt_sec_
                     << ", max_abs_linear_speed=" << max_abs_linear_speed_
                     << ", max_abs_angular_speed=" << max_abs_angular_speed_
-                    << ", max_abs_linear_accel=" << max_abs_linear_accel_
-                    << ", max_abs_angular_accel=" << max_abs_angular_accel_
+                    << ", max_abs_linear_accel(diagnostic_only)=" << max_abs_linear_accel_
+                    << ", max_abs_angular_accel(diagnostic_only)=" << max_abs_angular_accel_
                     << ", motion_guard_mode=" << motion_guard_mode_name_);
     ROS_INFO_STREAM("raw odom integration source=encoder_count delta with shared stamp_ms;"
                     << " left_speed/right_speed fields are ignored for odom integration.");
@@ -504,6 +517,7 @@ class WheelSpeedOdomNode {
       if (enable_odom_rx_) {
         MaybeWarnNoDataFrame();
       }
+      MaybeLogRxStats();
       loop_rate.sleep();
     }
   }
@@ -581,7 +595,11 @@ class WheelSpeedOdomNode {
     last_valid_frame_stamp_ = ros::Time();
     last_data_frame_stamp_ = ros::Time();
     last_no_data_warn_stamp_ = ros::Time();
+    last_rx_stats_log_stamp_ = ros::Time();
     rx_total_bytes_since_connect_ = 0;
+    rx_total_read_calls_since_connect_ = 0;
+    rx_zero_read_calls_since_connect_ = 0;
+    rx_eagain_read_calls_since_connect_ = 0;
     valid_frame_count_since_connect_ = 0;
     data_frame_count_since_connect_ = 0;
     foreign_frame_count_since_connect_ = 0;
@@ -590,8 +608,20 @@ class WheelSpeedOdomNode {
     fast_resync_count_since_connect_ = 0;
     fast_resync_dropped_bytes_since_connect_ = 0;
     timing_reject_count_since_connect_ = 0;
-    status_reject_count_since_connect_ = 0;
     motion_reject_count_since_connect_ = 0;
+    last_stats_rx_total_bytes_ = 0;
+    last_stats_rx_total_read_calls_ = 0;
+    last_stats_rx_zero_read_calls_ = 0;
+    last_stats_rx_eagain_read_calls_ = 0;
+    last_stats_valid_frame_count_ = 0;
+    last_stats_data_frame_count_ = 0;
+    last_stats_foreign_frame_count_ = 0;
+    last_stats_parse_error_count_ = 0;
+    last_stats_fallback_frame_count_ = 0;
+    last_stats_fast_resync_count_ = 0;
+    last_stats_fast_resync_dropped_bytes_ = 0;
+    last_stats_timing_reject_count_ = 0;
+    last_stats_motion_reject_count_ = 0;
     has_diagnostic_sample_ = false;
     protocol_timestamp_state_ = ProtocolTimestampState();
     last_left_encoder_count_ = 0;
@@ -619,6 +649,7 @@ class WheelSpeedOdomNode {
     while (ros::ok() && input_fd_ >= 0) {
       errno = 0;
       const ssize_t n = read(input_fd_, chunk, sizeof(chunk));
+      ++rx_total_read_calls_since_connect_;
       if (n > 0) {
         rx_total_bytes_since_connect_ += static_cast<uint64_t>(n);
         if (enable_odom_rx_) {
@@ -635,6 +666,7 @@ class WheelSpeedOdomNode {
       }
 
       if (n == 0) {
+        ++rx_zero_read_calls_since_connect_;
         return;
       }
 
@@ -642,6 +674,7 @@ class WheelSpeedOdomNode {
         continue;
       }
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        ++rx_eagain_read_calls_since_connect_;
         return;
       }
 
@@ -665,13 +698,6 @@ class WheelSpeedOdomNode {
     std::ostringstream oss;
     oss << "0x" << std::uppercase << std::hex << std::setw(4) << std::setfill('0')
         << static_cast<unsigned int>(value);
-    return oss.str();
-  }
-
-  std::string FormatUint32Hex(uint32_t value) const {
-    std::ostringstream oss;
-    oss << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0')
-        << static_cast<unsigned long>(value);
     return oss.str();
   }
 
@@ -1006,6 +1032,11 @@ class WheelSpeedOdomNode {
   }
 
   void ParseBuffer() {
+    if (protocol_mode_ == OdomProtocolMode::kBarePayload24) {
+      ParseBarePayloadBuffer();
+      return;
+    }
+
     while (true) {
       if (rx_buffer_.size() < kMinFrameBytes) {
         return;
@@ -1155,6 +1186,29 @@ class WheelSpeedOdomNode {
     }
   }
 
+  void ParseBarePayloadBuffer() {
+    while (rx_buffer_.size() >= kPayloadBytes) {
+      ProcessBarePayloadFrame(rx_buffer_.data(), kPayloadBytes);
+      rx_buffer_.erase(rx_buffer_.begin(),
+                       rx_buffer_.begin() + static_cast<std::ptrdiff_t>(kPayloadBytes));
+    }
+  }
+
+  void ProcessBarePayloadFrame(const uint8_t* data, size_t data_len) {
+    if (data == nullptr || data_len < kPayloadBytes) {
+      return;
+    }
+
+    const ros::Time now = ros::Time::now();
+    ++valid_frame_count_since_connect_;
+    ++data_frame_count_since_connect_;
+    last_valid_frame_stamp_ = now;
+    last_data_frame_stamp_ = now;
+    ResetDiagnosticMetrics();
+    diag_raw_frame_hex_ = FormatBytesHex(data, kPayloadBytes);
+    ProcessEncoderCountFrame(now, data, data_len);
+  }
+
   void ProcessFrame(size_t frame_len) {
     if (frame_len < kMinFrameBytes || frame_len > rx_buffer_.size()) {
       return;
@@ -1196,26 +1250,21 @@ class WheelSpeedOdomNode {
     const uint32_t stamp_ms = ReadUInt32Le(data + kStampMsOffset);
     const int32_t left_encoder_count = ReadInt32Le(data + kLeftEncoderCountOffset);
     const int32_t right_encoder_count = ReadInt32Le(data + kRightEncoderCountOffset);
+    const int32_t left_speed = ReadInt32Le(data + kLeftSpeedOffset);
+    const int32_t right_speed = ReadInt32Le(data + kRightSpeedOffset);
     const uint32_t seq = ReadUInt32Le(data + kSeqOffset);
-    const uint32_t status = ReadUInt32Le(data + kStatusOffset);
 
+    current_frame_seq_ = seq;
     diag_stamp_ms_ = stamp_ms;
     diag_left_encoder_count_ = left_encoder_count;
     diag_right_encoder_count_ = right_encoder_count;
+    diag_left_speed_ = left_speed;
+    diag_right_speed_ = right_speed;
     diag_seq_ = seq;
-    diag_status_ = status;
-    diag_status_flags_ = FormatStatusFlags(status);
     UpdateEncoderDiagnosticDeltas(stamp_ms, left_encoder_count, right_encoder_count);
 
     ros::Time odom_stamp;
     if (!ResolveOdomStamp(now, stamp_ms, &odom_stamp)) {
-      ResetMotionInterval();
-      RememberEncoderDiagnosticSample(stamp_ms, left_encoder_count, right_encoder_count);
-      LogDiagnosticFrame();
-      return;
-    }
-
-    if (!HasUsableEncoderStatus(status)) {
       ResetMotionInterval();
       RememberEncoderDiagnosticSample(stamp_ms, left_encoder_count, right_encoder_count);
       LogDiagnosticFrame();
@@ -1416,38 +1465,19 @@ class WheelSpeedOdomNode {
     has_diagnostic_sample_ = true;
   }
 
-  bool HandleMotionGuardViolation(const std::string& diagnostic_status,
-                                  const std::string& base_message) {
+  bool HandleMotionGuardViolation(const std::string& base_message) {
     if (motion_guard_mode_ == MotionGuardMode::kOff) {
       return false;
     }
 
     if (motion_guard_mode_ == MotionGuardMode::kWarnOnly) {
-      diag_motion_guard_status_ = diagnostic_status;
       WarnEvery(base_message + " Accepted because motion_guard_mode=warn_only.");
       return false;
     }
 
-    diag_motion_guard_status_ = diagnostic_status;
     ++parse_error_count_since_connect_;
     ++motion_reject_count_since_connect_;
     WarnEvery(base_message);
-    return true;
-  }
-
-  bool HasUsableEncoderStatus(uint32_t status_raw) {
-    if ((status_raw & kStatusLeftValidMask) == 0U || (status_raw & kStatusRightValidMask) == 0U ||
-        (status_raw & kStatusLeftTimeoutMask) != 0U ||
-        (status_raw & kStatusRightTimeoutMask) != 0U ||
-        (status_raw & kStatusSampleSkewMask) != 0U) {
-      ++parse_error_count_since_connect_;
-      ++status_reject_count_since_connect_;
-      diag_motion_guard_status_ = "reject_status_bits";
-      WarnEvery("Wheel encoder odom frame reject: protocol status indicates unusable synchronized "
-                "wheel data. status=" + FormatUint32Hex(status_raw) +
-                ", flags=" + diag_status_flags_ + ".");
-      return false;
-    }
     return true;
   }
 
@@ -1475,7 +1505,6 @@ class WheelSpeedOdomNode {
       current_odom_angular_velocity_ = 0.0;
       diag_odom_linear_ = 0.0;
       diag_odom_angular_ = 0.0;
-      diag_motion_guard_status_ = "initialized_encoder_reference";
       HandleOdomStateUpdated(odom_stamp);
       return;
     }
@@ -1484,7 +1513,6 @@ class WheelSpeedOdomNode {
     diag_motion_dt_sec_ = dt_sec;
     if (!std::isfinite(dt_sec) || dt_sec <= 0.0) {
       ++motion_reject_count_since_connect_;
-      diag_motion_guard_status_ = "reject_invalid_motion_dt";
       WarnEvery("Wheel encoder odom frame reject: invalid motion dt. Frame skipped. dt_sec=" +
                 FormatDouble(dt_sec, 6) + ".");
       return;
@@ -1496,9 +1524,11 @@ class WheelSpeedOdomNode {
         ComputeInt32WrappedDelta(right_encoder_count, last_motion_right_encoder_count_);
     const double distance_per_count = EncoderDistancePerCount();
     const double left_distance =
-        static_cast<double>(left_delta_count) * distance_per_count * left_wheel_scale_;
+        static_cast<double>(left_delta_count) * left_encoder_sign_ *
+        distance_per_count * left_wheel_scale_;
     const double right_distance =
-        static_cast<double>(right_delta_count) * distance_per_count * right_wheel_scale_;
+        static_cast<double>(right_delta_count) * right_encoder_sign_ *
+        distance_per_count * right_wheel_scale_;
     const double delta_s = 0.5 * (left_distance + right_distance);
     const double delta_yaw =
         angular_velocity_sign_ * (right_distance - left_distance) / wheel_separation_;
@@ -1512,8 +1542,6 @@ class WheelSpeedOdomNode {
     if (motion_guard_mode_ != MotionGuardMode::kOff &&
         max_abs_linear_speed_ > 0.0 && std::fabs(linear_velocity) > max_abs_linear_speed_) {
       if (HandleMotionGuardViolation(
-              motion_guard_mode_ == MotionGuardMode::kWarnOnly ? "warn_linear_speed_limit"
-                                                               : "reject_linear_speed_limit",
               "Encoder-count odom frame error: linear velocity limit exceeded. " +
                   std::string(motion_guard_mode_ == MotionGuardMode::kWarnOnly
                                   ? "Frame accepted"
@@ -1527,8 +1555,6 @@ class WheelSpeedOdomNode {
         max_abs_angular_speed_ > 0.0 &&
         std::fabs(angular_velocity) > max_abs_angular_speed_) {
       if (HandleMotionGuardViolation(
-              motion_guard_mode_ == MotionGuardMode::kWarnOnly ? "warn_angular_speed_limit"
-                                                               : "reject_angular_speed_limit",
               "Encoder-count odom frame error: angular velocity limit exceeded. " +
                   std::string(motion_guard_mode_ == MotionGuardMode::kWarnOnly
                                   ? "Frame accepted"
@@ -1538,39 +1564,6 @@ class WheelSpeedOdomNode {
         return;
       }
     }
-    if (motion_guard_mode_ != MotionGuardMode::kOff &&
-        max_abs_linear_accel_ > 0.0 && std::fabs(diag_linear_accel_) > max_abs_linear_accel_) {
-      if (HandleMotionGuardViolation(
-              motion_guard_mode_ == MotionGuardMode::kWarnOnly ? "warn_linear_accel_limit"
-                                                               : "reject_linear_accel_limit",
-              "Encoder-count odom frame reject: linear acceleration limit exceeded. " +
-                  std::string(motion_guard_mode_ == MotionGuardMode::kWarnOnly
-                                  ? "Frame accepted"
-                                  : "Frame skipped") +
-                  ". linear_accel=" + FormatDouble(diag_linear_accel_) +
-                  ", dt_sec=" + FormatDouble(dt_sec, 6) +
-                  ", max_abs_linear_accel=" + FormatDouble(max_abs_linear_accel_) + ".")) {
-        return;
-      }
-    }
-    if (motion_guard_mode_ != MotionGuardMode::kOff &&
-        max_abs_angular_accel_ > 0.0 &&
-        std::fabs(diag_angular_accel_) > max_abs_angular_accel_) {
-      if (HandleMotionGuardViolation(
-              motion_guard_mode_ == MotionGuardMode::kWarnOnly ? "warn_angular_accel_limit"
-                                                               : "reject_angular_accel_limit",
-              "Encoder-count odom frame reject: angular acceleration limit exceeded. " +
-                  std::string(motion_guard_mode_ == MotionGuardMode::kWarnOnly
-                                  ? "Frame accepted"
-                                  : "Frame skipped") +
-                  ". angular_accel=" + FormatDouble(diag_angular_accel_) +
-                  ", dt_sec=" + FormatDouble(dt_sec, 6) +
-                  ", max_abs_angular_accel=" +
-                  FormatDouble(max_abs_angular_accel_) + ".")) {
-        return;
-      }
-    }
-
     const double heading = yaw_ + 0.5 * delta_yaw;
     x_ += delta_s * std::cos(heading);
     y_ += delta_s * std::sin(heading);
@@ -1580,7 +1573,6 @@ class WheelSpeedOdomNode {
     last_motion_stamp_ = odom_stamp;
     last_motion_left_encoder_count_ = left_encoder_count;
     last_motion_right_encoder_count_ = right_encoder_count;
-    diag_motion_guard_status_ = "accepted_encoder_delta";
     HandleOdomStateUpdated(odom_stamp);
   }
 
@@ -1602,6 +1594,7 @@ class WheelSpeedOdomNode {
 
   nav_msgs::Odometry BuildOdomMessage(const ros::Time& stamp) const {
     nav_msgs::Odometry odom;
+    odom.header.seq = current_frame_seq_;
     odom.header.stamp = stamp;
     odom.header.frame_id = frame_id_;
     odom.child_frame_id = child_frame_id_;
@@ -1637,6 +1630,7 @@ class WheelSpeedOdomNode {
 
   void PublishOdomTransform(const ros::Time& stamp) {
     geometry_msgs::TransformStamped transform;
+    transform.header.seq = current_frame_seq_;
     transform.header.stamp = stamp;
     transform.header.frame_id = frame_id_;
     transform.child_frame_id = child_frame_id_;
@@ -1679,11 +1673,98 @@ class WheelSpeedOdomNode {
                     << ", fast_resyncs=" << fast_resync_count_since_connect_
                     << ", fast_resync_drop_bytes=" << fast_resync_dropped_bytes_since_connect_
                     << ", timing_rejects=" << timing_reject_count_since_connect_
-                    << ", status_rejects=" << status_reject_count_since_connect_
                     << ", motion_rejects=" << motion_reject_count_since_connect_
                     << ", buffer_size=" << rx_buffer_.size()
                     << (rx_buffer_.empty() ? "" : ", buffer_prefix=" + HexPreview(32)));
     last_no_data_warn_stamp_ = now;
+  }
+
+  void MaybeLogRxStats() {
+    if (!enable_diagnostic_log_) {
+      return;
+    }
+
+    const ros::Time now = ros::Time::now();
+    if (last_rx_stats_log_stamp_.isZero()) {
+      last_rx_stats_log_stamp_ = now;
+      SnapshotRxStats();
+      return;
+    }
+
+    const double interval_sec = (now - last_rx_stats_log_stamp_).toSec();
+    if (interval_sec < debug_rx_stats_interval_sec_) {
+      return;
+    }
+
+    const uint64_t delta_bytes = rx_total_bytes_since_connect_ - last_stats_rx_total_bytes_;
+    const uint64_t delta_read_calls =
+        rx_total_read_calls_since_connect_ - last_stats_rx_total_read_calls_;
+    const uint64_t delta_zero_reads =
+        rx_zero_read_calls_since_connect_ - last_stats_rx_zero_read_calls_;
+    const uint64_t delta_eagain_reads =
+        rx_eagain_read_calls_since_connect_ - last_stats_rx_eagain_read_calls_;
+    const uint64_t delta_valid_frames =
+        valid_frame_count_since_connect_ - last_stats_valid_frame_count_;
+    const uint64_t delta_data_frames =
+        data_frame_count_since_connect_ - last_stats_data_frame_count_;
+    const uint64_t delta_foreign_frames =
+        foreign_frame_count_since_connect_ - last_stats_foreign_frame_count_;
+    const uint64_t delta_parse_errors =
+        parse_error_count_since_connect_ - last_stats_parse_error_count_;
+    const uint64_t delta_fallback_frames =
+        fallback_frame_count_since_connect_ - last_stats_fallback_frame_count_;
+    const uint64_t delta_fast_resyncs =
+        fast_resync_count_since_connect_ - last_stats_fast_resync_count_;
+    const uint64_t delta_fast_resync_bytes =
+        fast_resync_dropped_bytes_since_connect_ - last_stats_fast_resync_dropped_bytes_;
+    const uint64_t delta_timing_rejects =
+        timing_reject_count_since_connect_ - last_stats_timing_reject_count_;
+    const uint64_t delta_motion_rejects =
+        motion_reject_count_since_connect_ - last_stats_motion_reject_count_;
+
+    const ros::Time base =
+        last_data_frame_stamp_.isZero() ? connected_since_ : last_data_frame_stamp_;
+    const double silent_sec = base.isZero() ? 0.0 : (now - base).toSec();
+
+    const double rate_bps = interval_sec > 0.0
+                                ? static_cast<double>(delta_bytes) / interval_sec
+                                : 0.0;
+    ROS_INFO_STREAM("Debug RX stats: interval=" << FormatDouble(interval_sec, 3)
+                    << "s, bytes=" << delta_bytes
+                    << " (" << FormatDouble(rate_bps, 1) << " B/s)"
+                    << ", read_calls=" << delta_read_calls
+                    << ", zero_reads=" << delta_zero_reads
+                    << ", eagain_reads=" << delta_eagain_reads
+                    << ", valid_frames=" << delta_valid_frames
+                    << ", data_frames=" << delta_data_frames
+                    << ", foreign_frames=" << delta_foreign_frames
+                    << ", parse_errors=" << delta_parse_errors
+                    << ", fallback_frames=" << delta_fallback_frames
+                    << ", fast_resyncs=" << delta_fast_resyncs
+                    << ", fast_resync_drop_bytes=" << delta_fast_resync_bytes
+                    << ", timing_rejects=" << delta_timing_rejects
+                    << ", motion_rejects=" << delta_motion_rejects
+                    << ", silent_sec=" << FormatDouble(silent_sec, 3)
+                    << ", buffer_size=" << rx_buffer_.size());
+
+    last_rx_stats_log_stamp_ = now;
+    SnapshotRxStats();
+  }
+
+  void SnapshotRxStats() {
+    last_stats_rx_total_bytes_ = rx_total_bytes_since_connect_;
+    last_stats_rx_total_read_calls_ = rx_total_read_calls_since_connect_;
+    last_stats_rx_zero_read_calls_ = rx_zero_read_calls_since_connect_;
+    last_stats_rx_eagain_read_calls_ = rx_eagain_read_calls_since_connect_;
+    last_stats_valid_frame_count_ = valid_frame_count_since_connect_;
+    last_stats_data_frame_count_ = data_frame_count_since_connect_;
+    last_stats_foreign_frame_count_ = foreign_frame_count_since_connect_;
+    last_stats_parse_error_count_ = parse_error_count_since_connect_;
+    last_stats_fallback_frame_count_ = fallback_frame_count_since_connect_;
+    last_stats_fast_resync_count_ = fast_resync_count_since_connect_;
+    last_stats_fast_resync_dropped_bytes_ = fast_resync_dropped_bytes_since_connect_;
+    last_stats_timing_reject_count_ = timing_reject_count_since_connect_;
+    last_stats_motion_reject_count_ = motion_reject_count_since_connect_;
   }
 
   void ResolveDiagnosticLogPath() {
@@ -1717,8 +1798,10 @@ class WheelSpeedOdomNode {
     ROS_INFO_STREAM("Diagnostic log file: " << resolved_diagnostic_log_path_);
     diagnostic_log_stream_
         << "# time_ms,dt_sec,"
-        << "left_encoder_count,right_encoder_count,left_encoder_delta,right_encoder_delta,"
-        << "linear_velocity,angular_velocity,imu_angular_velocity_z,raw_frame_hex\n";
+        << "left_encoder_count,right_encoder_count,left_speed,right_speed,seq,"
+        << "left_encoder_delta,right_encoder_delta,"
+        << "linear_velocity,angular_velocity,linear_accel,angular_accel,"
+        << "imu_angular_velocity_z,raw_frame_hex\n";
     diagnostic_log_stream_.flush();
   }
 
@@ -1728,17 +1811,16 @@ class WheelSpeedOdomNode {
     diag_stamp_ms_delta_ = 0U;
     diag_left_encoder_count_ = 0;
     diag_right_encoder_count_ = 0;
+    diag_left_speed_ = 0;
+    diag_right_speed_ = 0;
+    diag_seq_ = 0U;
     diag_left_encoder_step_ = 0;
     diag_right_encoder_step_ = 0;
-    diag_seq_ = 0U;
-    diag_status_ = 0U;
-    diag_status_flags_ = "unknown";
     diag_odom_linear_ = nan;
     diag_odom_angular_ = nan;
     diag_motion_dt_sec_ = nan;
     diag_linear_accel_ = nan;
     diag_angular_accel_ = nan;
-    diag_motion_guard_status_ = "not_evaluated";
     diag_raw_frame_hex_.clear();
   }
 
@@ -1755,11 +1837,16 @@ class WheelSpeedOdomNode {
                            << std::fixed << std::setprecision(6) << dt_sec << ","
                            << diag_left_encoder_count_ << ","
                            << diag_right_encoder_count_ << ","
+                           << diag_left_speed_ << ","
+                           << diag_right_speed_ << ","
+                           << diag_seq_ << ","
                            << diag_left_encoder_step_ << ","
                            << diag_right_encoder_step_ << ","
                            << std::fixed << std::setprecision(6)
                            << diag_odom_linear_ << ","
                            << diag_odom_angular_ << ","
+                           << diag_linear_accel_ << ","
+                           << diag_angular_accel_ << ","
                            << imu_wz << ","
                            << diag_raw_frame_hex_ << "\n";
     diagnostic_log_stream_.flush();
@@ -1785,7 +1872,7 @@ class WheelSpeedOdomNode {
   ros::Subscriber imu_sub_;
   tf2_ros::TransformBroadcaster tf_broadcaster_;
 
-  std::string serial_device_ = "/dev/odom";
+  std::string serial_device_ = kDefaultSerialDevice;
   int serial_baudrate_ = 115200;
   std::string publish_topic_;
   std::string resolved_publish_topic_;
@@ -1799,12 +1886,17 @@ class WheelSpeedOdomNode {
   double loop_rate_hz_ = 100.0;
   bool enable_imu_diagnostic_ = true;
   std::string imu_topic_ = "/imu";
+  std::string protocol_mode_name_ = "framed_434c";
+  OdomProtocolMode protocol_mode_ = OdomProtocolMode::kFramed434c;
   bool use_device_timestamp_ = true;
+  double debug_rx_stats_interval_sec_ = 2.0;
   double angular_velocity_sign_ = 1.0;
   double wheel_diameter_ = 0.18;
   double gear_ratio_ = 1.0;
   double encoder_pulses_per_motor_revolution_ = 1.0;
   double encoder_distance_per_count_ = 0.0;
+  double left_encoder_sign_ = 1.0;
+  double right_encoder_sign_ = 1.0;
   double left_wheel_scale_ = 1.0;
   double right_wheel_scale_ = 1.0;
   double wheel_separation_ = 0.725;
@@ -1841,6 +1933,7 @@ class WheelSpeedOdomNode {
   double x_ = 0.0;
   double y_ = 0.0;
   double yaw_ = 0.0;
+  uint32_t current_frame_seq_ = 0U;
   bool has_motion_sample_ = false;
   ros::Time last_motion_stamp_;
   int32_t last_motion_left_encoder_count_ = 0;
@@ -1855,8 +1948,12 @@ class WheelSpeedOdomNode {
   ros::Time last_valid_frame_stamp_;
   ros::Time last_data_frame_stamp_;
   ros::Time last_no_data_warn_stamp_;
+  ros::Time last_rx_stats_log_stamp_;
   ros::Time last_warn_stamp_;
   uint64_t rx_total_bytes_since_connect_ = 0;
+  uint64_t rx_total_read_calls_since_connect_ = 0;
+  uint64_t rx_zero_read_calls_since_connect_ = 0;
+  uint64_t rx_eagain_read_calls_since_connect_ = 0;
   uint64_t valid_frame_count_since_connect_ = 0;
   uint64_t data_frame_count_since_connect_ = 0;
   uint64_t foreign_frame_count_since_connect_ = 0;
@@ -1865,24 +1962,36 @@ class WheelSpeedOdomNode {
   uint64_t fast_resync_count_since_connect_ = 0;
   uint64_t fast_resync_dropped_bytes_since_connect_ = 0;
   uint64_t timing_reject_count_since_connect_ = 0;
-  uint64_t status_reject_count_since_connect_ = 0;
   uint64_t motion_reject_count_since_connect_ = 0;
+
+  uint64_t last_stats_rx_total_bytes_ = 0;
+  uint64_t last_stats_rx_total_read_calls_ = 0;
+  uint64_t last_stats_rx_zero_read_calls_ = 0;
+  uint64_t last_stats_rx_eagain_read_calls_ = 0;
+  uint64_t last_stats_valid_frame_count_ = 0;
+  uint64_t last_stats_data_frame_count_ = 0;
+  uint64_t last_stats_foreign_frame_count_ = 0;
+  uint64_t last_stats_parse_error_count_ = 0;
+  uint64_t last_stats_fallback_frame_count_ = 0;
+  uint64_t last_stats_fast_resync_count_ = 0;
+  uint64_t last_stats_fast_resync_dropped_bytes_ = 0;
+  uint64_t last_stats_timing_reject_count_ = 0;
+  uint64_t last_stats_motion_reject_count_ = 0;
 
   uint32_t diag_stamp_ms_ = 0U;
   uint32_t diag_stamp_ms_delta_ = 0U;
   int32_t diag_left_encoder_count_ = 0;
   int32_t diag_right_encoder_count_ = 0;
+  int32_t diag_left_speed_ = 0;
+  int32_t diag_right_speed_ = 0;
+  uint32_t diag_seq_ = 0U;
   int64_t diag_left_encoder_step_ = 0;
   int64_t diag_right_encoder_step_ = 0;
-  uint32_t diag_seq_ = 0U;
-  uint32_t diag_status_ = 0U;
-  std::string diag_status_flags_;
   double diag_odom_linear_ = 0.0;
   double diag_odom_angular_ = 0.0;
   double diag_motion_dt_sec_ = 0.0;
   double diag_linear_accel_ = 0.0;
   double diag_angular_accel_ = 0.0;
-  std::string diag_motion_guard_status_;
   std::string diag_raw_frame_hex_;
 };
 

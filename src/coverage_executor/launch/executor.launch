@@ -38,6 +38,8 @@
     <!-- 可选：指定 planner/controller/recovery -->
     <param name="mbf_planner" value="ThetaStarPlanner"/>
     <param name="mbf_controller" value="MPPI_Standard_Controller"/>
+    <!-- 清扫 FSM 的所有 CONNECT 阶段使用 -->
+    <param name="mbf_connect_controller" value="MPPI_Connect_Controller"/>
     <param name="mbf_recovery" value=""/>
 
     <param name="water_off_distance" value="2.0"/>

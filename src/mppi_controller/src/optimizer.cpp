@@ -57,6 +57,7 @@ void Optimizer::getParams()
   nh_.param("vy_std", s.sampling_std.vy, 0.2f);
   nh_.param("wz_std", s.sampling_std.wz, 0.4f);
   nh_.param("retry_attempt_limit", s.retry_attempt_limit, 1);
+  nh_.param("timing_diagnostics", timing_diagnostics_, false);
 
   s.base_constraints.ax_max = fabs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
@@ -140,9 +141,36 @@ geometry_msgs::TwistStamped Optimizer::evalControl(
 void Optimizer::optimize()
 {
   for (size_t i = 0; i < settings_.iteration_count; ++i) {
+    const auto rollout_start = std::chrono::steady_clock::now();
     generateNoisedTrajectories();
+    const auto critics_start = std::chrono::steady_clock::now();
     critic_manager_.evalTrajectoriesScores(critics_data_);
+    const auto update_start = std::chrono::steady_clock::now();
     updateControlSequence();
+    const auto update_end = std::chrono::steady_clock::now();
+
+    if (timing_diagnostics_) {
+      rollout_time_total_ms_ += std::chrono::duration<double, std::milli>(
+        critics_start - rollout_start).count();
+      critics_time_total_ms_ += std::chrono::duration<double, std::milli>(
+        update_start - critics_start).count();
+      update_time_total_ms_ += std::chrono::duration<double, std::milli>(
+        update_end - update_start).count();
+
+      if (++timing_cycles_ >= 50) {
+        const double cycles = static_cast<double>(timing_cycles_);
+        ROS_INFO(
+          "[%s] MPPI optimizer average: rollout=%.3fms critics=%.3fms update=%.3fms",
+          name_.c_str(),
+          rollout_time_total_ms_ / cycles,
+          critics_time_total_ms_ / cycles,
+          update_time_total_ms_ / cycles);
+        timing_cycles_ = 0;
+        rollout_time_total_ms_ = 0.0;
+        critics_time_total_ms_ = 0.0;
+        update_time_total_ms_ = 0.0;
+      }
+    }
   }
 }
 

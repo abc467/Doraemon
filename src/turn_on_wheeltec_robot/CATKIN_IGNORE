@@ -1,0 +1,2 @@
+# Legacy Wheeltec chassis driver kept only as historical source material.
+# The A26022 adaptation uses mcore_chassis_bridge/robot_hw_bridge instead.

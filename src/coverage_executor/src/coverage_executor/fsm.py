@@ -2417,7 +2417,10 @@ class ExecutorFSM:
                     blk.block_id, connect_failures, start_xy[0], start_xy[1], d_start, int(cur_cut_start_idx), str(connect_transit),
                 )
 
-                self.mbf.send_connect(entry_pose)
+                self.mbf.send_connect(
+                    entry_pose,
+                    controller=self.mbf.connect_controller or None,
+                )
 
                 while not rospy.is_shutdown():
                     reason = self._should_abort()

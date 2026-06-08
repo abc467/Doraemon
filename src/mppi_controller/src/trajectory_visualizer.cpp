@@ -25,6 +25,28 @@ void TrajectoryVisualizer::initialize(const ros::NodeHandle& nh , const std::str
     reset();
   }
 
+bool TrajectoryVisualizer::hasTrajectorySubscribers() const
+{
+  return trajectories_publisher_.getNumSubscribers() > 0;
+}
+
+bool TrajectoryVisualizer::hasOptimalPathSubscribers() const
+{
+  return optimal_path_pub_.getNumSubscribers() > 0;
+}
+
+bool TrajectoryVisualizer::hasTransformedPathSubscribers() const
+{
+  return transformed_path_pub_.getNumSubscribers() > 0;
+}
+
+bool TrajectoryVisualizer::hasSubscribers() const
+{
+  return hasTrajectorySubscribers() ||
+         hasOptimalPathSubscribers() ||
+         hasTransformedPathSubscribers();
+}
+
 void TrajectoryVisualizer::add(
   const Eigen::ArrayXXf & trajectory,
   const std::string & marker_namespace,
@@ -73,7 +95,9 @@ void TrajectoryVisualizer::add(
   size_t n_rows = trajectories.x.rows();
   size_t n_cols = trajectories.x.cols();
   const float shape_1 = static_cast<float>(n_cols);
-  points_->markers.reserve(floor(n_rows / trajectory_step_) * floor(n_cols * time_step_));
+  const size_t sampled_rows = (n_rows + trajectory_step_ - 1) / trajectory_step_;
+  const size_t sampled_cols = (n_cols + time_step_ - 1) / time_step_;
+  points_->markers.reserve(points_->markers.size() + sampled_rows * sampled_cols);
 
   for (size_t i = 0; i < n_rows; i += trajectory_step_) {
     for (size_t j = 0; j < n_cols; j += time_step_) {
@@ -101,17 +125,17 @@ void TrajectoryVisualizer::reset()
 
 void TrajectoryVisualizer::visualize(const nav_msgs::Path & plan)
 {
-  if (trajectories_publisher_.getNumSubscribers() > 0) {
+  if (hasTrajectorySubscribers()) {
     trajectories_publisher_.publish(*points_.get());
   }
 
-  if (optimal_path_pub_.getNumSubscribers() > 0) {
+  if (hasOptimalPathSubscribers()) {
     optimal_path_pub_.publish(*optimal_path_.get());
   }
 
   reset();
 
-  if (transformed_path_pub_.getNumSubscribers() > 0) {
+  if (hasTransformedPathSubscribers()) {
     auto plan_ptr = std::make_unique<nav_msgs::Path>(plan);
     transformed_path_pub_.publish(*plan_ptr.get());
   }

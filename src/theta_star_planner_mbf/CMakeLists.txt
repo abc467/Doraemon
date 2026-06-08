@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(catkin REQUIRED COMPONENTS
   angles
+  base_local_planner
   costmap_2d
   geometry_msgs
   mbf_costmap_core
@@ -24,6 +25,7 @@ catkin_package(
   LIBRARIES theta_star_planner_mbf_lib
   CATKIN_DEPENDS
     angles
+    base_local_planner
     costmap_2d
     geometry_msgs
     mbf_costmap_core

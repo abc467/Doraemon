@@ -281,10 +281,85 @@ def _buffer_keepout_polygon(poly: "Polygon", buffer_m: float):
     return buffered if not buffered.is_empty else poly
 
 
+def _buffer_rectangular_keepout_polygon(
+    poly: "Polygon",
+    *,
+    long_edge_normal_buffer_m: float,
+    short_edge_normal_buffer_m: float,
+):
+    long_normal_m = max(0.0, float(long_edge_normal_buffer_m or 0.0))
+    short_normal_m = max(0.0, float(short_edge_normal_buffer_m or 0.0))
+    if long_normal_m <= 1e-9 and short_normal_m <= 1e-9:
+        return poly, "rect_anisotropic"
+
+    rect = poly.minimum_rotated_rectangle
+    if rect.is_empty or rect.geom_type != "Polygon":
+        return _buffer_keepout_polygon(poly, max(long_normal_m, short_normal_m)), "isotropic_fallback"
+
+    area_tolerance = max(1e-6, float(rect.area) * 1e-3)
+    if abs(float(rect.area) - float(poly.area)) > area_tolerance:
+        return _buffer_keepout_polygon(poly, max(long_normal_m, short_normal_m)), "isotropic_fallback"
+
+    coords = list(rect.exterior.coords)[:-1]
+    if len(coords) != 4:
+        return _buffer_keepout_polygon(poly, max(long_normal_m, short_normal_m)), "isotropic_fallback"
+
+    edge0 = (float(coords[1][0] - coords[0][0]), float(coords[1][1] - coords[0][1]))
+    edge1 = (float(coords[2][0] - coords[1][0]), float(coords[2][1] - coords[1][1]))
+    len0 = math.hypot(edge0[0], edge0[1])
+    len1 = math.hypot(edge1[0], edge1[1])
+    if min(len0, len1) <= 1e-9:
+        return _buffer_keepout_polygon(poly, max(long_normal_m, short_normal_m)), "isotropic_fallback"
+
+    # A square has no unique long/short edge, so use the larger clearance on
+    # both axes. This is deterministic and preserves the safer interpretation.
+    if abs(len0 - len1) <= max(len0, len1) * 1e-3:
+        return _buffer_keepout_polygon(poly, max(long_normal_m, short_normal_m)), "square_isotropic"
+
+    long_edge = edge0 if len0 > len1 else edge1
+    long_len = max(len0, len1)
+    axis_u = (long_edge[0] / long_len, long_edge[1] / long_len)
+    axis_v = (-axis_u[1], axis_u[0])
+    center_x = float(rect.centroid.x)
+    center_y = float(rect.centroid.y)
+
+    projections_u = []
+    projections_v = []
+    for x, y in coords:
+        dx = float(x) - center_x
+        dy = float(y) - center_y
+        projections_u.append(dx * axis_u[0] + dy * axis_u[1])
+        projections_v.append(dx * axis_v[0] + dy * axis_v[1])
+
+    # Bounds along the long-edge axis are bounded by the short edges, while
+    # bounds along the short-edge axis are bounded by the long edges.
+    min_u = min(projections_u) - short_normal_m
+    max_u = max(projections_u) + short_normal_m
+    min_v = min(projections_v) - long_normal_m
+    max_v = max(projections_v) + long_normal_m
+
+    expanded_points = []
+    for u, v in ((min_u, min_v), (max_u, min_v), (max_u, max_v), (min_u, max_v)):
+        expanded_points.append(
+            (
+                center_x + u * axis_u[0] + v * axis_v[0],
+                center_y + u * axis_u[1] + v * axis_v[1],
+            )
+        )
+    expanded = Polygon(expanded_points)
+    if not expanded.is_valid:
+        expanded = expanded.buffer(0.0)
+    if expanded.is_empty:
+        return _buffer_keepout_polygon(poly, max(long_normal_m, short_normal_m)), "isotropic_fallback"
+    return expanded, "rect_anisotropic"
+
+
 def _compile_no_go_areas(
     no_go_areas: Sequence[Dict[str, Any]],
     *,
     default_buffer_m: float = 0.0,
+    default_long_edge_normal_buffer_m: Optional[float] = None,
+    default_short_edge_normal_buffer_m: Optional[float] = None,
     prec: int = 3,
 ):
     compiled = []
@@ -295,13 +370,39 @@ def _compile_no_go_areas(
             continue
         polygon = area.get("polygon") or area.get("points") or area.get("outer") or []
         poly = _safe_polygon(polygon)
-        buffer_m = float(area.get("buffer_m", area.get("buffer", default_buffer_m)) or 0.0)
-        poly = _buffer_keepout_polygon(poly, buffer_m)
+        has_explicit_isotropic_buffer = "buffer_m" in area or "buffer" in area
+        if has_explicit_isotropic_buffer:
+            buffer_m = float(area.get("buffer_m", area.get("buffer", 0.0)) or 0.0)
+            long_normal_m = None
+            short_normal_m = None
+            buffer_mode = "isotropic"
+            poly = _buffer_keepout_polygon(poly, buffer_m)
+        else:
+            long_value = area.get("long_edge_normal_buffer_m", default_long_edge_normal_buffer_m)
+            short_value = area.get("short_edge_normal_buffer_m", default_short_edge_normal_buffer_m)
+            if long_value is not None and short_value is not None:
+                long_normal_m = max(0.0, float(long_value or 0.0))
+                short_normal_m = max(0.0, float(short_value or 0.0))
+                buffer_m = 0.0
+                poly, buffer_mode = _buffer_rectangular_keepout_polygon(
+                    poly,
+                    long_edge_normal_buffer_m=long_normal_m,
+                    short_edge_normal_buffer_m=short_normal_m,
+                )
+            else:
+                buffer_m = float(default_buffer_m or 0.0)
+                long_normal_m = None
+                short_normal_m = None
+                buffer_mode = "isotropic"
+                poly = _buffer_keepout_polygon(poly, buffer_m)
         compiled.append(
             {
                 "area_id": str(area.get("area_id") or area.get("id") or f"no_go_{idx}"),
                 "name": str(area.get("name") or ""),
                 "buffer_m": float(max(0.0, buffer_m)),
+                "long_edge_normal_buffer_m": long_normal_m,
+                "short_edge_normal_buffer_m": short_normal_m,
+                "buffer_mode": buffer_mode,
                 "geometry": _geometry_to_region_list(poly, prec=prec),
             }
         )
@@ -351,6 +452,8 @@ def compile_map_constraints(
     virtual_walls: Sequence[Dict[str, Any]],
     default_buffer_m: float = DEFAULT_VIRTUAL_WALL_BUFFER_M,
     default_no_go_buffer_m: float = 0.0,
+    default_no_go_long_edge_normal_buffer_m: Optional[float] = None,
+    default_no_go_short_edge_normal_buffer_m: Optional[float] = None,
     prec: int = 3,
 ) -> CompiledMapConstraints:
     if not _HAS_SHAPELY:
@@ -359,6 +462,8 @@ def compile_map_constraints(
     no_go_compiled, _ = _compile_no_go_areas(
         no_go_areas,
         default_buffer_m=float(default_no_go_buffer_m or 0.0),
+        default_long_edge_normal_buffer_m=default_no_go_long_edge_normal_buffer_m,
+        default_short_edge_normal_buffer_m=default_no_go_short_edge_normal_buffer_m,
         prec=prec,
     )
     wall_compiled, _ = _compile_virtual_walls(

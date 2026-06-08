@@ -1,4 +1,6 @@
-footprint: [[-0.34, -0.325], [-0.34, 0.325], [0.49, 0.325], [0.49, -0.325]]
+# A26022 body: length 0.85 m, width 0.65 m. The base_link origin is at the wheel
+# axle center; rear overhang is 0.2185 m and front overhang is 0.6315 m.
+footprint: [[-0.2185, -0.325], [-0.2185, 0.325], [0.6315, 0.325], [0.6315, -0.325]]
 footprint_padding: 0.05
 
 transform_tolerance: 1.0
@@ -53,8 +55,10 @@ obstacle_layer:
 
 inflation_layer:
   enabled: true
-  cost_scaling_factor: 5.0
-  inflation_radius: 0.6
+  # The padded front overhang is 0.6815 m from the planning origin. Keep the
+  # inflation field beyond the body so MPPI starts reacting before contact.
+  cost_scaling_factor: 3.0
+  inflation_radius: 1.0
 
 keepout_constraint_layer:
   enabled: true

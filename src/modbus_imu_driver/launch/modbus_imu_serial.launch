@@ -1,0 +1,72 @@
+<launch>
+  <!-- Modbus RTU IMU reader. Formal runtime publishes this directly on /imu. -->
+  <arg name="port" default="/dev/imu"/>
+  <arg name="baud" default="115200"/>
+  <arg name="slave_address" default="1"/>
+  <arg name="poll_rate_hz" default="100.0"/>
+  <arg name="imu_topic" default="/imu"/>
+  <arg name="raw_imu_topic" default="/imu_raw"/>
+  <arg name="publish_raw_imu" default="false"/>
+  <arg name="frame_id" default="gyro_link"/>
+  <arg name="publish_orientation" default="false"/>
+  <arg name="publish_during_calibration" default="false"/>
+  <arg name="enable_gyro_bias_compensation" default="true"/>
+  <arg name="estimate_gyro_bias_on_startup" default="true"/>
+  <arg name="gyro_bias_estimation_duration_sec" default="5.0"/>
+
+  <node pkg="modbus_imu_driver" name="modbus_imu_serial"
+        type="modbus_imu_serial_node" output="screen">
+    <param name="port" value="$(arg port)"/>
+    <param name="baud" value="$(arg baud)"/>
+    <param name="slave_address" value="$(arg slave_address)"/>
+    <param name="poll_rate_hz" value="$(arg poll_rate_hz)"/>
+    <param name="imu_topic" value="$(arg imu_topic)"/>
+    <param name="raw_imu_topic" value="$(arg raw_imu_topic)"/>
+    <param name="publish_raw_imu" value="$(arg publish_raw_imu)"/>
+    <param name="frame_id" value="$(arg frame_id)"/>
+    <param name="serial_timeout_ms" value="50"/>
+    <param name="queue_size" value="100"/>
+
+    <!-- No device timestamp is present in this Modbus protocol. The node stamps
+         samples at the host request/response midpoint and enforces monotonic ROS time. -->
+    <param name="use_midpoint_timestamp" value="true"/>
+    <param name="enforce_monotonic_timestamps" value="true"/>
+    <param name="timestamp_offset_sec" value="0.0"/>
+    <param name="min_timestamp_step_sec" value="0.000001"/>
+    <param name="max_future_timestamp_sec" value="0.02"/>
+
+    <!-- Startup zero-drift correction. Keep the robot still during this window. -->
+    <param name="enable_gyro_bias_compensation" value="$(arg enable_gyro_bias_compensation)"/>
+    <param name="estimate_gyro_bias_on_startup" value="$(arg estimate_gyro_bias_on_startup)"/>
+    <param name="gyro_bias_estimation_duration_sec" value="$(arg gyro_bias_estimation_duration_sec)"/>
+    <param name="gyro_bias_stationary_threshold_rad_s" value="0.02"/>
+    <param name="gyro_bias_min_samples" value="200"/>
+    <param name="publish_during_calibration" value="$(arg publish_during_calibration)"/>
+    <rosparam param="gyro_bias_rad_s">[0.0, 0.0, 0.0]</rosparam>
+
+    <!-- Accelerometer bias correction is off by default because Cartographer uses
+         gravity magnitude; enable only after confirming the mounted axis target. -->
+    <param name="enable_accel_bias_compensation" value="false"/>
+    <param name="estimate_accel_bias_on_startup" value="false"/>
+    <param name="accel_bias_estimation_duration_sec" value="5.0"/>
+    <param name="accel_bias_stationary_tolerance_g" value="0.15"/>
+    <param name="accel_bias_min_samples" value="200"/>
+    <rosparam param="accel_bias_g">[0.0, 0.0, 0.0]</rosparam>
+    <rosparam param="accel_bias_target_g">[0.0, 0.0, 1.0]</rosparam>
+
+    <!-- Axis signs are left raw by default. Flip signs here if the sensor frame
+         is mounted opposite to gyro_link. -->
+    <rosparam param="linear_acceleration_axis_signs">[1.0, 1.0, 1.0]</rosparam>
+    <rosparam param="angular_velocity_axis_signs">[1.0, 1.0, 1.0]</rosparam>
+    <rosparam param="orientation_rpy_signs">[1.0, 1.0, 1.0]</rosparam>
+
+    <!-- Cartographer consumes acceleration and angular velocity; EKF currently
+         fuses only wz. Orientation can be enabled for debugging or future fusion. -->
+    <param name="publish_orientation" value="$(arg publish_orientation)"/>
+    <param name="angle_poll_divider" value="5"/>
+    <param name="angle_source" value="dynamic"/>
+    <rosparam param="orientation_covariance_diagonal">[1000000.0, 1000000.0, 1000000.0]</rosparam>
+    <rosparam param="angular_velocity_covariance_diagonal">[1000000.0, 1000000.0, 0.05]</rosparam>
+    <rosparam param="linear_acceleration_covariance_diagonal">[1000.0, 1000.0, 1000.0]</rosparam>
+  </node>
+</launch>

@@ -25,6 +25,7 @@ class MBFAdapter:
         exe_path_action: str = "/move_base_flex/exe_path",
         planner: str = "",
         controller: str = "",
+        connect_controller: str = "",
         recovery: str = "",
         clear_costmaps_service: str = "/move_base_flex/clear_costmaps",
     ):
@@ -32,6 +33,7 @@ class MBFAdapter:
         self.exe_path_action = exe_path_action
         self.planner = planner
         self.controller = controller
+        self.connect_controller = str(connect_controller or "").strip()
         self.recovery = recovery
         self.clear_costmaps_service = str(clear_costmaps_service or "").strip()
 
@@ -67,13 +69,14 @@ class MBFAdapter:
             pass
 
     # -------------------- CONNECT (MoveBase) --------------------
-    def send_connect(self, target: PoseStamped):
+    def send_connect(self, target: PoseStamped, controller: Optional[str] = None):
         g = MoveBaseGoal()
         g.target_pose = target
         if hasattr(g, "planner") and self.planner:
             g.planner = self.planner
-        if hasattr(g, "controller") and self.controller:
-            g.controller = self.controller
+        selected_controller = self.controller if controller is None else str(controller).strip()
+        if hasattr(g, "controller") and selected_controller:
+            g.controller = selected_controller
         if hasattr(g, "recovery_behaviors") and self.recovery:
             g.recovery_behaviors = self.recovery
         self._mb.send_goal(g)
