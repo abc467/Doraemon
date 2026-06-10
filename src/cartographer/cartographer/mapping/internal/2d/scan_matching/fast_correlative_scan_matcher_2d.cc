@@ -36,6 +36,10 @@ namespace mapping {
 namespace scan_matching {
 namespace {
 
+constexpr double kTopCandidateMinTranslationSeparationMeters = 0.20;
+constexpr double kTopCandidateMinRotationSeparationRadians =
+    0.017453292519943295;  // 1 degree.
+
 // A collection of values which can be added and later removed, and the maximum
 // of the current values in the collection can be retrieved.
 // All of it in (amortized) O(1).
@@ -74,6 +78,39 @@ class SlidingWindowMaximum {
   // remaining window that came after this values first occurrence, and so on.
   std::deque<float> non_ascending_maxima_;
 };
+
+double NormalizeAngleDifference(const double angle) {
+  return std::atan2(std::sin(angle), std::cos(angle));
+}
+
+bool IsSeparatedEnough(const Candidate2D& lhs, const Candidate2D& rhs) {
+  const Eigen::Vector2d delta(lhs.x - rhs.x, lhs.y - rhs.y);
+  const double rotation_delta =
+      std::abs(NormalizeAngleDifference(lhs.orientation - rhs.orientation));
+  return delta.norm() >= kTopCandidateMinTranslationSeparationMeters ||
+         rotation_delta >= kTopCandidateMinRotationSeparationRadians;
+}
+
+void InsertTopCandidate(const Candidate2D& candidate,
+                        const int max_candidates,
+                        std::vector<Candidate2D>* const top_candidates) {
+  for (Candidate2D& existing : *top_candidates) {
+    if (!IsSeparatedEnough(candidate, existing)) {
+      if (candidate.score > existing.score) {
+        existing = candidate;
+        std::sort(top_candidates->begin(), top_candidates->end(),
+                  std::greater<Candidate2D>());
+      }
+      return;
+    }
+  }
+  top_candidates->push_back(candidate);
+  std::sort(top_candidates->begin(), top_candidates->end(),
+            std::greater<Candidate2D>());
+  while (static_cast<int>(top_candidates->size()) > max_candidates) {
+    top_candidates->pop_back();
+  }
+}
 
 }  // namespace
 
@@ -270,6 +307,39 @@ bool FastCorrelativeScanMatcher2D::MatchFullSubmap(
                                    min_score, score, pose_estimate);
 }
 
+bool FastCorrelativeScanMatcher2D::MatchWithTopCandidates(
+    const transform::Rigid2d& initial_pose_estimate,
+    const sensor::PointCloud& point_cloud, const float min_score,
+    const int max_candidates, const float shadow_score_margin,
+    float* const score, transform::Rigid2d* const pose_estimate,
+    std::vector<ScoredPose>* const top_candidates) const {
+  const SearchParameters search_parameters(options_.linear_search_window(),
+                                           options_.angular_search_window(),
+                                           point_cloud, limits_.resolution());
+  return MatchWithSearchParametersAndTopCandidates(
+      search_parameters, initial_pose_estimate, point_cloud, min_score,
+      max_candidates, shadow_score_margin, score, pose_estimate,
+      top_candidates);
+}
+
+bool FastCorrelativeScanMatcher2D::MatchFullSubmapWithTopCandidates(
+    const sensor::PointCloud& point_cloud, const float min_score,
+    const int max_candidates, const float shadow_score_margin,
+    float* const score, transform::Rigid2d* const pose_estimate,
+    std::vector<ScoredPose>* const top_candidates) const {
+  const SearchParameters search_parameters(
+      1e6 * limits_.resolution(),  // Linear search window, 1e6 cells/direction.
+      M_PI,  // Angular search window, 180 degrees in both directions.
+      point_cloud, limits_.resolution());
+  const transform::Rigid2d center = transform::Rigid2d::Translation(
+      limits_.max() - 0.5 * limits_.resolution() *
+                          Eigen::Vector2d(limits_.cell_limits().num_y_cells,
+                                          limits_.cell_limits().num_x_cells));
+  return MatchWithSearchParametersAndTopCandidates(
+      search_parameters, center, point_cloud, min_score, max_candidates,
+      shadow_score_margin, score, pose_estimate, top_candidates);
+}
+
 // 进行基于分支定界算法的粗匹配
 void FastCorrelativeScanMatcher2D::MatchFullSubmapWithPose(
     const transform::Rigid2d& initial_pose_estimate,
@@ -325,6 +395,61 @@ bool FastCorrelativeScanMatcher2D::MatchWithSearchParameters(
         {initial_pose_estimate.translation().x() + best_candidate.x,
          initial_pose_estimate.translation().y() + best_candidate.y},
         initial_rotation * Eigen::Rotation2Dd(best_candidate.orientation));
+    return true;
+  }
+  return false;
+}
+
+bool FastCorrelativeScanMatcher2D::MatchWithSearchParametersAndTopCandidates(
+    SearchParameters search_parameters,
+    const transform::Rigid2d& initial_pose_estimate,
+    const sensor::PointCloud& point_cloud, const float min_score,
+    const int max_candidates, const float shadow_score_margin,
+    float* const score, transform::Rigid2d* const pose_estimate,
+    std::vector<ScoredPose>* const top_candidates) const {
+  CHECK(score != nullptr);
+  CHECK(pose_estimate != nullptr);
+  CHECK(top_candidates != nullptr);
+  CHECK_GT(max_candidates, 0);
+  top_candidates->clear();
+
+  const Eigen::Rotation2Dd initial_rotation = initial_pose_estimate.rotation();
+  const sensor::PointCloud rotated_point_cloud = sensor::TransformPointCloud(
+      point_cloud,
+      transform::Rigid3f::Rotation(Eigen::AngleAxisf(
+          initial_rotation.cast<float>().angle(), Eigen::Vector3f::UnitZ())));
+  const std::vector<sensor::PointCloud> rotated_scans =
+      GenerateRotatedScans(rotated_point_cloud, search_parameters);
+
+  const std::vector<DiscreteScan2D> discrete_scans = DiscretizeScans(
+      limits_, rotated_scans,
+      Eigen::Translation2f(initial_pose_estimate.translation().x(),
+                           initial_pose_estimate.translation().y()));
+  search_parameters.ShrinkToFit(discrete_scans, limits_.cell_limits());
+  const std::vector<Candidate2D> lowest_resolution_candidates =
+      ComputeLowestResolutionCandidates(discrete_scans, search_parameters);
+
+  std::vector<Candidate2D> top_raw_candidates;
+  BranchAndBoundTopCandidates(
+      discrete_scans, search_parameters, lowest_resolution_candidates,
+      precomputation_grid_stack_->max_depth(),
+      std::max(0.f, min_score - shadow_score_margin), max_candidates,
+      &top_raw_candidates);
+
+  for (const Candidate2D& candidate : top_raw_candidates) {
+    ScoredPose scored_pose;
+    scored_pose.score = candidate.score;
+    scored_pose.pose = transform::Rigid2d(
+        {initial_pose_estimate.translation().x() + candidate.x,
+         initial_pose_estimate.translation().y() + candidate.y},
+        initial_rotation * Eigen::Rotation2Dd(candidate.orientation));
+    scored_pose.above_min_score = candidate.score > min_score;
+    top_candidates->push_back(scored_pose);
+  }
+
+  if (!top_candidates->empty() && top_candidates->front().above_min_score) {
+    *score = top_candidates->front().score;
+    *pose_estimate = top_candidates->front().pose;
     return true;
   }
   return false;
@@ -473,6 +598,59 @@ Candidate2D FastCorrelativeScanMatcher2D::BranchAndBound(
                        best_high_resolution_candidate.score));
   }
   return best_high_resolution_candidate;
+}
+
+void FastCorrelativeScanMatcher2D::BranchAndBoundTopCandidates(
+    const std::vector<DiscreteScan2D>& discrete_scans,
+    const SearchParameters& search_parameters,
+    const std::vector<Candidate2D>& candidates, const int candidate_depth,
+    const float min_score, const int max_candidates,
+    std::vector<Candidate2D>* const top_candidates) const {
+  CHECK(top_candidates != nullptr);
+  if (candidate_depth == 0) {
+    for (const Candidate2D& candidate : candidates) {
+      if (candidate.score <= min_score) {
+        break;
+      }
+      InsertTopCandidate(candidate, max_candidates, top_candidates);
+    }
+    return;
+  }
+
+  for (const Candidate2D& candidate : candidates) {
+    const float pruning_score =
+        top_candidates->size() >= static_cast<size_t>(max_candidates)
+            ? std::max(min_score, top_candidates->back().score)
+            : min_score;
+    if (candidate.score <= pruning_score) {
+      break;
+    }
+
+    std::vector<Candidate2D> higher_resolution_candidates;
+    const int half_width = 1 << (candidate_depth - 1);
+    for (int x_offset : {0, half_width}) {
+      if (candidate.x_index_offset + x_offset >
+          search_parameters.linear_bounds[candidate.scan_index].max_x) {
+        break;
+      }
+      for (int y_offset : {0, half_width}) {
+        if (candidate.y_index_offset + y_offset >
+            search_parameters.linear_bounds[candidate.scan_index].max_y) {
+          break;
+        }
+        higher_resolution_candidates.emplace_back(
+            candidate.scan_index, candidate.x_index_offset + x_offset,
+            candidate.y_index_offset + y_offset, search_parameters);
+      }
+    }
+    ScoreCandidates(precomputation_grid_stack_->Get(candidate_depth - 1),
+                    discrete_scans, search_parameters,
+                    &higher_resolution_candidates);
+    BranchAndBoundTopCandidates(discrete_scans, search_parameters,
+                                higher_resolution_candidates,
+                                candidate_depth - 1, min_score,
+                                max_candidates, top_candidates);
+  }
 }
 
 }  // namespace scan_matching

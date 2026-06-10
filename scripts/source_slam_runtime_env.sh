@@ -28,7 +28,17 @@ default_ros_machine_ip() {
 }
 
 apply_ros_network_env() {
+    local master_uri="${ROS_MASTER_URI:-http://localhost:11311}"
     local machine_ip="${ROS_MACHINE_IP:-}"
+
+    case "${master_uri}" in
+        http://localhost:*|http://127.0.0.1:*)
+            export ROS_MASTER_URI="${master_uri}"
+            unset ROS_IP
+            unset ROS_HOSTNAME
+            return 0
+            ;;
+    esac
 
     if [[ -z "${machine_ip}" ]]; then
         machine_ip="$(default_ros_machine_ip)"

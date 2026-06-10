@@ -17,14 +17,19 @@
 #ifndef CARTOGRAPHER_MAPPING_INTERNAL_2D_POSE_GRAPH_2D_H_
 #define CARTOGRAPHER_MAPPING_INTERNAL_2D_POSE_GRAPH_2D_H_
 
+#include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
+#include <string>
+#include <thread>
 #include <vector>
-// #include <thread>
 
 #include "Eigen/Core"
 #include "Eigen/Geometry"
@@ -76,6 +81,7 @@ class PoseGraph2D : public PoseGraph {
   void DetectAndDescribe(const NodeId& node_id);
 
   bool PushNodeForDetect(const NodeId& node_id);
+  void ComputeFlirtFeaturesForAllNodes() override;
 
   // Adds a new node with 'constant_data'. Its 'constant_data->local_pose' was
   // determined by scan matching against 'insertion_submaps.front()' and the
@@ -120,6 +126,12 @@ class PoseGraph2D : public PoseGraph {
   void AddTrimmer(std::unique_ptr<PoseGraphTrimmer> trimmer) override;
   void RunOptimizationOnce() override;
   void RunFinalOptimization() override;
+  void ConfigureMapScanDistanceFieldCache(
+      const std::string& cache_filename,
+      const std::string& cache_key) override LOCKS_EXCLUDED(mutex_);
+  bool BuildAndSaveMapScanDistanceFieldCache(
+      const std::string& cache_filename,
+      const std::string& cache_key) override LOCKS_EXCLUDED(mutex_);
   std::vector<std::vector<int>> GetConnectedTrajectories() const override
       LOCKS_EXCLUDED(mutex_);
   PoseGraphInterface::SubmapData GetSubmapData(const SubmapId& submap_id) const
@@ -170,8 +182,18 @@ class PoseGraph2D : public PoseGraph {
       const EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Handles a new work item.
+  enum class WorkItemPriority {
+    kCritical,
+    kHighRateSensorData,
+    kLowRateSensorData,
+  };
+
   void AddWorkItem(const std::function<WorkItem::Result()>& work_item)
       LOCKS_EXCLUDED(mutex_) LOCKS_EXCLUDED(work_queue_mutex_);
+  void AddWorkItem(const std::function<WorkItem::Result()>& work_item,
+                   WorkItemPriority priority)
+      LOCKS_EXCLUDED(mutex_) LOCKS_EXCLUDED(work_queue_mutex_);
+  size_t GetWorkQueueSize() LOCKS_EXCLUDED(work_queue_mutex_);
 
   // Adds connectivity and sampler for a trajectory if it does not exist.
   void AddTrajectoryIfNeeded(int trajectory_id)
@@ -203,6 +225,40 @@ class PoseGraph2D : public PoseGraph {
       LOCKS_EXCLUDED(mutex_);
 
   int ExecuteGlobalRelocationForNode(const NodeId& ref_node_id);
+
+  struct AutomaticGlobalRelocationRequest {
+    NodeId node_id{-1, -1};
+    std::shared_ptr<const TrajectoryNode::Data> constant_data;
+    transform::Rigid3d global_pose;
+    int last_cross_trajectory_id = -1;
+    int last_cross_node_index = -1;
+    std::string trigger_reason;
+  };
+
+  struct AutomaticRelocationCandidate {
+    NodeId node_id;
+    SubmapId submap_id;
+    std::shared_ptr<const TrajectoryNode::Data> constant_data;
+    std::shared_ptr<const Submap> submap;
+    transform::Rigid2d initial_trajectory_pose;
+  };
+
+  void DetectAndDescribeData(TrajectoryNode::Data* constant_data,
+                             const transform::Rigid3d& global_pose);
+  std::vector<InterestPoint*> BuildFlirtFeatures(
+      const TrajectoryNode::Data* constant_data,
+      const transform::Rigid3d& feature_pose);
+  void EnqueueAutomaticGlobalRelocation(
+      AutomaticGlobalRelocationRequest request);
+  void ProcessAutomaticGlobalRelocationQueue();
+  void StopAutomaticGlobalRelocationWorker();
+  int ExecuteAutomaticGlobalRelocationForNode(
+      const AutomaticGlobalRelocationRequest& request,
+      std::string* failure_reason);
+  bool BuildAutomaticGlobalRelocationSnapshot(
+      const NodeId& ref_node_id,
+      std::vector<AutomaticRelocationCandidate>* candidates)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   void ComputeConstraintForGlobal(const NodeId& node_id,
                                   const SubmapId& submap_id);
@@ -249,13 +305,156 @@ class PoseGraph2D : public PoseGraph {
   void UpdateTrajectoryConnectivity(const Constraint& constraint)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  volatile bool working;
+  bool ShouldRunAutomaticGlobalRelocation(const NodeId& node_id,
+                                          std::size_t queued_work_items,
+                                          std::string* trigger_reason)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void UpdateAutomaticGlobalRelocationState(const Constraint& constraint)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool IsTrajectoryActive(int trajectory_id) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool HasFrozenTrajectoryForLocalization() const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool HasRecentActiveFrozenConnection(int active_trajectory_id,
+                                       int active_node_index) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool IsActiveNodeToFrozenSubmapConstraint(const Constraint& constraint) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool IsActiveFrozenConstraint(const Constraint& constraint) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  struct ActiveFrozenImpliedCorrection {
+    int active_trajectory_id = -1;
+    transform::Rigid2d delta = transform::Rigid2d::Identity();
+    double translation_m = 0.0;
+    double yaw_rad = 0.0;
+  };
+
+  struct ActiveFrozenCorrectionObservation {
+    NodeId node_id;
+    ActiveFrozenImpliedCorrection correction;
+  };
+
+  bool ComputeActiveFrozenImpliedCorrection(
+      const Constraint& constraint,
+      ActiveFrozenImpliedCorrection* correction) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool PassesActiveFrozenConsistencyGate(
+      const NodeId& node_id, const ActiveFrozenImpliedCorrection& correction,
+      const std::string& gate_reason, bool count_as_ambiguous_reject)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  std::vector<Constraint> FilterConstraintsByQuality(
+      const constraints::ConstraintBuilder2D::Result& result)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+
+  struct CurrentPoseScanMapSubmap {
+    SubmapId id;
+    std::shared_ptr<const Submap2D> submap;
+    transform::Rigid2d global_pose = transform::Rigid2d::Identity();
+    double distance = 0.0;
+  };
+
+  struct CurrentPoseScanMapQuality {
+    double hit20 = -1.0;
+    double mean_distance = -1.0;
+    double known_ratio = -1.0;
+    int sampled_points = 0;
+    int checked_submaps = 0;
+  };
+
+  struct MapScanDistanceField {
+    bool valid = false;
+    double resolution = 0.05;
+    double origin_x = 0.0;
+    double origin_y = 0.0;
+    int width = 0;
+    int height = 0;
+    int frozen_finished_submap_count = 0;
+    std::vector<float> distance_m;
+    std::vector<uint8_t> known;
+  };
+
+  struct MapScanDistanceFieldSubmapSnapshot {
+    std::shared_ptr<const Submap2D> submap;
+    transform::Rigid2d global_pose = transform::Rigid2d::Identity();
+  };
+
+  struct LocalizationRecoveryRuntime {
+    int consecutive_scan_map_bad_count = 0;
+    int consecutive_scan_map_severe_bad_count = 0;
+    double latest_scan_map_hit20 = -1.0;
+    double latest_scan_map_mean_distance = -1.0;
+    bool scan_map_bad = false;
+    bool scan_map_severe_bad = false;
+    int ambiguous_reject_count_since_accept = 0;
+    int geometry_reject_count_since_accept = 0;
+    int consistency_reject_count_since_accept = 0;
+    int large_correction_consistency_reject_count_since_accept = 0;
+    int recovery_full_search_attempts_since_accept = 0;
+    int last_recovery_full_search_node_index = -1;
+    int auto_relocation_failures_since_accept = 0;
+    int auto_relocation_suppressed_until_node_index = -1;
+    std::string recovery_state = "OK";
+    std::string recovery_reason;
+  };
+
+  CurrentPoseScanMapQuality ComputeCurrentPoseScanMapQuality(
+      const TrajectoryNode::Data& constant_data,
+      const transform::Rigid2d& global_pose,
+      const std::vector<CurrentPoseScanMapSubmap>& submaps) const;
+  std::shared_ptr<const MapScanDistanceField>
+  GetMapScanDistanceFieldIfReadyOrStartAsync()
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  std::vector<MapScanDistanceFieldSubmapSnapshot>
+  SnapshotMapScanDistanceFieldSubmaps(bool include_unfrozen_finished_submaps)
+      const EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  std::shared_ptr<const MapScanDistanceField> BuildMapScanDistanceField(
+      const std::vector<MapScanDistanceFieldSubmapSnapshot>& submaps) const;
+  std::shared_ptr<const MapScanDistanceField> LoadMapScanDistanceFieldCache(
+      const std::string& cache_filename, const std::string& cache_key) const;
+  bool SaveMapScanDistanceFieldCache(
+      const std::string& cache_filename, const std::string& cache_key,
+      const MapScanDistanceField& field) const;
+  void MaybeCollectFinishedMapScanDistanceFieldTask()
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  void InvalidateMapScanDistanceField()
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  CurrentPoseScanMapQuality ComputeMapScanQuality(
+      const TrajectoryNode::Data& constant_data,
+      const transform::Rigid2d& global_pose,
+      const MapScanDistanceField& distance_field,
+      int max_sampled_points) const;
+  void UpdateLocalizationRecoveryFromMapScanQuality(
+      const NodeId& node_id, const CurrentPoseScanMapQuality& quality)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  int NodesSinceLastActiveFrozenConstraint(const NodeId& node_id) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool HasLocalizationRecoveryEvidence(
+      const LocalizationRecoveryRuntime& recovery) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool IsLocalizationDegraded(
+      const NodeId& node_id, const LocalizationRecoveryRuntime& recovery) const
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool ShouldRunRecoveryFullSearch(
+      const NodeId& node_id, std::size_t queued_work_items_at_start,
+      LocalizationRecoveryRuntime* recovery, std::string* reason)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  std::vector<SubmapId> SelectActiveFrozenSubmapsForSearch(
+      const std::vector<std::pair<double, SubmapId>>& candidates,
+      bool recovery_full_search, std::size_t queued_work_items_at_start) const;
+
+  volatile bool working = false;
   void process_queue_for_detect();
   std::thread th_process_flirt;
 
   std::mutex detecting_lock_;
   std::mutex queue_for_detect_lock_;
   std::deque<NodeId> queue_for_detect_;
+  std::mutex automatic_relocation_queue_lock_;
+  std::condition_variable automatic_relocation_queue_cv_;
+  bool automatic_relocation_worker_running_ = false;
+  std::deque<AutomaticGlobalRelocationRequest> automatic_relocation_queue_;
+  std::thread automatic_relocation_thread_;
   const proto::PoseGraphOptions options_;
   GlobalSlamOptimizationCallback global_slam_optimization_callback_;
   mutable absl::Mutex mutex_;
@@ -264,6 +463,8 @@ class PoseGraph2D : public PoseGraph {
   // If it exists, further work items must be added to this queue, and will be
   // considered later.
   std::unique_ptr<WorkQueue> work_queue_ GUARDED_BY(work_queue_mutex_);
+  size_t high_rate_sensor_data_backpressure_counter_
+      GUARDED_BY(work_queue_mutex_) = 0;
 
   // We globally localize a fraction of the nodes from each trajectory.
   absl::flat_hash_map<int, std::unique_ptr<common::FixedRatioSampler>>
@@ -271,6 +472,22 @@ class PoseGraph2D : public PoseGraph {
 
   // Number of nodes added since last loop closure.
   int num_nodes_since_last_loop_closure_ GUARDED_BY(mutex_) = 0;
+
+  int last_active_to_frozen_constraint_trajectory_id_ GUARDED_BY(mutex_) = -1;
+  int last_active_to_frozen_constraint_node_index_ GUARDED_BY(mutex_) = -1;
+  int last_automatic_global_relocation_trajectory_id_ GUARDED_BY(mutex_) = -1;
+  int last_automatic_global_relocation_node_index_ GUARDED_BY(mutex_) = -1;
+  std::map<int, std::deque<ActiveFrozenCorrectionObservation>>
+      active_frozen_consistency_windows_ GUARDED_BY(mutex_);
+  std::map<int, LocalizationRecoveryRuntime> localization_recovery_
+      GUARDED_BY(mutex_);
+  std::shared_ptr<const MapScanDistanceField> map_scan_distance_field_
+      GUARDED_BY(mutex_);
+  std::string map_scan_distance_field_cache_filename_ GUARDED_BY(mutex_);
+  std::string map_scan_distance_field_cache_key_ GUARDED_BY(mutex_);
+  int map_scan_distance_field_generation_ GUARDED_BY(mutex_) = 0;
+  bool map_scan_distance_field_build_in_progress_ GUARDED_BY(mutex_) = false;
+  std::future<void> map_scan_distance_field_future_ GUARDED_BY(mutex_);
 
   // Current optimization problem.
   std::unique_ptr<optimization::OptimizationProblem2D> optimization_problem_;

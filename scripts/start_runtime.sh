@@ -99,9 +99,6 @@ RUNTIME_START_ROBOT_STATE_PUBLISHER="${RUNTIME_START_ROBOT_STATE_PUBLISHER:-true
 RUNTIME_START_JOINT_STATE_PUBLISHER="${RUNTIME_START_JOINT_STATE_PUBLISHER:-${DEFAULT_RUNTIME_START_JOINT_STATE_PUBLISHER}}"
 RUNTIME_ROBOT_DESCRIPTION_PATH="${RUNTIME_ROBOT_DESCRIPTION_PATH:-${DEFAULT_RUNTIME_ROBOT_DESCRIPTION_PATH}}"
 RUNTIME_START_LIDAR="${RUNTIME_START_LIDAR:-true}"
-RUNTIME_LIDAR_NTP_IP="${RUNTIME_LIDAR_NTP_IP:-192.168.16.11}"
-RUNTIME_LIDAR_NTP_PORT="${RUNTIME_LIDAR_NTP_PORT:-5678}"
-RUNTIME_LIDAR_NTP_ENABLE="${RUNTIME_LIDAR_NTP_ENABLE:--1}"
 RUNTIME_START_IMU="${RUNTIME_START_IMU:-true}"
 RUNTIME_IMU_PORT="${RUNTIME_IMU_PORT:-/dev/serial/by-path/pci-0000:65:00.3-usb-0:3:1.0-port0}"
 RUNTIME_IMU_BAUD="${RUNTIME_IMU_BAUD:-115200}"
@@ -115,8 +112,10 @@ RUNTIME_ENABLE_DEPTH_UP_CAM="${RUNTIME_ENABLE_DEPTH_UP_CAM:-false}"
 RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK:-${DEFAULT_RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}}"
 RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z="${RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z:-${DEFAULT_RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z}}"
 RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK:-${DEFAULT_RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK}}"
+RUNTIME_BASE_EXTRA_ARGS="${RUNTIME_BASE_EXTRA_ARGS:-}"
 START_WHEELTEC_BASE="${START_WHEELTEC_BASE:-${DEFAULT_START_WHEELTEC_BASE}}"
 WHEELTEC_SERIAL_DEVICE="${WHEELTEC_SERIAL_DEVICE:-${DEFAULT_WHEELTEC_SERIAL_DEVICE}}"
+WHEELTEC_BASE_EXTRA_ARGS="${WHEELTEC_BASE_EXTRA_ARGS:-}"
 WHEELTEC_SERIAL_BAUDRATE="${WHEELTEC_SERIAL_BAUDRATE:-115200}"
 WHEELTEC_CAR_MODE="${WHEELTEC_CAR_MODE:-senior_diff}"
 WHEELTEC_CMD_VEL_TOPIC="${WHEELTEC_CMD_VEL_TOPIC:-/cmd_vel}"
@@ -129,6 +128,7 @@ WHEELTEC_ODOM_Y_SCALE="${WHEELTEC_ODOM_Y_SCALE:-1.0}"
 WHEELTEC_ODOM_Z_SCALE_POSITIVE="${WHEELTEC_ODOM_Z_SCALE_POSITIVE:-1.0}"
 WHEELTEC_ODOM_Z_SCALE_NEGATIVE="${WHEELTEC_ODOM_Z_SCALE_NEGATIVE:-1.0}"
 START_WHEEL_ODOM="${START_WHEEL_ODOM:-${DEFAULT_START_WHEEL_ODOM}}"
+WHEEL_ODOM_EXTRA_ARGS="${WHEEL_ODOM_EXTRA_ARGS:-}"
 START_IMU_BIAS_CORRECTION="${START_IMU_BIAS_CORRECTION:-false}"
 ODOM_SERIAL_DEVICE="${ODOM_SERIAL_DEVICE:-${DEFAULT_ODOM_SERIAL_DEVICE}}"
 ODOM_SERIAL_BAUDRATE="${ODOM_SERIAL_BAUDRATE:-115200}"
@@ -147,6 +147,7 @@ ODOM_ANGULAR_VELOCITY_SIGN="${ODOM_ANGULAR_VELOCITY_SIGN:--1.0}"
 START_MCORE_BRIDGE="${START_MCORE_BRIDGE:-${DEFAULT_START_MCORE_BRIDGE}}"
 START_MCORE_VELOCITY_SENDER="${START_MCORE_VELOCITY_SENDER:-${DEFAULT_START_MCORE_VELOCITY_SENDER}}"
 MCORE_SERIAL_DEVICE="${MCORE_SERIAL_DEVICE:-/dev/serial/by-path/pci-0000:67:00.4-usb-0:1.3:1.0-port0}"
+MCORE_VELOCITY_EXTRA_ARGS="${MCORE_VELOCITY_EXTRA_ARGS:-}"
 MCORE_SERIAL_BAUDRATE="${MCORE_SERIAL_BAUDRATE:-115200}"
 MCORE_SERVER_IP="${MCORE_SERVER_IP:-192.168.16.10}"
 MCORE_SERVER_PORT="${MCORE_SERVER_PORT:-5001}"
@@ -163,6 +164,7 @@ MCORE_ENABLE_RX_LOG="${MCORE_ENABLE_RX_LOG:-true}"
 START_STATION_BRIDGE="${START_STATION_BRIDGE:-${DEFAULT_START_STATION_BRIDGE}}"
 START_DOCK_SUPPLY_MANAGER="${START_DOCK_SUPPLY_MANAGER:-${DEFAULT_START_DOCK_SUPPLY_MANAGER}}"
 START_DOCKING_STACK="${START_DOCKING_STACK:-${DEFAULT_START_DOCKING_STACK}}"
+HARDWARE_BRIDGES_EXTRA_ARGS="${HARDWARE_BRIDGES_EXTRA_ARGS:-}"
 MANUAL_DRIVE_REQUIRE_ROLE="${MANUAL_DRIVE_REQUIRE_ROLE:-false}"
 MANUAL_DRIVE_REQUIRE_SLAM_STATE="${MANUAL_DRIVE_REQUIRE_SLAM_STATE:-false}"
 MANUAL_DRIVE_REQUIRE_TASK_STATE="${MANUAL_DRIVE_REQUIRE_TASK_STATE:-false}"
@@ -224,14 +226,15 @@ Environment highlights:
   BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS=0
   START_WHEEL_ODOM=true
   ODOM_SERIAL_DEVICE=/dev/serial/by-path/pci-0000:65:00.3-usb-0:1:1.0-port0
-  ODOM_WHEEL_SEPARATION=0.46
-  RUNTIME_START_IMU=true
-  RUNTIME_IMU_PORT=/dev/serial/by-path/pci-0000:65:00.3-usb-0:3:1.0-port0
   START_MCORE_VELOCITY_SENDER=true
   MCORE_SERIAL_DEVICE=/dev/serial/by-path/pci-0000:67:00.4-usb-0:1.3:1.0-port0
   CHASSIS_DRIVER=wheeltec_senior_diff
   WHEELTEC_SERIAL_DEVICE=/dev/wheeltec_controller
-  WHEELTEC_CAR_MODE=senior_diff
+  RUNTIME_BASE_EXTRA_ARGS=
+  WHEEL_ODOM_EXTRA_ARGS=
+  MCORE_VELOCITY_EXTRA_ARGS=
+  WHEELTEC_BASE_EXTRA_ARGS=
+  HARDWARE_BRIDGES_EXTRA_ARGS=
 EOF
 }
 
@@ -264,6 +267,13 @@ append_shell_words() {
   # shellcheck disable=SC2206
   local extra_args=( ${raw_words} )
   target_ref+=("${extra_args[@]}")
+}
+
+join_shell_words() {
+  local -n words_ref="$1"
+  local joined=""
+  printf -v joined '%q ' "${words_ref[@]}"
+  printf '%s' "${joined% }"
 }
 
 allow_no_active_map_startup_enabled() {
@@ -341,11 +351,61 @@ build_backend_production_acceptance_cmd() {
 
 start_runtime_session() {
   runtime_log_status "start tmux session ${TMUX_SESSION}"
+
+  local base_cmd_words=(
+    exec
+    roslaunch
+    cleanrobot
+    cleanrobot_base.launch
+  )
+  if [[ "${RUNTIME_START_ROBOT_STATE_PUBLISHER}" != "true" ]]; then
+    base_cmd_words+=(start_robot_state_publisher:="${RUNTIME_START_ROBOT_STATE_PUBLISHER}")
+  fi
+  if [[ "${RUNTIME_START_JOINT_STATE_PUBLISHER}" != "false" ]]; then
+    base_cmd_words+=(start_joint_state_publisher:="${RUNTIME_START_JOINT_STATE_PUBLISHER}")
+  fi
+  if [[ "${RUNTIME_ROBOT_DESCRIPTION_PATH}" != "${REPO_ROOT}/src/cleanrobot_description/urdf/a26022_clean_robot.urdf" ]]; then
+    base_cmd_words+=(robot_description_path:="${RUNTIME_ROBOT_DESCRIPTION_PATH}")
+  fi
+  if [[ "${RUNTIME_START_LIDAR}" != "true" ]]; then
+    base_cmd_words+=(start_lidar:="${RUNTIME_START_LIDAR}")
+  fi
+  if [[ "${RUNTIME_START_IMU}" != "true" ]]; then
+    base_cmd_words+=(start_imu:="${RUNTIME_START_IMU}")
+  fi
+  if [[ "${RUNTIME_START_AHRS}" != "false" ]]; then
+    base_cmd_words+=(start_ahrs:="${RUNTIME_START_AHRS}")
+  fi
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "false" ]]; then
+    base_cmd_words+=(start_depth_cameras:="${RUNTIME_START_DEPTH_CAMERAS}")
+  fi
+  if [[ "${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}" != "false" ]]; then
+    base_cmd_words+=(
+      publish_base_footprint_to_base_link:="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}"
+      base_footprint_to_base_link_z:="${RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z}"
+    )
+  fi
+  if [[ "${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK}" != "false" ]]; then
+    base_cmd_words+=(publish_base_footprint_to_gyro_link:="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK}")
+  fi
+  append_shell_words base_cmd_words "${RUNTIME_BASE_EXTRA_ARGS}"
+
+  local base_cmd
+  base_cmd="$(join_shell_words base_cmd_words)"
+
   tmux new-session -d -s "${TMUX_SESSION}" -n base \
-    "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; exec roslaunch cleanrobot cleanrobot_base.launch start_robot_state_publisher:=${RUNTIME_START_ROBOT_STATE_PUBLISHER} start_joint_state_publisher:=${RUNTIME_START_JOINT_STATE_PUBLISHER} robot_description_path:=${RUNTIME_ROBOT_DESCRIPTION_PATH} start_lidar:=${RUNTIME_START_LIDAR} lidar_ntp_ip:=${RUNTIME_LIDAR_NTP_IP} lidar_ntp_port:=${RUNTIME_LIDAR_NTP_PORT} lidar_ntp_enable:=${RUNTIME_LIDAR_NTP_ENABLE} start_imu:=${RUNTIME_START_IMU} imu_port:=${RUNTIME_IMU_PORT} imu_baud:=${RUNTIME_IMU_BAUD} imu_slave_address:=${RUNTIME_IMU_SLAVE_ADDRESS} imu_publish_raw:=${RUNTIME_IMU_PUBLISH_RAW} imu_publish_during_calibration:=${RUNTIME_IMU_PUBLISH_DURING_CALIBRATION} start_ahrs:=${RUNTIME_START_AHRS} start_depth_cameras:=${RUNTIME_START_DEPTH_CAMERAS} publish_base_footprint_to_base_link:=${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK} base_footprint_to_base_link_z:=${RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z} publish_base_footprint_to_gyro_link:=${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK}'"
+    "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; ${base_cmd}'"
 
   if [[ "${START_WHEELTEC_BASE}" == "true" ]]; then
-    runtime_tmux_window "${TMUX_SESSION}" wheeltec "exec roslaunch robot_hw_bridge wheeltec_senior_diff_base.launch serial_device:=${WHEELTEC_SERIAL_DEVICE} serial_baudrate:=${WHEELTEC_SERIAL_BAUDRATE} car_mode:=${WHEELTEC_CAR_MODE} cmd_vel_topic:=${WHEELTEC_CMD_VEL_TOPIC} odom_frame_id:=${WHEELTEC_ODOM_FRAME_ID} robot_frame_id:=${WHEELTEC_ROBOT_FRAME_ID} gyro_frame_id:=${WHEELTEC_GYRO_FRAME_ID} publish_odom_tf:=${WHEELTEC_PUBLISH_ODOM_TF} odom_x_scale:=${WHEELTEC_ODOM_X_SCALE} odom_y_scale:=${WHEELTEC_ODOM_Y_SCALE} odom_z_scale_positive:=${WHEELTEC_ODOM_Z_SCALE_POSITIVE} odom_z_scale_negative:=${WHEELTEC_ODOM_Z_SCALE_NEGATIVE}"
+    local wheeltec_cmd_words=(
+      exec
+      roslaunch
+      robot_hw_bridge
+      wheeltec_senior_diff_base.launch
+      serial_device:="${WHEELTEC_SERIAL_DEVICE}"
+    )
+    append_shell_words wheeltec_cmd_words "${WHEELTEC_BASE_EXTRA_ARGS}"
+    runtime_tmux_window "${TMUX_SESSION}" wheeltec "$(join_shell_words wheeltec_cmd_words)"
   else
     runtime_log_status "[INFO] skip wheeltec chassis base: START_WHEELTEC_BASE=${START_WHEELTEC_BASE}"
   fi
@@ -357,19 +417,46 @@ start_runtime_session() {
   fi
 
   if [[ "${START_WHEEL_ODOM}" == "true" ]]; then
-    runtime_tmux_window "${TMUX_SESSION}" odom "exec roslaunch wheel_speed_odom_bridge wheel_speed_odom.launch serial_device:=${ODOM_SERIAL_DEVICE} serial_baudrate:=${ODOM_SERIAL_BAUDRATE} protocol_mode:=${ODOM_PROTOCOL_MODE} use_device_timestamp:=${ODOM_USE_DEVICE_TIMESTAMP} publish_raw_odom_tf:=${ODOM_PUBLISH_RAW_ODOM_TF} wheel_separation:=${ODOM_WHEEL_SEPARATION} wheel_diameter:=${ODOM_WHEEL_DIAMETER} gear_ratio:=${ODOM_GEAR_RATIO} encoder_pulses_per_motor_revolution:=${ODOM_ENCODER_PPR} left_encoder_sign:=${ODOM_LEFT_ENCODER_SIGN} right_encoder_sign:=${ODOM_RIGHT_ENCODER_SIGN} left_wheel_scale:=${ODOM_LEFT_WHEEL_SCALE} right_wheel_scale:=${ODOM_RIGHT_WHEEL_SCALE} angular_velocity_sign:=${ODOM_ANGULAR_VELOCITY_SIGN}"
+    local odom_cmd_words=(
+      exec
+      roslaunch
+      wheel_speed_odom_bridge
+      wheel_speed_odom.launch
+      serial_device:="${ODOM_SERIAL_DEVICE}"
+    )
+    append_shell_words odom_cmd_words "${WHEEL_ODOM_EXTRA_ARGS}"
+    runtime_tmux_window "${TMUX_SESSION}" odom "$(join_shell_words odom_cmd_words)"
   else
     runtime_log_status "[INFO] skip wheel odom bridge: START_WHEEL_ODOM=${START_WHEEL_ODOM}; expecting another node to provide /odom"
   fi
 
   if [[ "${START_MCORE_VELOCITY_SENDER}" == "true" ]]; then
-    runtime_tmux_window "${TMUX_SESSION}" mcore_velocity "exec roslaunch mcore_chassis_bridge mcore_velocity_sender.launch serial_device:=${MCORE_SERIAL_DEVICE} serial_baudrate:=${MCORE_SERIAL_BAUDRATE} cmd_vel_topic:=${MCORE_CMD_VEL_TOPIC} linear_velocity_scale:=${MCORE_LINEAR_VELOCITY_SCALE} angular_velocity_scale:=${MCORE_ANGULAR_VELOCITY_SCALE} linear_velocity_sign:=${MCORE_LINEAR_VELOCITY_SIGN} angular_velocity_sign:=${MCORE_ANGULAR_VELOCITY_SIGN} max_abs_linear_velocity:=${MCORE_MAX_ABS_LINEAR_VELOCITY} max_abs_angular_velocity:=${MCORE_MAX_ABS_ANGULAR_VELOCITY} enable_tx_log:=${MCORE_ENABLE_TX_LOG} enable_rx_log:=${MCORE_ENABLE_RX_LOG}"
+    local mcore_velocity_cmd_words=(
+      exec
+      roslaunch
+      mcore_chassis_bridge
+      mcore_velocity_sender.launch
+      serial_device:="${MCORE_SERIAL_DEVICE}"
+    )
+    append_shell_words mcore_velocity_cmd_words "${MCORE_VELOCITY_EXTRA_ARGS}"
+    runtime_tmux_window "${TMUX_SESSION}" mcore_velocity "$(join_shell_words mcore_velocity_cmd_words)"
   else
     runtime_log_status "[INFO] skip M-core serial velocity sender: START_MCORE_VELOCITY_SENDER=${START_MCORE_VELOCITY_SENDER}"
   fi
 
   if [[ "${START_MCORE_BRIDGE}" == "true" || "${START_STATION_BRIDGE}" == "true" || "${START_DOCK_SUPPLY_MANAGER}" == "true" || "${START_DOCKING_STACK}" == "true" ]]; then
-    runtime_tmux_window "${TMUX_SESSION}" hardware "exec roslaunch robot_hw_bridge hardware_bridges.launch enable_mcore_bridge:=${START_MCORE_BRIDGE} enable_station_bridge:=${START_STATION_BRIDGE} enable_dock_supply_manager:=${START_DOCK_SUPPLY_MANAGER} enable_docking_stack:=${START_DOCKING_STACK} mcore_server_ip:=${MCORE_SERVER_IP} mcore_server_port:=${MCORE_SERVER_PORT} mcore_enable_cmd_vel:=${MCORE_ENABLE_CMD_VEL} mcore_cmd_vel_topic:=${MCORE_CMD_VEL_TOPIC} mcore_linear_velocity_scale:=${MCORE_LINEAR_VELOCITY_SCALE} mcore_angular_velocity_scale:=${MCORE_ANGULAR_VELOCITY_SCALE} mcore_linear_velocity_sign:=${MCORE_LINEAR_VELOCITY_SIGN} mcore_angular_velocity_sign:=${MCORE_ANGULAR_VELOCITY_SIGN} mcore_max_abs_linear_velocity:=${MCORE_MAX_ABS_LINEAR_VELOCITY} mcore_max_abs_angular_velocity:=${MCORE_MAX_ABS_ANGULAR_VELOCITY} station_server_ip:=${STATION_SERVER_IP} station_server_port:=${STATION_SERVER_PORT}"
+    local hardware_cmd_words=(
+      exec
+      roslaunch
+      robot_hw_bridge
+      hardware_bridges.launch
+      enable_mcore_bridge:="${START_MCORE_BRIDGE}"
+      enable_station_bridge:="${START_STATION_BRIDGE}"
+      enable_dock_supply_manager:="${START_DOCK_SUPPLY_MANAGER}"
+      enable_docking_stack:="${START_DOCKING_STACK}"
+    )
+    append_shell_words hardware_cmd_words "${HARDWARE_BRIDGES_EXTRA_ARGS}"
+    runtime_tmux_window "${TMUX_SESSION}" hardware "$(join_shell_words hardware_cmd_words)"
   else
     runtime_log_status "[INFO] skip legacy hardware bridges: all hardware bridge switches are false"
   fi

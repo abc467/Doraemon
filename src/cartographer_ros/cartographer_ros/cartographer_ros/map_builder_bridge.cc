@@ -16,8 +16,15 @@
 
 #include "cartographer_ros/map_builder_bridge.h"
 
+#include <array>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
+#include "boost/uuid/detail/md5.hpp"
 #include "cartographer/io/color.h"
 #include "cartographer/io/proto_stream.h"
 #include "cartographer_ros/msg_conversion.h"
@@ -110,6 +117,55 @@ void DeleteTrajectoryMarkers(
   }
 }
 
+struct FileFingerprint {
+  bool ok = false;
+  std::string md5_hex;
+  uint64_t size = 0;
+};
+
+FileFingerprint ComputeFileFingerprint(const std::string& filename) {
+  FileFingerprint fingerprint;
+  std::ifstream input(filename, std::ios::binary);
+  if (!input.is_open()) {
+    return fingerprint;
+  }
+  boost::uuids::detail::md5 md5;
+  std::array<char, 1024 * 1024> buffer;
+  while (input) {
+    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize bytes_read = input.gcount();
+    if (bytes_read > 0) {
+      md5.process_bytes(buffer.data(), static_cast<size_t>(bytes_read));
+    }
+    fingerprint.size += static_cast<uint64_t>(bytes_read);
+  }
+  boost::uuids::detail::md5::digest_type digest;
+  md5.get_digest(digest);
+  const auto* digest_bytes = reinterpret_cast<const uint8_t*>(&digest);
+  std::ostringstream md5_hex;
+  for (size_t i = 0; i < sizeof(digest); ++i) {
+    md5_hex << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(digest_bytes[i]);
+  }
+  fingerprint.md5_hex = md5_hex.str();
+  fingerprint.ok = input.eof();
+  return fingerprint;
+}
+
+std::string MapScanDistanceFieldCacheFilename(
+    const std::string& pbstream_filename) {
+  return pbstream_filename + ".map_scan_df";
+}
+
+std::string MapScanDistanceFieldCacheKey(const std::string& pbstream_filename) {
+  const FileFingerprint fingerprint = ComputeFileFingerprint(pbstream_filename);
+  if (!fingerprint.ok) {
+    return "";
+  }
+  return absl::StrCat("md5:", fingerprint.md5_hex, ":size:",
+                      fingerprint.size);
+}
+
 }  // namespace
 /**
  * @brief 根据传入的node_options, MapBuilder, 以及tf_buffer
@@ -139,6 +195,14 @@ void MapBuilderBridge::LoadState(const std::string& state_filename,
   LOG(INFO) << "Loading saved state '" << state_filename << "'...";
   cartographer::io::ProtoStreamReader stream(state_filename);
   map_builder_->LoadState(&stream, load_frozen_state);
+  const std::string cache_key = MapScanDistanceFieldCacheKey(state_filename);
+  if (!cache_key.empty()) {
+    map_builder_->pose_graph()->ConfigureMapScanDistanceFieldCache(
+        MapScanDistanceFieldCacheFilename(state_filename), cache_key);
+  } else {
+    LOG(WARNING) << "Failed to fingerprint pbstream for map scan distance "
+                 << "field cache: " << state_filename;
+  }
 }
 // 开始一条新轨迹
 int MapBuilderBridge::AddTrajectory(
@@ -198,8 +262,24 @@ void MapBuilderBridge::RunFinalOptimization() {
 // 将地图, 轨迹, 以及各个传感器数据进行序列化保存
 bool MapBuilderBridge::SerializeState(const std::string& filename,
                                       const bool include_unfinished_submaps) {
-  return map_builder_->SerializeStateToFile(include_unfinished_submaps,
-                                            filename);
+  RunFinalOptimization();
+  const bool serialized =
+      map_builder_->SerializeStateToFile(include_unfinished_submaps, filename);
+  if (!serialized) {
+    return false;
+  }
+  const std::string cache_key = MapScanDistanceFieldCacheKey(filename);
+  if (cache_key.empty()) {
+    LOG(WARNING) << "Failed to fingerprint pbstream for map scan distance "
+                 << "field cache: " << filename;
+    return true;
+  }
+  if (!map_builder_->pose_graph()->BuildAndSaveMapScanDistanceFieldCache(
+          MapScanDistanceFieldCacheFilename(filename), cache_key)) {
+    LOG(WARNING) << "Failed to build map scan distance field cache for "
+                 << filename;
+  }
+  return true;
 }
 
 void MapBuilderBridge::SubmapToProto(

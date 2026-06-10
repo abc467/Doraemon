@@ -33,7 +33,7 @@ options = {
   use_landmarks = true,--是否使用landmark
   num_laser_scans = 1,
   num_multi_echo_laser_scans = 0,
-  num_subdivisions_per_laser_scan = 1,
+  num_subdivisions_per_laser_scan = 2,
   num_point_clouds = 0,
   lookup_transform_timeout_sec = 0.2,
   submap_publish_period_sec = 0.3,
@@ -48,16 +48,16 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 
-TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 1
+TRAJECTORY_BUILDER_2D.num_accumulated_range_data = 2
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.occupied_space_weight = 10.
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.translation_weight = 1.
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 1.
 
-TRAJECTORY_BUILDER_2D.submaps.num_range_data = 50 --每个submap的关键帧数量
+TRAJECTORY_BUILDER_2D.submaps.num_range_data = 80 --每个submap的关键帧数量，增大单个冻结submap的几何上下文
 
 TRAJECTORY_BUILDER_2D.min_range = 0.1 --使用雷达数据的最小范围
-TRAJECTORY_BUILDER_2D.max_range = 30. --使用雷达数据的最大范围 --最好不超过雷达有效量程 ，也不要过小 --716mini--25.0; 719---35.0
-TRAJECTORY_BUILDER_2D.missing_data_ray_length = 1.
+TRAJECTORY_BUILDER_2D.max_range = 30. --LDS-50C-E厂家量程40m，建图保留中远距离结构，避开最远端弱反射/重复结构
+TRAJECTORY_BUILDER_2D.missing_data_ray_length = 15. --无回波按中距离自由空间更新，避免地图里未知区域过多导致单submap约束分低
 TRAJECTORY_BUILDER_2D.use_imu_data = true --是否使用imu
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = false --发布当前scan数据
 TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.1 

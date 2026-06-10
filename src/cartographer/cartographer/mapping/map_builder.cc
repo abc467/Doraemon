@@ -252,6 +252,7 @@ namespace cartographer
     void MapBuilder::SerializeState(bool include_unfinished_submaps,
                                     io::ProtoStreamWriterInterface *const writer)
     {
+      pose_graph_->ComputeFlirtFeaturesForAllNodes();
       io::WritePbStream(*pose_graph_, all_trajectory_builder_options_, writer,
                         include_unfinished_submaps);
     }
@@ -259,6 +260,7 @@ namespace cartographer
     bool MapBuilder::SerializeStateToFile(bool include_unfinished_submaps,
                                           const std::string &filename)
     {
+      pose_graph_->ComputeFlirtFeaturesForAllNodes();
       io::ProtoStreamWriter writer(filename);
       io::WritePbStream(*pose_graph_, all_trajectory_builder_options_, &writer,
                         include_unfinished_submaps);

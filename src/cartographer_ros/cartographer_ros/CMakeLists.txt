@@ -18,6 +18,7 @@ project(cartographer_ros)
 
 set(PACKAGE_DEPENDENCIES
   cartographer_ros_msgs
+  diagnostic_msgs
   geometry_msgs
   message_runtime
   nav_msgs
@@ -25,7 +26,9 @@ set(PACKAGE_DEPENDENCIES
   pcl_conversions
   rosbag
   roscpp
+  rosgraph_msgs
   roslib
+  rospy
   sensor_msgs
   std_msgs
   tf2
@@ -46,6 +49,28 @@ find_package(Boost REQUIRED COMPONENTS system iostreams)
 find_package(PCL REQUIRED COMPONENTS common)
 
 find_package(cartographer REQUIRED)
+find_package(Protobuf MODULE REQUIRED)
+if (Protobuf_INCLUDE_DIRS)
+  set(CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_DIRS ${Protobuf_INCLUDE_DIRS})
+else()
+  set(CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_DIRS ${PROTOBUF_INCLUDE_DIR})
+endif()
+set(CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_OVERRIDE
+  "${PROJECT_BINARY_DIR}/protobuf_include_override")
+file(MAKE_DIRECTORY "${CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_OVERRIDE}/google")
+foreach(PROTOBUF_INCLUDE_DIR ${CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_DIRS})
+  if (EXISTS "${PROTOBUF_INCLUDE_DIR}/google/protobuf")
+    file(REMOVE_RECURSE
+      "${CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_OVERRIDE}/google/protobuf")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "${PROTOBUF_INCLUDE_DIR}/google/protobuf"
+        "${CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_OVERRIDE}/google/protobuf")
+    break()
+  endif()
+endforeach()
+include_directories(BEFORE SYSTEM
+  "${CARTOGRAPHER_ROS_PROTOBUF_INCLUDE_OVERRIDE}")
 include("${CARTOGRAPHER_CMAKE_DIR}/functions.cmake")
 option(BUILD_GRPC "build features that require Cartographer gRPC support" false)
 google_initialize_cartographer_project()
@@ -95,9 +120,13 @@ file(GLOB_RECURSE ALL_SRCS "cartographer_ros/*.cc" "cartographer_ros/*.h")
 file(GLOB_RECURSE ALL_TESTS "cartographer_ros/*_test.cc")
 file(GLOB_RECURSE ALL_EXECUTABLES "cartographer_ros/*_main.cc")
 file(GLOB_RECURSE ALL_GRPC_FILES "cartographer_ros/cartographer_grpc/*")
-list(REMOVE_ITEM ALL_SRCS ${ALL_TESTS})
-list(REMOVE_ITEM ALL_SRCS ${ALL_EXECUTABLES})
-if (NOT ${BUILD_GRPC})
+if(ALL_TESTS)
+  list(REMOVE_ITEM ALL_SRCS ${ALL_TESTS})
+endif()
+if(ALL_EXECUTABLES)
+  list(REMOVE_ITEM ALL_SRCS ${ALL_EXECUTABLES})
+endif()
+if(NOT BUILD_GRPC AND ALL_GRPC_FILES)
   list(REMOVE_ITEM ALL_SRCS ${ALL_GRPC_FILES})
   list(REMOVE_ITEM ALL_TESTS ${ALL_GRPC_FILES})
   list(REMOVE_ITEM ALL_EXECUTABLES ${ALL_GRPC_FILES})
@@ -174,6 +203,11 @@ install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_GLOBAL_BIN_DESTINATION}
+)
+
+install(DIRECTORY launch
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  USE_SOURCE_PERMISSIONS
 )
 
 # Install source headers.

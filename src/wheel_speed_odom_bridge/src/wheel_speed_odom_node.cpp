@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -126,6 +128,66 @@ bool IsAbsolutePath(const std::string& path) {
     return true;
   }
   return path.size() > 1 && path[1] == ':';
+}
+
+std::string ExpandTimePattern(const std::string& pattern) {
+  if (pattern.find('%') == std::string::npos) {
+    return pattern;
+  }
+
+  const std::time_t now = std::time(nullptr);
+  std::tm local_time {};
+  localtime_r(&now, &local_time);
+
+  std::array<char, 512> buffer {};
+  const size_t written =
+      std::strftime(buffer.data(), buffer.size(), pattern.c_str(), &local_time);
+  if (written == 0U) {
+    ROS_WARN_STREAM("Failed to expand time pattern for path: " << pattern);
+    return pattern;
+  }
+  return std::string(buffer.data(), written);
+}
+
+bool EnsureDirectoryExists(const std::string& path) {
+  if (path.empty()) {
+    return true;
+  }
+
+  std::string current;
+  size_t index = 0U;
+  if (path[0] == '/') {
+    current = "/";
+    index = 1U;
+  }
+
+  while (index < path.size()) {
+    const size_t next = path.find('/', index);
+    const std::string part =
+        path.substr(index, next == std::string::npos ? std::string::npos : next - index);
+    index = next == std::string::npos ? path.size() : next + 1U;
+
+    if (part.empty() || part == ".") {
+      continue;
+    }
+    if (!current.empty() && current.back() != '/') {
+      current += "/";
+    }
+    current += part;
+
+    if (::mkdir(current.c_str(), 0755) != 0 && errno != EEXIST) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool EnsureParentDirectoryExists(const std::string& file_path) {
+  const size_t slash_index = file_path.find_last_of("/\\");
+  if (slash_index == std::string::npos) {
+    return true;
+  }
+  return EnsureDirectoryExists(file_path.substr(0, slash_index));
 }
 
 std::string GetWorkspaceRootPath() {
@@ -290,7 +352,7 @@ class WheelSpeedOdomNode {
 
     pnh_.param<bool>("enable_diagnostic_log", enable_diagnostic_log_, true);
     pnh_.param<std::string>("diagnostic_log_path", diagnostic_log_path_,
-                            "wheel_speed_odom_debug.csv");
+                            "test_bag/wheel_speed_odom_debug_%Y%m%d_%H%M%S.csv");
     LoadFixedSizeDoubleArrayParam(pnh_, "odom_pose_covariance_diagonal",
                                   &odom_pose_covariance_diagonal_);
     LoadFixedSizeDoubleArrayParam(pnh_, "odom_twist_covariance_diagonal",
@@ -1768,22 +1830,29 @@ class WheelSpeedOdomNode {
   }
 
   void ResolveDiagnosticLogPath() {
-    if (IsAbsolutePath(diagnostic_log_path_)) {
-      resolved_diagnostic_log_path_ = diagnostic_log_path_;
+    const std::string expanded_path = ExpandTimePattern(diagnostic_log_path_);
+    if (IsAbsolutePath(expanded_path)) {
+      resolved_diagnostic_log_path_ = expanded_path;
       return;
     }
 
     const std::string workspace_root = GetWorkspaceRootPath();
     if (!workspace_root.empty()) {
-      resolved_diagnostic_log_path_ = workspace_root + "/" + diagnostic_log_path_;
+      resolved_diagnostic_log_path_ = workspace_root + "/" + expanded_path;
       return;
     }
 
-    resolved_diagnostic_log_path_ = diagnostic_log_path_;
+    resolved_diagnostic_log_path_ = expanded_path;
   }
 
   void OpenDiagnosticLog() {
     if (!enable_diagnostic_log_) {
+      return;
+    }
+
+    if (!EnsureParentDirectoryExists(resolved_diagnostic_log_path_)) {
+      ROS_WARN_STREAM("File error: failed to create diagnostic log directory for "
+                      << resolved_diagnostic_log_path_);
       return;
     }
 

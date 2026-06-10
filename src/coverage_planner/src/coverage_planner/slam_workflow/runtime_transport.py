@@ -191,7 +191,21 @@ class CartographerRuntimeTransport:
         if not existing:
             return False
         try:
-            rosnode.kill_nodes(existing)
+            subprocess.run(
+                ["rosnode", "kill"] + existing,
+                cwd=backend.workspace_root,
+                env=self.runtime_env(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=float(backend.stop_timeout_s),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            rospy.logwarn(
+                "[slam_runtime_manager] timed out killing stale nodes %s",
+                existing,
+            )
         except Exception as exc:
             rospy.logwarn("[slam_runtime_manager] failed to kill nodes %s: %s", existing, str(exc))
         deadline = time.time() + backend.stop_timeout_s

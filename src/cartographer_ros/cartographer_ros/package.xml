@@ -43,6 +43,7 @@
 
   <depend version_gte="1.0.0">cartographer</depend>
   <depend version_gte="1.0.0">cartographer_ros_msgs</depend>
+  <depend>diagnostic_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>libgflags-dev</depend>
   <depend>libgoogle-glog-dev</depend>
@@ -54,8 +55,10 @@
   <depend>robot_state_publisher</depend>
   <depend>rosbag</depend>
   <depend>roscpp</depend>
+  <depend>rosgraph_msgs</depend>
   <depend>roslaunch</depend>
   <depend>roslib</depend>
+  <depend>rospy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>tf2</depend>

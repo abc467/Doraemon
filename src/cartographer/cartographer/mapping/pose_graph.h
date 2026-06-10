@@ -81,6 +81,10 @@ class PoseGraph : public PoseGraphInterface {
   // Freezes a trajectory. Poses in this trajectory will not be optimized.
   virtual void FreezeTrajectory(int trajectory_id) = 0;
 
+  // Computes any missing per-node FLIRT features before serialization. This is
+  // a no-op for pose graphs that do not use FLIRT features.
+  virtual void ComputeFlirtFeaturesForAllNodes() {}
+
   // Adds a 'submap' from a proto with the given 'global_pose' to the
   // appropriate trajectory.
   virtual void AddSubmapFromProto(const transform::Rigid3d& global_pose,

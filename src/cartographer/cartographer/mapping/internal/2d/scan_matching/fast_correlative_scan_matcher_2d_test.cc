@@ -191,6 +191,103 @@ TEST(FastCorrelativeScanMatcherTest, CorrectPose) {
   }
 }
 
+TEST(FastCorrelativeScanMatcherTest, TopCandidatesKeepTopOneBehavior) {
+  ProbabilityGridRangeDataInserter2D range_data_inserter(
+      CreateRangeDataInserterTestOptions2D());
+  constexpr float kMinScore = 0.1f;
+  const auto options = CreateFastCorrelativeScanMatcherTestOptions2D(3);
+
+  sensor::PointCloud point_cloud;
+  point_cloud.push_back({Eigen::Vector3f{-2.5f, 0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{-2.f, 0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{0.f, -0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{0.5f, -1.6f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{2.5f, 0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{2.5f, 1.7f, 0.f}});
+
+  const transform::Rigid2f expected_pose({1.f, -0.7f}, 0.2f);
+  ValueConversionTables conversion_tables;
+  ProbabilityGrid probability_grid(
+      MapLimits(0.05, Eigen::Vector2d(5., 5.), CellLimits(200, 200)),
+      &conversion_tables);
+  range_data_inserter.Insert(
+      sensor::RangeData{
+          Eigen::Vector3f(expected_pose.translation().x(),
+                          expected_pose.translation().y(), 0.f),
+          sensor::TransformPointCloud(
+              point_cloud, transform::Embed3D(expected_pose.cast<float>())),
+          {}},
+      &probability_grid);
+  probability_grid.FinishUpdate();
+
+  FastCorrelativeScanMatcher2D fast_correlative_scan_matcher(probability_grid,
+                                                             options);
+  transform::Rigid2d pose_estimate;
+  float score;
+  ASSERT_TRUE(fast_correlative_scan_matcher.Match(
+      transform::Rigid2d::Identity(), point_cloud, kMinScore, &score,
+      &pose_estimate));
+
+  transform::Rigid2d top_pose_estimate;
+  float top_score;
+  std::vector<FastCorrelativeScanMatcher2D::ScoredPose> top_candidates;
+  ASSERT_TRUE(fast_correlative_scan_matcher.MatchWithTopCandidates(
+      transform::Rigid2d::Identity(), point_cloud, kMinScore, 5, 0.02f,
+      &top_score, &top_pose_estimate, &top_candidates));
+  ASSERT_FALSE(top_candidates.empty());
+  EXPECT_TRUE(top_candidates.front().above_min_score);
+  EXPECT_NEAR(score, top_score, 1e-5);
+  EXPECT_NEAR(score, top_candidates.front().score, 1e-5);
+  EXPECT_THAT(pose_estimate.cast<float>(),
+              transform::IsNearly(top_pose_estimate.cast<float>(), 0.03f));
+  for (size_t i = 1; i < top_candidates.size(); ++i) {
+    EXPECT_GE(top_candidates[i - 1].score, top_candidates[i].score);
+  }
+}
+
+TEST(FastCorrelativeScanMatcherTest, ShadowCandidatesDoNotMatchBelowThreshold) {
+  ProbabilityGridRangeDataInserter2D range_data_inserter(
+      CreateRangeDataInserterTestOptions2D());
+  const auto options = CreateFastCorrelativeScanMatcherTestOptions2D(3);
+
+  sensor::PointCloud point_cloud;
+  point_cloud.push_back({Eigen::Vector3f{-2.5f, 0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{-2.f, 0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{0.f, -0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{0.5f, -1.6f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{2.5f, 0.5f, 0.f}});
+  point_cloud.push_back({Eigen::Vector3f{2.5f, 1.7f, 0.f}});
+
+  const transform::Rigid2f expected_pose({1.f, -0.7f}, 0.2f);
+  ValueConversionTables conversion_tables;
+  ProbabilityGrid probability_grid(
+      MapLimits(0.05, Eigen::Vector2d(5., 5.), CellLimits(200, 200)),
+      &conversion_tables);
+  range_data_inserter.Insert(
+      sensor::RangeData{
+          Eigen::Vector3f(expected_pose.translation().x(),
+                          expected_pose.translation().y(), 0.f),
+          sensor::TransformPointCloud(
+              point_cloud, transform::Embed3D(expected_pose.cast<float>())),
+          {}},
+      &probability_grid);
+  probability_grid.FinishUpdate();
+
+  FastCorrelativeScanMatcher2D fast_correlative_scan_matcher(probability_grid,
+                                                             options);
+  transform::Rigid2d pose_estimate;
+  float score;
+  std::vector<FastCorrelativeScanMatcher2D::ScoredPose> top_candidates;
+  EXPECT_FALSE(fast_correlative_scan_matcher.MatchWithTopCandidates(
+      transform::Rigid2d::Identity(), point_cloud, 1.01f, 5, 1.f, &score,
+      &pose_estimate, &top_candidates));
+  ASSERT_FALSE(top_candidates.empty());
+  for (const auto& candidate : top_candidates) {
+    EXPECT_FALSE(candidate.above_min_score);
+    EXPECT_LE(candidate.score, 1.01f);
+  }
+}
+
 TEST(FastCorrelativeScanMatcherTest, FullSubmapMatching) {
   std::mt19937 prng(42);
   std::uniform_real_distribution<float> distribution(-1.f, 1.f);

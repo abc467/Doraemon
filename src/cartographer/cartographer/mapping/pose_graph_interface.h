@@ -18,6 +18,7 @@
 #define CARTOGRAPHER_MAPPING_POSE_GRAPH_INTERFACE_H_
 
 #include <chrono>
+#include <string>
 #include <vector>
 
 #include "absl/types/optional.h"
@@ -97,6 +98,15 @@ class PoseGraphInterface {
 
   // Waits for all computations to finish and computes optimized poses.
   virtual void RunFinalOptimization() = 0;
+
+  // Optional derived-map cache used by localization health. Implementations
+  // that do not provide a full-map scan distance field can ignore these.
+  virtual void ConfigureMapScanDistanceFieldCache(
+      const std::string& cache_filename, const std::string& cache_key) {}
+  virtual bool BuildAndSaveMapScanDistanceFieldCache(
+      const std::string& cache_filename, const std::string& cache_key) {
+    return true;
+  }
 
   // Returns data for all submaps.
   virtual MapById<SubmapId, SubmapData> GetAllSubmapData() const = 0;

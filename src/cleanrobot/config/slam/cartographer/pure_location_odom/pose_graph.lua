@@ -15,16 +15,16 @@
 POSE_GRAPH = {
   optimize_every_n_nodes = 20,
   constraint_builder = {
-    sampling_ratio = 0.02, -- 继续下调约束采样，优先压低 pure localization 后端 queue
-    max_constraint_distance = 2.5, -- 再收紧约束距离，减少跨门洞/长走廊的模糊匹配
-    min_score = 0.65,
+    sampling_ratio = 0.1, -- 临时提高约束采样，观察 pure localization 能否形成地图约束
+    max_constraint_distance = 5.0, -- 临时放宽约束距离，给漂移后的后端匹配留搜索余量
+    min_score = 0.62,
     global_localization_min_score = 0.65,
     loop_closure_translation_weight = 1.1e4,
     loop_closure_rotation_weight = 1e5,
-    log_matches = false,
+    log_matches = true,
     fast_correlative_scan_matcher = {
       linear_search_window = 3.,
-      angular_search_window = math.rad(10.),
+      angular_search_window = math.rad(15.),
       branch_and_bound_depth = 7,
     },
     ceres_scan_matcher = {

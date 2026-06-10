@@ -1,5 +1,8 @@
 #include "flirt.h"
 
+BOOST_CLASS_EXPORT_IMPLEMENT(BetaGrid)
+BOOST_CLASS_EXPORT_IMPLEMENT(ShapeContext)
+
 namespace flirt
 {
   std::atomic<bool> use_flirt;
@@ -10,6 +13,22 @@ namespace flirt
   std::condition_variable cv_flirt_busy;
   std::mutex flirt_busy_lock;
   volatile int flirt_return_code;
+
+  std::atomic<double> relocation_min_score{0.60};
+  std::atomic<int> relocation_required_consistent_hits{1};
+  std::atomic<int> relocation_consistency_max_submap_index_delta{1};
+  std::atomic<double> relocation_consistency_max_translation_m{0.50};
+  std::atomic<double> relocation_consistency_max_rotation_rad{0.15};
+
+  std::mutex relocation_consistency_lock;
+  bool relocation_has_last_candidate = false;
+  int relocation_consistency_hits = 0;
+  int relocation_last_trajectory_id = -1;
+  int relocation_last_submap_index = -1;
+  double relocation_last_x = 0.0;
+  double relocation_last_y = 0.0;
+  double relocation_last_theta = 0.0;
+  double relocation_last_score = 0.0;
 
   // detector
   std::unique_ptr<SimpleMinMaxPeakFinder> peak_finder;
@@ -60,9 +79,28 @@ namespace flirt
     need_optimizing.store(false);
     flirt_working.store(false);
     flirt_return_code = kRelocationIdle;
+    relocation_min_score.store(0.60);
+    relocation_required_consistent_hits.store(1);
+    relocation_consistency_max_submap_index_delta.store(1);
+    relocation_consistency_max_translation_m.store(0.50);
+    relocation_consistency_max_rotation_rad.store(0.15);
+    reset_relocation_consistency();
 
     g_detector->setUseMaxRange(true);
     g_descriptor_generator->setDistanceFunction(&distance_function);
+  }
+
+  void reset_relocation_consistency()
+  {
+    std::lock_guard<std::mutex> lock(relocation_consistency_lock);
+    relocation_has_last_candidate = false;
+    relocation_consistency_hits = 0;
+    relocation_last_trajectory_id = -1;
+    relocation_last_submap_index = -1;
+    relocation_last_x = 0.0;
+    relocation_last_y = 0.0;
+    relocation_last_theta = 0.0;
+    relocation_last_score = 0.0;
   }
 
   EuclideanDistance<double> *get_distance_function()

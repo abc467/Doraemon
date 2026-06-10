@@ -22,6 +22,8 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "Eigen/Core"
@@ -52,6 +54,7 @@ struct EstimatedPose {
   float score;
   transform::Rigid2d pose;
   const Submap2D* submap;
+  std::shared_ptr<const Submap2D> submap_owner;
 };
 
 // Returns (map <- submap) where 'submap' is a coordinate system at the origin
@@ -69,7 +72,29 @@ transform::Rigid2d ComputeSubmapPose(const Submap2D& submap);
 class ConstraintBuilder2D {
  public:
   using Constraint = PoseGraphInterface::Constraint;
-  using Result = std::vector<Constraint>;
+
+  struct GeometryQuality {
+    double hit20 = -1.0;
+    double mean_distance = -1.0;
+    double free_space_conflict_ratio = -1.0;
+    double known_ratio = -1.0;
+    double sector_coverage = -1.0;
+  };
+
+  struct ConstraintCandidate {
+    Constraint constraint{SubmapId{-1, -1},
+                          NodeId{-1, -1},
+                          {transform::Rigid3d::Identity(), 0., 0.},
+                          Constraint::INTER_SUBMAP};
+    float fast_score = 0.f;
+    bool match_full_submap = false;
+    std::vector<scan_matching::FastCorrelativeScanMatcher2D::ScoredPose>
+        top_candidates;
+    GeometryQuality geometry_quality;
+    std::string rejection_reason;
+  };
+
+  using Result = std::vector<ConstraintCandidate>;
 
   ConstraintBuilder2D(const proto::ConstraintBuilderOptions& options,
                       common::ThreadPoolInterface* thread_pool);
@@ -87,7 +112,8 @@ class ConstraintBuilder2D {
   void MaybeAddConstraint(const SubmapId& submap_id, const Submap2D* submap,
                           const NodeId& node_id,
                           const TrajectoryNode::Data* const constant_data,
-                          const transform::Rigid2d& initial_relative_pose);
+                          const transform::Rigid2d& initial_relative_pose,
+                          bool collect_top_candidates = false);
 
   // Schedules exploring a new constraint between 'submap' identified by
   // 'submap_id' and the 'compressed_point_cloud' for 'node_id'.
@@ -97,7 +123,8 @@ class ConstraintBuilder2D {
   // all computations are finished.
   void MaybeAddGlobalConstraint(
       const SubmapId& submap_id, const Submap2D* submap, const NodeId& node_id,
-      const TrajectoryNode::Data* const constant_data);
+      const TrajectoryNode::Data* const constant_data,
+      bool collect_top_candidates = false);
 
   // Must be called after all computations related to one node have been added.
   void NotifyEndOfNode();
@@ -119,7 +146,8 @@ class ConstraintBuilder2D {
 #ifdef CARTOGRAPHER_RELOCATE
   bool ComputeConstraintWithEstimatedPoses(
       std::vector<EstimatedPose> poses,
-      const TrajectoryNode::Data* const constant_data);
+      const TrajectoryNode::Data* const constant_data,
+      std::string* rejection_reason = nullptr);
 #endif
 
  private:
@@ -141,10 +169,11 @@ class ConstraintBuilder2D {
   // anymore. As output, it may create a new Constraint in 'constraint'.
   void ComputeConstraint(const SubmapId& submap_id, const Submap2D* submap,
                          const NodeId& node_id, bool match_full_submap,
+                         bool collect_top_candidates,
                          const TrajectoryNode::Data* const constant_data,
                          const transform::Rigid2d& initial_relative_pose,
                          const SubmapScanMatcher& submap_scan_matcher,
-                         std::unique_ptr<Constraint>* constraint)
+                         std::unique_ptr<ConstraintCandidate>* constraint)
       LOCKS_EXCLUDED(mutex_);
 
   void RunWhenDoneCallback() LOCKS_EXCLUDED(mutex_);
@@ -173,7 +202,8 @@ class ConstraintBuilder2D {
   // Constraints currently being computed in the background. A deque is used to
   // keep pointers valid when adding more entries. Constraint search results
   // with below-threshold scores are also 'nullptr'.
-  std::deque<std::unique_ptr<Constraint>> constraints_ GUARDED_BY(mutex_);
+  std::deque<std::unique_ptr<ConstraintCandidate>> constraints_
+      GUARDED_BY(mutex_);
 
   // Map of dispatched or constructed scan matchers by 'submap_id'.
   std::map<SubmapId, SubmapScanMatcher> submap_scan_matchers_

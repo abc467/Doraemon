@@ -47,13 +47,8 @@ find_package(Boost REQUIRED COMPONENTS ${BOOST_COMPONENTS})
 find_package(Ceres REQUIRED COMPONENTS SuiteSparse)
 find_package(Eigen3 REQUIRED)
 find_package(LuaGoogle REQUIRED)
-if(WIN32)
-  # On Windows, Protobuf is incorrectly found by the bundled CMake module, so prefer native CMake config.
-  set(protobuf_MODULE_COMPATIBLE TRUE CACHE INTERNAL "")
-  find_package(Protobuf 3.0.0 CONFIG)
-else()
-  find_package(Protobuf 3.0.0 REQUIRED)
-endif()
+set(protobuf_MODULE_COMPATIBLE TRUE CACHE INTERNAL "")
+find_package(Protobuf MODULE REQUIRED)
 
 if (${BUILD_GRPC})
   find_package(async_grpc REQUIRED)
@@ -274,11 +269,37 @@ if("${CAIRO_INCLUDE_DIRS}")
 endif()
 target_link_libraries(${PROJECT_NAME} PUBLIC ${CAIRO_LIBRARIES})
 
+if (Protobuf_INCLUDE_DIRS)
+  set(CARTOGRAPHER_PROTOBUF_INCLUDE_DIRS ${Protobuf_INCLUDE_DIRS})
+else()
+  set(CARTOGRAPHER_PROTOBUF_INCLUDE_DIRS ${PROTOBUF_INCLUDE_DIR})
+endif()
+set(CARTOGRAPHER_PROTOBUF_INCLUDE_OVERRIDE
+  "${PROJECT_BINARY_DIR}/protobuf_include_override")
+file(MAKE_DIRECTORY "${CARTOGRAPHER_PROTOBUF_INCLUDE_OVERRIDE}/google")
+foreach(PROTOBUF_INCLUDE_DIR ${CARTOGRAPHER_PROTOBUF_INCLUDE_DIRS})
+  if (EXISTS "${PROTOBUF_INCLUDE_DIR}/google/protobuf")
+    file(REMOVE_RECURSE
+      "${CARTOGRAPHER_PROTOBUF_INCLUDE_OVERRIDE}/google/protobuf")
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "${PROTOBUF_INCLUDE_DIR}/google/protobuf"
+        "${CARTOGRAPHER_PROTOBUF_INCLUDE_OVERRIDE}/google/protobuf")
+    break()
+  endif()
+endforeach()
+target_include_directories(${PROJECT_NAME} SYSTEM BEFORE PUBLIC
+  $<BUILD_INTERFACE:${CARTOGRAPHER_PROTOBUF_INCLUDE_OVERRIDE}>)
 target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
-  ${PROTOBUF_INCLUDE_DIR})
+  ${CARTOGRAPHER_PROTOBUF_INCLUDE_DIRS})
 # TODO(hrapp): This should not explicitly list pthread and use
 # PROTOBUF_LIBRARIES, but that failed on first try.
-target_link_libraries(${PROJECT_NAME} PUBLIC ${PROTOBUF_LIBRARY} 
+if (TARGET protobuf::libprotobuf)
+  set(CARTOGRAPHER_PROTOBUF_LIBRARY protobuf::libprotobuf)
+else()
+  set(CARTOGRAPHER_PROTOBUF_LIBRARY ${PROTOBUF_LIBRARY})
+endif()
+target_link_libraries(${PROJECT_NAME} PUBLIC ${CARTOGRAPHER_PROTOBUF_LIBRARY}
   absl::algorithm
   absl::base
   absl::debugging

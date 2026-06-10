@@ -28,12 +28,19 @@ PureLocalizationTrimmer::PureLocalizationTrimmer(const int trajectory_id,
 }
 
 void PureLocalizationTrimmer::Trim(Trimmable* const pose_graph) {
-  LOG(WARNING) << "PureLocalizationTrimmer::Trim!!!";
   if (pose_graph->IsFinished(trajectory_id_)) {
     num_submaps_to_keep_ = 0;
   }
 
   auto submap_ids = pose_graph->GetSubmapIds(trajectory_id_);
+  if (submap_ids.size() > static_cast<std::size_t>(num_submaps_to_keep_)) {
+    LOG(WARNING) << "[PureLocalizationTrimmer]trajectory=" << trajectory_id_
+                 << " submaps=" << submap_ids.size()
+                 << " keep=" << num_submaps_to_keep_
+                 << " trim="
+                 << (submap_ids.size() -
+                     static_cast<std::size_t>(num_submaps_to_keep_));
+  }
   for (std::size_t i = 0; i + num_submaps_to_keep_ < submap_ids.size(); ++i) {
     pose_graph->TrimSubmap(submap_ids.at(i));
   }

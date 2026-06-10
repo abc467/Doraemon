@@ -30,6 +30,24 @@ configurations.
 .. _Cartographer: https://github.com/cartographer-project/cartographer
 .. _SLAM: https://en.wikipedia.org/wiki/Simultaneous_localization_and_mapping
 
+Local Localization Updates
+==========================
+
+- 2026-05-18: Added a 2D pose graph jump gate for constraints between active and
+  frozen trajectories. Inter-submap constraints are rejected before optimization
+  if they would imply more than 1.0 m translation or 10 degrees rotation in the
+  active trajectory's local-to-global transform.
+- 2026-05-18: Automatic global relocation no longer assumes localization
+  trajectory 1 against map trajectory 0. It now tracks active trajectory nodes
+  against frozen trajectory submaps, so loaded maps with remapped or multiple
+  frozen trajectory IDs are handled consistently.
+- 2026-05-18: Manual global relocation bypasses the active/frozen jump gate, so
+  deliberate large manual relocations are not rejected by the 1.0 m / 10 degree
+  runtime guard.
+- 2026-05-18: Saving a pbstream now backfills missing FLIRT interest points for
+  all trajectory nodes before serialization. This covers both the visual command
+  save path and the ROS ``/write_state`` service path.
+
 A Note for ROS Users
 ====================
 

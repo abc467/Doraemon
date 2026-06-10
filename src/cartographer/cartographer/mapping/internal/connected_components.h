@@ -21,6 +21,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
+#include "cartographer/common/port.h"
 #include "cartographer/mapping/proto/connected_components.pb.h"
 #include "cartographer/mapping/submaps.h"
 

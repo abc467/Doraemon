@@ -111,6 +111,12 @@ class PrecomputationGridStack2D {
 // An implementation of "Real-Time Correlative Scan Matching" by Olson.
 class FastCorrelativeScanMatcher2D {
  public:
+  struct ScoredPose {
+    float score = 0.f;
+    transform::Rigid2d pose = transform::Rigid2d::Identity();
+    bool above_min_score = false;
+  };
+
   FastCorrelativeScanMatcher2D(
       const Grid2D& grid,
       const proto::FastCorrelativeScanMatcherOptions2D& options);
@@ -135,6 +141,19 @@ class FastCorrelativeScanMatcher2D {
   bool MatchFullSubmap(const sensor::PointCloud& point_cloud, float min_score,
                        float* score, transform::Rigid2d* pose_estimate) const;
 
+  bool MatchWithTopCandidates(
+      const transform::Rigid2d& initial_pose_estimate,
+      const sensor::PointCloud& point_cloud, float min_score,
+      int max_candidates, float shadow_score_margin, float* score,
+      transform::Rigid2d* pose_estimate,
+      std::vector<ScoredPose>* top_candidates) const;
+
+  bool MatchFullSubmapWithTopCandidates(
+      const sensor::PointCloud& point_cloud, float min_score,
+      int max_candidates, float shadow_score_margin, float* score,
+      transform::Rigid2d* pose_estimate,
+      std::vector<ScoredPose>* top_candidates) const;
+
   void MatchFullSubmapWithPose(const transform::Rigid2d& initial_pose_estimate,
                                const sensor::PointCloud& point_cloud,
                                float* score,
@@ -149,6 +168,13 @@ class FastCorrelativeScanMatcher2D {
       const transform::Rigid2d& initial_pose_estimate,
       const sensor::PointCloud& point_cloud, float min_score, float* score,
       transform::Rigid2d* pose_estimate) const;
+  bool MatchWithSearchParametersAndTopCandidates(
+      SearchParameters search_parameters,
+      const transform::Rigid2d& initial_pose_estimate,
+      const sensor::PointCloud& point_cloud, float min_score,
+      int max_candidates, float shadow_score_margin, float* score,
+      transform::Rigid2d* pose_estimate,
+      std::vector<ScoredPose>* top_candidates) const;
   std::vector<Candidate2D> ComputeLowestResolutionCandidates(
       const std::vector<DiscreteScan2D>& discrete_scans,
       const SearchParameters& search_parameters) const;
@@ -162,6 +188,12 @@ class FastCorrelativeScanMatcher2D {
                              const SearchParameters& search_parameters,
                              const std::vector<Candidate2D>& candidates,
                              int candidate_depth, float min_score) const;
+  void BranchAndBoundTopCandidates(
+      const std::vector<DiscreteScan2D>& discrete_scans,
+      const SearchParameters& search_parameters,
+      const std::vector<Candidate2D>& candidates, int candidate_depth,
+      float min_score, int max_candidates,
+      std::vector<Candidate2D>* top_candidates) const;
 
   const proto::FastCorrelativeScanMatcherOptions2D options_;
   MapLimits limits_;

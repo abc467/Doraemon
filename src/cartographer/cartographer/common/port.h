@@ -24,6 +24,24 @@
 #include <cmath>
 #include <string>
 
+#include "absl/base/thread_annotations.h"
+
+#ifndef GUARDED_BY
+#define GUARDED_BY(x) ABSL_GUARDED_BY(x)
+#endif
+
+#ifndef EXCLUSIVE_LOCKS_REQUIRED
+#define EXCLUSIVE_LOCKS_REQUIRED(...) ABSL_EXCLUSIVE_LOCKS_REQUIRED(__VA_ARGS__)
+#endif
+
+#ifndef SHARED_LOCKS_REQUIRED
+#define SHARED_LOCKS_REQUIRED(...) ABSL_SHARED_LOCKS_REQUIRED(__VA_ARGS__)
+#endif
+
+#ifndef LOCKS_EXCLUDED
+#define LOCKS_EXCLUDED(...) ABSL_LOCKS_EXCLUDED(__VA_ARGS__)
+#endif
+
 namespace cartographer {
 
 using int8 = int8_t;

@@ -20,6 +20,7 @@
 #include <set>
 
 #include "absl/synchronization/mutex.h"
+#include "cartographer/common/port.h"
 #include "glog/logging.h"
 #include "thread_pool.h"
 

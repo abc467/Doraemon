@@ -1,7 +1,7 @@
 <launch>
   <arg name="scan_topic" default="/scan"/>
   <arg name="time_mode" default="0"/>
-  <arg name="ntp_ip" default="192.168.16.88"/>
+  <arg name="ntp_ip" default="192.168.127.88"/>
   <arg name="ntp_port" default="5678"/>
   <arg name="ntp_enable" default="-1"/>
 
@@ -28,7 +28,7 @@
     <param name="type" value="udp"/>
     <param name="lidar_port" value="6543"/>
     <param name="local_port" value="6668"/>
-    <param name="lidar_ip" value="192.168.16.88"/>
+    <param name="lidar_ip" value="192.168.127.88"/>
 
     <param name="uuid" value="1"/>
 

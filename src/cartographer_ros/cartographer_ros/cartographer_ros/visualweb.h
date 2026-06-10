@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -23,6 +22,7 @@
 #include "cartographer/common/configuration_file_resolver.h"
 #include "cartographer/common/sml_config.h"
 #include "cartographer/mapping/flirt.h"
+#include "cartographer/mapping/localization_health.h"
 #include "cartographer/mapping/map_builder.h"
 #include "cartographer_ros/json.hpp"
 #include "cartographer_ros/node.h"
@@ -294,16 +294,13 @@ public:
             return false;
         }
 
-        if (config_entry == "slam")
-        {
-            flirt::use_flirt = true;
-            std::cout << "FLIRT Enabled" << std::endl;
-        }
-        else
-        {
-            flirt::use_flirt = false;
-            std::cout << "FLIRT Disabled" << std::endl;
-        }
+        const bool enable_flirt =
+            config_entry == "slam" ||
+            config_entry == "pure_location" ||
+            config_entry == "pure_location_odom";
+        flirt::use_flirt.store(enable_flirt);
+        std::cout << (enable_flirt ? "FLIRT Enabled" : "FLIRT Disabled")
+                  << " for config_entry=" << config_entry << std::endl;
 
         sml_config::sml_init();
         flirt::init();
@@ -327,8 +324,10 @@ public:
         this->node_options = CreateNodeOptions(&lua_parameter_dictionary);
         this->trajectory_options = CreateTrajectoryOptions(&lua_parameter_dictionary);
 
+        cartographer::mapping::ResetLocalizationHealth();
         auto map_builder = cartographer::mapping::CreateMapBuilder(node_options.map_builder_options);
-        this->node = std::make_unique<Node>(node_options, std::move(map_builder), tf_buffer.get(), false);
+        this->node = std::make_unique<Node>(node_options, std::move(map_builder),
+                                            tf_buffer.get(), false);
 
         this->ros_init();
 
@@ -456,7 +455,6 @@ public:
             const std::string full_path = requested.is_absolute()
                                               ? requested.string()
                                               : (boost::filesystem::path(this->map_root) / requested).string();
-            this->node->RunFinalOptimization();
             const bool ok = this->node->SerializeState(full_path, include_unfinished);
             if (ok)
             {
@@ -565,7 +563,7 @@ public:
         return make_result(0, "");
     }
 
-    CommandResult handle_try_global_relocate()
+    CommandResult handle_try_global_relocate(const std::string &payload_json)
     {
         auto set_global_relocated = [this](bool value)
         {
@@ -575,16 +573,96 @@ public:
             client_set_param.call(srv);
         };
 
+        double relocation_min_score = flirt::relocation_min_score.load();
+        int consistent_hits = flirt::relocation_required_consistent_hits.load();
+        int max_submap_delta = flirt::relocation_consistency_max_submap_index_delta.load();
+        double max_translation_m = flirt::relocation_consistency_max_translation_m.load();
+        double max_rotation_rad = flirt::relocation_consistency_max_rotation_rad.load();
+        bool reset_consistency = true;
+
+        try
+        {
+            const nlohmann::json payload = parse_payload_json(payload_json);
+            auto read_double = [&payload](const char *key, double &value)
+            {
+                const auto it = payload.find(key);
+                if (it != payload.end())
+                {
+                    value = it->get<double>();
+                }
+            };
+            auto read_int = [&payload](const char *key, int &value)
+            {
+                const auto it = payload.find(key);
+                if (it != payload.end())
+                {
+                    value = it->get<int>();
+                }
+            };
+            read_double("min_score", relocation_min_score);
+            read_int("consistent_hits", consistent_hits);
+            read_int("consistency_max_submap_index_delta", max_submap_delta);
+            read_double("consistency_max_translation_m", max_translation_m);
+            read_double("consistency_max_rotation_rad", max_rotation_rad);
+            const auto reset_it = payload.find("reset_consistency");
+            if (reset_it != payload.end())
+            {
+                reset_consistency = reset_it->get<bool>();
+            }
+        }
+        catch (const std::exception &e)
+        {
+            return make_result(-10, std::string("重定位参数解析失败: ") + e.what());
+        }
+
+        if (relocation_min_score < 0.0 || relocation_min_score > 1.0)
+        {
+            return make_result(-10, "重定位 min_score 必须在 0.0~1.0 之间。");
+        }
+        if (consistent_hits < 1)
+        {
+            return make_result(-10, "重定位 consistent_hits 必须 >= 1。");
+        }
+        if (max_submap_delta < 0 || max_translation_m < 0.0 || max_rotation_rad < 0.0)
+        {
+            return make_result(-10, "重定位一致性阈值不能为负数。");
+        }
+
+        flirt::relocation_min_score.store(relocation_min_score);
+        flirt::relocation_required_consistent_hits.store(consistent_hits);
+        flirt::relocation_consistency_max_submap_index_delta.store(max_submap_delta);
+        flirt::relocation_consistency_max_translation_m.store(max_translation_m);
+        flirt::relocation_consistency_max_rotation_rad.store(max_rotation_rad);
+        if (reset_consistency)
+        {
+            flirt::reset_relocation_consistency();
+        }
+
+        ROS_WARN_STREAM("[GlobalRelocation]Request min_score=" << relocation_min_score
+                        << " consistent_hits=" << consistent_hits
+                        << " max_submap_delta=" << max_submap_delta
+                        << " max_translation_m=" << max_translation_m
+                        << " max_rotation_rad=" << max_rotation_rad
+                        << " reset_consistency=" << (reset_consistency ? "true" : "false"));
+
+        nlohmann::json result_data = {
+            {"min_score", relocation_min_score},
+            {"consistent_hits", consistent_hits},
+            {"consistency_max_submap_index_delta", max_submap_delta},
+            {"consistency_max_translation_m", max_translation_m},
+            {"consistency_max_rotation_rad", max_rotation_rad},
+            {"reset_consistency", reset_consistency}};
+
         if (this->node == nullptr)
         {
-            return make_result(-1, "尚未加载配置，请加载配置");
+            return make_result(-1, "尚未加载配置，请加载配置", result_data);
         }
 
         {
             std::lock_guard<std::mutex> lock(flirt::flirt_busy_lock);
             if (flirt::need_flirt.load() || flirt::flirt_working.load())
             {
-                return make_result(-5, "全局重定位正在执行，请稍后重试。");
+                return make_result(-5, "全局重定位正在执行，请稍后重试。", result_data);
             }
             flirt::flirt_return_code = flirt::kRelocationIdle;
             flirt::need_flirt.store(true);
@@ -604,7 +682,7 @@ public:
             flirt::need_flirt.store(false);
             lock.unlock();
             set_global_relocated(false);
-            return make_result(-6, "等待新的激光/节点数据超时，未执行重定位。请确认雷达数据正常且系统仍在持续建图或定位。");
+            return make_result(-6, "等待新的激光/节点数据超时，未执行重定位。请确认雷达数据正常且系统仍在持续建图或定位。", result_data);
         }
 
         if (flirt::flirt_working.load())
@@ -620,32 +698,44 @@ public:
 
         if (flirt::flirt_return_code == flirt::kRelocationSuccess)
         {
-            result = make_result(0, "");
+            result = make_result(0, "", result_data);
             relocation_success = true;
         }
         else if (flirt::flirt_return_code == flirt::kRelocationNeedMoreTrajectories)
         {
-            result = make_result(-2, "重定位需要至少2个Trajectories(轨迹)");
+            result = make_result(-2, "重定位需要至少2个Trajectories(轨迹)", result_data);
         }
         else if (flirt::flirt_return_code == flirt::kRelocationNoInterestPoints)
         {
-            result = make_result(-3, "当前机器人位置没有关键特征，无法重定位，请改变机器人位置。");
+            result = make_result(-3, "当前机器人位置没有关键特征，无法重定位，请改变机器人位置。", result_data);
         }
         else if (flirt::flirt_return_code == flirt::kRelocationSubmapNotFound)
         {
-            result = make_result(-4, "匹配到的Node中，无法找到对应Submap!");
+            result = make_result(-4, "匹配到的Node中，无法找到对应Submap!", result_data);
         }
         else if (flirt::flirt_return_code == flirt::kRelocationNoCandidatePose)
         {
-            result = make_result(-8, "未在历史轨迹中找到可用的重定位候选位姿。");
+            result = make_result(-8, "未在历史轨迹中找到可用的重定位候选位姿。", result_data);
         }
         else if (flirt::flirt_return_code == flirt::kRelocationLowConstraintScore)
         {
-            result = make_result(-9, "候选位姿存在，但精匹配分数不足，未生成有效重定位约束。");
+            result = make_result(-9, "候选位姿存在，但精匹配分数不足，未生成有效重定位约束。", result_data);
         }
         else
         {
-            result = make_result(-7, "全局重定位失败，返回了未知状态码: " + std::to_string(flirt::flirt_return_code));
+            result = make_result(-7, "全局重定位失败，返回了未知状态码: " + std::to_string(flirt::flirt_return_code), result_data);
+        }
+
+        result.data["return_code"] = flirt::flirt_return_code;
+
+        if (relocation_success)
+        {
+            constexpr double kDefaultRelocationMinScore = 0.60;
+            flirt::relocation_min_score.store(kDefaultRelocationMinScore);
+            flirt::relocation_required_consistent_hits.store(1);
+            flirt::reset_relocation_consistency();
+            result.data["restored_min_score"] = kDefaultRelocationMinScore;
+            result.data["restored_consistent_hits"] = 1;
         }
 
         set_global_relocated(relocation_success);
@@ -703,7 +793,7 @@ public:
         }
         else if (command == "try_global_relocate")
         {
-            result = handle_try_global_relocate();
+            result = handle_try_global_relocate(payload_json);
         }
         else
         {

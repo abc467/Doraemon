@@ -31,6 +31,7 @@ namespace flirt
     constexpr int kRelocationSubmapNotFound = -4;
     constexpr int kRelocationNoCandidatePose = -8;
     constexpr int kRelocationLowConstraintScore = -9;
+    constexpr int kRelocationWorkerUnavailable = -11;
 
     extern std::atomic<bool> use_flirt;
     extern std::atomic<bool> need_flirt;
@@ -41,7 +42,24 @@ namespace flirt
     extern std::mutex flirt_busy_lock;
     extern volatile int flirt_return_code;
 
+    extern std::atomic<double> relocation_min_score;
+    extern std::atomic<int> relocation_required_consistent_hits;
+    extern std::atomic<int> relocation_consistency_max_submap_index_delta;
+    extern std::atomic<double> relocation_consistency_max_translation_m;
+    extern std::atomic<double> relocation_consistency_max_rotation_rad;
+
+    extern std::mutex relocation_consistency_lock;
+    extern bool relocation_has_last_candidate;
+    extern int relocation_consistency_hits;
+    extern int relocation_last_trajectory_id;
+    extern int relocation_last_submap_index;
+    extern double relocation_last_x;
+    extern double relocation_last_y;
+    extern double relocation_last_theta;
+    extern double relocation_last_score;
+
     void init();
+    void reset_relocation_consistency();
     EuclideanDistance<double> *get_distance_function();
     void detect(const LaserReading &reading, std::vector<InterestPoint *> &point);
     Descriptor *describe(const InterestPoint &point, const LaserReading &reading);

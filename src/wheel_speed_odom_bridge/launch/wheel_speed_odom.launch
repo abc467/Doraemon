@@ -5,6 +5,7 @@
   <arg name="enable_ekf" default="true"/>
   <!-- 工厂默认走生产态：关闭诊断 CSV，仅在排障时显式开启 debug_mode:=true。 -->
   <arg name="debug_mode" default="true"/>
+  <arg name="diagnostic_log_path" default="test_bag/wheel_speed_odom_debug_%Y%m%d_%H%M%S.csv"/>
 
   <!-- 轮速里程计串口输入。当前协议固定为 43 4C + 40 01 数据帧。
        payload = [last_wheel_update_ms, left_encoder_count, right_encoder_count,
@@ -42,8 +43,8 @@
   <arg name="frame_id" default="odom"/>
   <arg name="child_frame_id" default="base_footprint"/>
 
-  <!-- 角速度方向修正。若底盘转向正负与 ROS 约定相反，可调整该符号。 -->
-  <arg name="angular_velocity_sign" default="-1.0"/>
+  <!-- 2026-06-09 bag 标定：编码器差分方向已符合 ROS 逆时针为正，不能再次取反。 -->
+  <arg name="angular_velocity_sign" default="1.0"/>
 
   <!-- 编码器积分参数：
        1. encoder_distance_per_count > 0 时，直接使用该值作为“每个编码值对应的米数”
@@ -54,8 +55,10 @@
   <arg name="encoder_distance_per_count" default="0.0"/>
   <arg name="left_encoder_sign" default="1.0"/>
   <arg name="right_encoder_sign" default="-1.0"/>
-  <arg name="left_wheel_scale" default="1.0"/>
-  <arg name="right_wheel_scale" default="1.0"/>
+  <!-- 高质量 scan-map 区间拟合的公共距离尺度约为 1.003；
+       左右差异低于可稳定辨识范围，保持相同尺度以免直行产生虚假角速度。 -->
+  <arg name="left_wheel_scale" default="1.003"/>
+  <arg name="right_wheel_scale" default="1.003"/>
   <arg name="wheel_diameter" default="0.165"/>
   <arg name="gear_ratio" default="9.0"/>
   <arg name="encoder_pulses_per_motor_revolution" default="10000.0"/>
@@ -124,6 +127,7 @@
 
     <!-- 调试模式下写 wheel_speed_odom_debug.csv。 -->
     <param name="enable_diagnostic_log" value="$(arg debug_mode)"/>
+    <param name="diagnostic_log_path" value="$(arg diagnostic_log_path)"/>
   </node>
 
   <!-- EKF 融合链路：
