@@ -5,22 +5,30 @@
 
 build/
 devel/
+install/
 
 log/
 logs/
 Log/
 
 operations.db
+planning.db
 wheel_speed_odom_debug.csv
 {c}:
 
 map/
 test_bag/
+runtime-data/
 frontend-src/
 frames.gv
 frames.pdf
 .~lock.*#
 
+*.bag
+*.bag.active
+*.db-journal
+*.db-shm
+*.db-wal
 *.pyc
 __pycache__/
 

@@ -1,5 +1,9 @@
 # Doraemon ARM64 Ubuntu 20.04 编译部署记录
 
+> 注意：本文仅用于历史 RK3588/ARM64 设备，不适用于当前 x86 新主板。
+> x86 商业部署必须使用
+> `docs/x86_ubuntu20_commercial_deployment.md`，后者不设置固定磁盘预留门槛。
+
 本文档基于 2026-04-25 在 RK3588/ARM64 设备上实际编译 `github.com/abc467/Doraemon` 的过程整理，目标是让新的 Ubuntu 系统可以按阶段复现 Doraemon 工作空间部署。
 
 ## 1. 适用范围
@@ -33,7 +37,7 @@ swapon --show
 - `uname -m` 必须是 `aarch64`
 - Ubuntu codename 为 `focal`
 - Python 为 `3.8.x`
-- 磁盘建议至少预留 20 GB
+- 按实际依赖、构建缓存、地图和日志规模确认可用空间，不设置固定容量门槛
 - 内存较小的板卡建议准备 swap；如果确认不建 swap，也要避免并发过高
 
 ## 3. 基础环境

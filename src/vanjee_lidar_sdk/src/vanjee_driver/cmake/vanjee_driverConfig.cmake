@@ -20,8 +20,29 @@ if(${ENABLE_TRANSFORM})
   add_definitions("-DENABLE_TRANSFORM")
 endif(${ENABLE_TRANSFORM})
 
-set(vanjee_driver_INCLUDE_DIRS "/home/baer/Doraemon/src/vanjee_lidar_sdk/src/vanjee_driver/src;/usr/local/vanjee_lidar_sdk/include")
-set(VANJEE_DRIVER_INCLUDE_DIRS "/home/baer/Doraemon/src/vanjee_lidar_sdk/src/vanjee_driver/src;/usr/local/vanjee_lidar_sdk/include")
+set(vanjee_driver_INCLUDE_DIRS "")
+get_filename_component(
+  _VANJEE_DRIVER_SOURCE_INCLUDE_DIR
+  "${CMAKE_CURRENT_LIST_DIR}/../src"
+  ABSOLUTE
+)
+get_filename_component(
+  _VANJEE_DRIVER_INSTALL_PREFIX
+  "${CMAKE_CURRENT_LIST_DIR}/../../.."
+  ABSOLUTE
+)
+set(
+  _VANJEE_DRIVER_INSTALLED_INCLUDE_DIR
+  "${_VANJEE_DRIVER_INSTALL_PREFIX}/include/vanjee_driver"
+)
+
+if(EXISTS "${_VANJEE_DRIVER_SOURCE_INCLUDE_DIR}")
+  list(APPEND vanjee_driver_INCLUDE_DIRS "${_VANJEE_DRIVER_SOURCE_INCLUDE_DIR}")
+endif()
+if(EXISTS "${_VANJEE_DRIVER_INSTALLED_INCLUDE_DIR}")
+  list(APPEND vanjee_driver_INCLUDE_DIRS "${_VANJEE_DRIVER_INSTALLED_INCLUDE_DIR}")
+endif()
+set(VANJEE_DRIVER_INCLUDE_DIRS "${vanjee_driver_INCLUDE_DIRS}")
 
 set(vanjee_driver_LIBRARIES "pthread")
 set(VANJEE_DRIVER_LIBRARIES "pthread")

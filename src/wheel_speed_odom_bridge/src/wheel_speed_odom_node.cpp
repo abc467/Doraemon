@@ -324,7 +324,7 @@ class WheelSpeedOdomNode {
     pnh_.param<double>("warn_interval_sec", warn_interval_sec_, 5.0);
     pnh_.param<double>("loop_rate_hz", loop_rate_hz_, 100.0);
     pnh_.param<std::string>("protocol_mode", protocol_mode_name_, "framed_434c");
-    pnh_.param<bool>("enable_imu_diagnostic", enable_imu_diagnostic_, true);
+    pnh_.param<bool>("enable_imu_diagnostic", enable_imu_diagnostic_, false);
     pnh_.param<std::string>("imu_topic", imu_topic_, "/imu");
     pnh_.param<bool>("use_device_timestamp", use_device_timestamp_, true);
     pnh_.param<double>("debug_rx_stats_interval_sec", debug_rx_stats_interval_sec_, 2.0);
@@ -350,9 +350,9 @@ class WheelSpeedOdomNode {
     pnh_.param<double>("min_valid_odom_dt_sec", min_valid_odom_dt_sec_, 0.005);
     pnh_.param<double>("max_valid_odom_dt_sec", max_valid_odom_dt_sec_, 0.06);
 
-    pnh_.param<bool>("enable_diagnostic_log", enable_diagnostic_log_, true);
+    pnh_.param<bool>("enable_diagnostic_log", enable_diagnostic_log_, false);
     pnh_.param<std::string>("diagnostic_log_path", diagnostic_log_path_,
-                            "test_bag/wheel_speed_odom_debug_%Y%m%d_%H%M%S.csv");
+                            "/var/log/doraemon/wheel_speed_odom_debug_%Y%m%d_%H%M%S.csv");
     LoadFixedSizeDoubleArrayParam(pnh_, "odom_pose_covariance_diagonal",
                                   &odom_pose_covariance_diagonal_);
     LoadFixedSizeDoubleArrayParam(pnh_, "odom_twist_covariance_diagonal",
@@ -1953,7 +1953,7 @@ class WheelSpeedOdomNode {
   double reconnect_interval_sec_ = 1.0;
   double warn_interval_sec_ = 5.0;
   double loop_rate_hz_ = 100.0;
-  bool enable_imu_diagnostic_ = true;
+  bool enable_imu_diagnostic_ = false;
   std::string imu_topic_ = "/imu";
   std::string protocol_mode_name_ = "framed_434c";
   OdomProtocolMode protocol_mode_ = OdomProtocolMode::kFramed434c;
@@ -1986,7 +1986,7 @@ class WheelSpeedOdomNode {
   std::array<double, 36> odom_pose_covariance_{};
   std::array<double, 36> odom_twist_covariance_{};
 
-  bool enable_diagnostic_log_ = true;
+  bool enable_diagnostic_log_ = false;
   std::string diagnostic_log_path_;
   std::string resolved_diagnostic_log_path_;
   std::ofstream diagnostic_log_stream_;

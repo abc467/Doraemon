@@ -1,0 +1,15 @@
+# A26022 serial aliases for a newly assembled robot.
+#
+# Do not install this file unchanged. Replace every REPLACE_*_ID_PATH value
+# with the ID_PATH measured on that robot controller after final USB wiring.
+# Prefer ID_SERIAL_SHORT rules when an adapter exposes a unique serial number.
+#
+# Inspect a device with:
+#   udevadm info --query=property --name=/dev/ttyUSB0
+#
+# CH340 adapters without unique serial numbers must be bound to a fixed
+# physical USB port through ID_PATH.
+
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="7523", ENV{ID_PATH}=="REPLACE_IMU_ID_PATH", GROUP="dialout", MODE:="0660", SYMLINK+="imu"
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="7523", ENV{ID_PATH}=="REPLACE_WHEEL_ODOM_ID_PATH", GROUP="dialout", MODE:="0660", SYMLINK+="wheel_odom"
+ACTION=="add|change", SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="7523", ENV{ID_PATH}=="REPLACE_MCORE_ID_PATH", GROUP="dialout", MODE:="0660", SYMLINK+="mcore"

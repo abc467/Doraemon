@@ -3,12 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/runtime_common.sh"
 
-OUT_DIR="${BAG_OUTPUT_DIR:-${REPO_ROOT}/test_bag}"
+OUT_DIR="${BAG_OUTPUT_DIR:-/var/log/doraemon/debug-bags}"
 PREFIX="${BAG_PREFIX:-loc_debug}"
 PROFILE="${BAG_PROFILE:-analysis}"
 SPLIT_DURATION="${BAG_SPLIT_DURATION:-5m}"
@@ -40,7 +39,7 @@ laser, odometry, IMU, TF, and runtime state topics while avoiding large depth
 camera streams.
 
 Options:
-  --out DIR              Output directory. Default: $REPO_ROOT/test_bag
+  --out DIR              Output directory. Default: /var/log/doraemon/debug-bags
   --prefix NAME          Bag filename prefix. Default: loc_debug
   --profile NAME         core, analysis, or full. Default: analysis
   --duration DURATION    Split duration passed to rosbag. Default: 5m

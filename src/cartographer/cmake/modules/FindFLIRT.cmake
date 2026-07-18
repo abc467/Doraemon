@@ -1,36 +1,47 @@
-set(INCLUDE_OK ON)
-set(LIB_OK ON)
+include(FindPackageHandleStandardArgs)
 
-# Include
-unset(FLIRT_INC_ROOT CACHE)
-find_path(FLIRT_INC_ROOT flirtlib /usr/local/include /usr/include)
+set(FLIRT_ROOT "" CACHE PATH "FLIRT installation prefix")
+set(_FLIRT_HINTS)
+if(FLIRT_ROOT)
+  list(APPEND _FLIRT_HINTS "${FLIRT_ROOT}")
+endif()
 
-set(FLIRT_INCLUDE_DIR)
-list(APPEND FLIRT_INCLUDE_DIR ${FLIRT_INC_ROOT})
-list(APPEND FLIRT_INCLUDE_DIR ${FLIRT_INC_ROOT}/flirtlib)
+find_path(
+  FLIRT_INC_ROOT
+  NAMES flirtlib/feature/ShapeContext.h
+  HINTS ${_FLIRT_HINTS}
+  PATH_SUFFIXES include
+)
 
-message([FLIRT] ${FLIRT_INCLUDE_DIR})
-
-# Library
-set(LIBS)
-list(APPEND LIBS flirtlib_feature)
-list(APPEND LIBS flirtlib_geometry)
-list(APPEND LIBS flirtlib_sensors)
-list(APPEND LIBS flirtlib_utils)
+set(FLIRT_INCLUDE_DIR
+  "${FLIRT_INC_ROOT}"
+  "${FLIRT_INC_ROOT}/flirtlib"
+)
 
 set(FLIRT_LIBRARY)
-foreach(LIBNAME ${LIBS})
-    unset(LIBPATH CACHE)
-    find_library(LIBPATH ${LIBNAME})
-    if(LIBPATH)
-        list(APPEND FLIRT_LIBRARY ${LIBPATH})
-    else()
-        set(LIB_OK OFF)
-    endif()
+foreach(_FLIRT_LIB_NAME
+    flirtlib_feature
+    flirtlib_geometry
+    flirtlib_sensors
+    flirtlib_utils)
+  string(TOUPPER "${_FLIRT_LIB_NAME}" _FLIRT_LIB_VAR_SUFFIX)
+  find_library(
+    FLIRT_${_FLIRT_LIB_VAR_SUFFIX}_LIBRARY
+    NAMES "${_FLIRT_LIB_NAME}"
+    HINTS ${_FLIRT_HINTS}
+    PATH_SUFFIXES lib
+  )
+  list(APPEND FLIRT_LIBRARY "${FLIRT_${_FLIRT_LIB_VAR_SUFFIX}_LIBRARY}")
 endforeach()
 
-unset(LIBS)
+find_package_handle_standard_args(
+  FLIRT
+  REQUIRED_VARS
+    FLIRT_INC_ROOT
+    FLIRT_FLIRTLIB_FEATURE_LIBRARY
+    FLIRT_FLIRTLIB_GEOMETRY_LIBRARY
+    FLIRT_FLIRTLIB_SENSORS_LIBRARY
+    FLIRT_FLIRTLIB_UTILS_LIBRARY
+)
 
-if(${INCLUDE_OK} AND ${LIB_OK})
-    set(FLIRT_FOUND TRUE)
-endif()
+mark_as_advanced(FLIRT_INC_ROOT FLIRT_LIBRARY)

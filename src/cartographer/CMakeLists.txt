@@ -13,6 +13,9 @@
 # limitations under the License.
 
 cmake_minimum_required(VERSION 3.2)
+if(POLICY CMP0074)
+  cmake_policy(SET CMP0074 NEW)
+endif()
 
 project(cartographer)
 
@@ -27,10 +30,9 @@ option(BUILD_GRPC "build Cartographer gRPC support" false)
 set(CARTOGRAPHER_HAS_GRPC ${BUILD_GRPC})
 option(BUILD_PROMETHEUS "build Prometheus monitoring support" false)
 
-list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/Modules")
-
 include("${PROJECT_SOURCE_DIR}/cmake/functions.cmake")
 google_initialize_cartographer_project()
+list(PREPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake/modules")
 google_enable_testing()
 
 find_package(FLIRT REQUIRED)

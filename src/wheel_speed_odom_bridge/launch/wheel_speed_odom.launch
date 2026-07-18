@@ -4,8 +4,8 @@
   <!-- 是否启用 EKF 融合链路。关闭后只保留原始轮速里程计节点。 -->
   <arg name="enable_ekf" default="true"/>
   <!-- 工厂默认走生产态：关闭诊断 CSV，仅在排障时显式开启 debug_mode:=true。 -->
-  <arg name="debug_mode" default="true"/>
-  <arg name="diagnostic_log_path" default="test_bag/wheel_speed_odom_debug_%Y%m%d_%H%M%S.csv"/>
+  <arg name="debug_mode" default="false"/>
+  <arg name="diagnostic_log_path" default="/var/log/doraemon/wheel_speed_odom_debug_%Y%m%d_%H%M%S.csv"/>
 
   <!-- 轮速里程计串口输入。当前协议固定为 43 4C + 40 01 数据帧。
        payload = [last_wheel_update_ms, left_encoder_count, right_encoder_count,

@@ -108,9 +108,9 @@ message(=============================================================)
 #========================
 #  Path Setup
 #========================
-set(CMAKE_INSTALL_PREFIX /usr/local)
-set(INSTALL_DRIVER_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_PROJECT_NAME}/include)
-set(INSTALL_CMAKE_DIR ${CMAKE_INSTALL_PREFIX}/lib/cmake)
+include(GNUInstallDirs)
+set(INSTALL_DRIVER_DIR ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
+set(INSTALL_CMAKE_DIR ${CMAKE_INSTALL_LIBDIR}/cmake)
 set(DRIVER_INCLUDE_DIRS ${CMAKE_CURRENT_LIST_DIR}/src)
 set(DRIVER_CMAKE_ROOT ${CMAKE_CURRENT_LIST_DIR}/cmake)
 
@@ -271,4 +271,3 @@ if(UNIX AND ${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
   endif(NOT TARGET uninstall)
 
 endif(UNIX AND ${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
-

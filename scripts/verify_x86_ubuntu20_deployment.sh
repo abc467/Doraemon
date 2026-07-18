@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FAILURES=0
+WARNINGS=0
+
+ok() {
+  echo "[OK] $*"
+}
+
+fail() {
+  echo "[FAIL] $*" >&2
+  FAILURES=$((FAILURES + 1))
+}
+
+warn() {
+  echo "[WARN] $*" >&2
+  WARNINGS=$((WARNINGS + 1))
+}
+
+check_file() {
+  if [[ -f "$1" ]]; then
+    ok "$1"
+  else
+    fail "missing $1"
+  fi
+}
+
+[[ "$(uname -m)" == "x86_64" ]] && ok "architecture x86_64" || fail "architecture must be x86_64"
+check_file /opt/ros/noetic/setup.bash
+check_file /etc/doraemon/deps.env
+check_file /etc/doraemon/runtime.env
+
+if [[ -f /etc/doraemon/deps.env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source /etc/doraemon/deps.env
+  set +a
+
+  [[ -f "${ORTOOLS_ROOT:-}/lib/libortools.so" ]] &&
+    ok "OR-Tools ${ORTOOLS_ROOT}" ||
+    fail "OR-Tools shared library"
+  [[ -f "${FIELDS2COVER_ROOT:-}/lib/libFields2Cover.so" ]] &&
+    ok "Fields2Cover ${FIELDS2COVER_ROOT}" ||
+    fail "Fields2Cover shared library"
+  [[ -f "${FLIRT_ROOT:-}/lib/libflirtlib_feature.so" ]] &&
+    ok "FLIRT ${FLIRT_ROOT}" ||
+    fail "FLIRT shared library"
+
+  python3 -c "import fields2cover" >/dev/null 2>&1 &&
+    ok "Fields2Cover Python import" ||
+    fail "Fields2Cover Python import"
+fi
+
+if [[ -f "${REPO_ROOT}/install/setup.bash" || -f "${REPO_ROOT}/devel/setup.bash" ]]; then
+  ok "Doraemon workspace setup"
+else
+  fail "Doraemon workspace is not built"
+fi
+
+for device in /dev/imu /dev/wheel_odom; do
+  [[ -e "${device}" ]] && ok "device ${device}" || warn "device ${device} is not present"
+done
+
+for address in 192.168.127.10 192.168.127.23 192.168.127.12; do
+  ping -c 1 -W 1 "${address}" >/dev/null 2>&1 &&
+    ok "network ${address}" ||
+    warn "cannot reach ${address}"
+done
+
+if systemctl is-enabled doraemon-runtime.service >/dev/null 2>&1; then
+  ok "doraemon-runtime.service enabled"
+else
+  warn "doraemon-runtime.service is not enabled"
+fi
+
+echo "summary: failures=${FAILURES} warnings=${WARNINGS}"
+[[ "${FAILURES}" -eq 0 ]]

@@ -1,27 +1,35 @@
 [Unit]
 Description=Doraemon Robot Runtime
-After=local-fs.target network.target systemd-udev-settle.service
-Wants=systemd-udev-settle.service clean-robot-site-gateway.service
+After=local-fs.target network-online.target systemd-udev-settle.service
+Wants=network-online.target systemd-udev-settle.service
 
 [Service]
 Type=oneshot
-User=baer
-Group=baer
-WorkingDirectory=/home/baer/Doraemon
-Environment=HOME=/home/baer
+User=doraemon
+Group=doraemon
+WorkingDirectory=/opt/doraemon/current
+Environment=HOME=/var/lib/doraemon
 Environment=TERM=xterm-256color
+Environment=DORAEMON_REPO_ROOT=/opt/doraemon/current
+Environment=DORAEMON_RUNTIME_CONFIG_FILE=/etc/doraemon/runtime.env
+Environment=DORAEMON_WORKSPACE_SETUP=/opt/doraemon/current/devel/setup.bash
+Environment=ROS_HOME=/var/lib/doraemon/ros
+Environment=LOG_DIR=/var/log/doraemon/startup
 Environment=ALLOW_NO_ACTIVE_MAP_STARTUP=1
 Environment=RUN_BACKEND_RUNTIME_SMOKE=0
 Environment=DORAEMON_BOOT_WAIT_TIMEOUT=120
+EnvironmentFile=-/etc/doraemon/deps.env
 EnvironmentFile=-/etc/doraemon/runtime.env
-ExecStartPre=/home/baer/Doraemon/scripts/wait_robot_boot_ready.sh
-ExecStart=/bin/bash -lc 'exec scripts/start_runtime.sh'
-ExecStop=/bin/bash -lc 'exec scripts/stop_all_backend.sh'
+ExecStartPre=/opt/doraemon/current/scripts/wait_robot_boot_ready.sh
+ExecStart=/opt/doraemon/current/scripts/start_runtime.sh
+ExecStop=/opt/doraemon/current/scripts/stop_all_backend.sh
 RemainAfterExit=yes
 TimeoutStartSec=240
 TimeoutStopSec=90
 Restart=on-failure
 RestartSec=15
+UMask=0027
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
