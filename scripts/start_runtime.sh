@@ -5,6 +5,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+DORAEMON_RUNTIME_CONFIG_FILE="${DORAEMON_RUNTIME_CONFIG_FILE:-${REPO_ROOT}/config/runtime.a26022.env}"
+DORAEMON_RUNTIME_CONFIG_LOADED="false"
+if [[ -f "${DORAEMON_RUNTIME_CONFIG_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${DORAEMON_RUNTIME_CONFIG_FILE}"
+  set +a
+  DORAEMON_RUNTIME_CONFIG_LOADED="true"
+fi
+
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/log/startup}"
 STATUS_LOG="${STATUS_LOG:-${LOG_DIR}/startup_status.log}"
 RESTART_LOCALIZATION_OUT="${RESTART_LOCALIZATION_OUT:-${LOG_DIR}/restart_localization.out}"
@@ -35,7 +45,10 @@ STARTUP_RELOCALIZE_ENABLE="${STARTUP_RELOCALIZE_ENABLE:-true}"
 FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH="${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-false}"
 CHASSIS_DRIVER="${CHASSIS_DRIVER:-${DORAEMON_CHASSIS_DRIVER:-legacy_mcore}}"
 case "${CHASSIS_DRIVER}" in
-  mcore_serial|serial_mcore|new_mcore)
+  mcore_tcp|tcp_mcore|new_mcore)
+    CHASSIS_DRIVER="mcore_tcp"
+    ;;
+  mcore_serial|serial_mcore)
     CHASSIS_DRIVER="mcore_serial"
     ;;
   legacy|legacy_mcore|mcore)
@@ -51,8 +64,11 @@ DEFAULT_RUNTIME_START_JOINT_STATE_PUBLISHER="false"
 DEFAULT_RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK="false"
 DEFAULT_RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z="0.0"
 DEFAULT_RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK="false"
-DEFAULT_RUNTIME_START_DEPTH_CAMERAS="false"
-DEFAULT_RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING="false"
+# A26022 mcore robots carry two front/side Orbbec depth cameras. Start the
+# camera drivers and the depth obstacle chain by default; chassis profiles that
+# do not have cameras override these below.
+DEFAULT_RUNTIME_START_DEPTH_CAMERAS="true"
+DEFAULT_RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING="true"
 DEFAULT_START_WHEELTEC_BASE="false"
 DEFAULT_START_WHEEL_ODOM="true"
 DEFAULT_START_MCORE_BRIDGE="false"
@@ -66,7 +82,7 @@ DEFAULT_ODOMETRY_HEALTH_IMU_TOPIC="/imu"
 DEFAULT_ODOMETRY_HEALTH_EKF_NODE_NAME="/wheel_speed_odom_ekf"
 DEFAULT_WHEELTEC_SERIAL_DEVICE="/dev/wheeltec_controller"
 WHEELTEC_BY_ID_DEVICE="/dev/serial/by-id/usb-WCH.CN_USB_Single_Serial_0002-if00"
-DEFAULT_ODOM_SERIAL_DEVICE="/dev/serial/by-path/pci-0000:65:00.3-usb-0:1:1.0-port0"
+DEFAULT_ODOM_SERIAL_DEVICE="/dev/wheel_odom"
 ODOM_BY_ID_DEVICE="/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"
 if [[ ! -e "${DEFAULT_ODOM_SERIAL_DEVICE}" && -e "${ODOM_BY_ID_DEVICE}" ]]; then
   DEFAULT_ODOM_SERIAL_DEVICE="${ODOM_BY_ID_DEVICE}"
@@ -99,8 +115,11 @@ RUNTIME_START_ROBOT_STATE_PUBLISHER="${RUNTIME_START_ROBOT_STATE_PUBLISHER:-true
 RUNTIME_START_JOINT_STATE_PUBLISHER="${RUNTIME_START_JOINT_STATE_PUBLISHER:-${DEFAULT_RUNTIME_START_JOINT_STATE_PUBLISHER}}"
 RUNTIME_ROBOT_DESCRIPTION_PATH="${RUNTIME_ROBOT_DESCRIPTION_PATH:-${DEFAULT_RUNTIME_ROBOT_DESCRIPTION_PATH}}"
 RUNTIME_START_LIDAR="${RUNTIME_START_LIDAR:-true}"
+RUNTIME_LIDAR_NTP_IP="${RUNTIME_LIDAR_NTP_IP:-192.168.127.88}"
+RUNTIME_LIDAR_NTP_PORT="${RUNTIME_LIDAR_NTP_PORT:-5678}"
+RUNTIME_LIDAR_NTP_ENABLE="${RUNTIME_LIDAR_NTP_ENABLE:--1}"
 RUNTIME_START_IMU="${RUNTIME_START_IMU:-true}"
-RUNTIME_IMU_PORT="${RUNTIME_IMU_PORT:-/dev/serial/by-path/pci-0000:65:00.3-usb-0:3:1.0-port0}"
+RUNTIME_IMU_PORT="${RUNTIME_IMU_PORT:-/dev/imu}"
 RUNTIME_IMU_BAUD="${RUNTIME_IMU_BAUD:-115200}"
 RUNTIME_IMU_SLAVE_ADDRESS="${RUNTIME_IMU_SLAVE_ADDRESS:-1}"
 RUNTIME_IMU_PUBLISH_RAW="${RUNTIME_IMU_PUBLISH_RAW:-true}"
@@ -146,11 +165,14 @@ ODOM_RIGHT_WHEEL_SCALE="${ODOM_RIGHT_WHEEL_SCALE:-1.0}"
 ODOM_ANGULAR_VELOCITY_SIGN="${ODOM_ANGULAR_VELOCITY_SIGN:--1.0}"
 START_MCORE_BRIDGE="${START_MCORE_BRIDGE:-${DEFAULT_START_MCORE_BRIDGE}}"
 START_MCORE_VELOCITY_SENDER="${START_MCORE_VELOCITY_SENDER:-${DEFAULT_START_MCORE_VELOCITY_SENDER}}"
-MCORE_SERIAL_DEVICE="${MCORE_SERIAL_DEVICE:-/dev/serial/by-path/pci-0000:67:00.4-usb-0:1.3:1.0-port0}"
+MCORE_TRANSPORT="${MCORE_TRANSPORT:-tcp}"
+MCORE_SERIAL_DEVICE="${MCORE_SERIAL_DEVICE:-/dev/mcore}"
 MCORE_VELOCITY_EXTRA_ARGS="${MCORE_VELOCITY_EXTRA_ARGS:-}"
 MCORE_SERIAL_BAUDRATE="${MCORE_SERIAL_BAUDRATE:-115200}"
-MCORE_SERVER_IP="${MCORE_SERVER_IP:-192.168.16.10}"
+MCORE_SERVER_IP="${MCORE_SERVER_IP:-192.168.127.10}"
 MCORE_SERVER_PORT="${MCORE_SERVER_PORT:-5001}"
+MCORE_TCP_HOST="${MCORE_TCP_HOST:-${MCORE_SERVER_IP}}"
+MCORE_TCP_PORT="${MCORE_TCP_PORT:-8080}"
 MCORE_ENABLE_CMD_VEL="${MCORE_ENABLE_CMD_VEL:-${DEFAULT_MCORE_ENABLE_CMD_VEL}}"
 MCORE_CMD_VEL_TOPIC="${MCORE_CMD_VEL_TOPIC:-/cmd_vel}"
 MCORE_LINEAR_VELOCITY_SCALE="${MCORE_LINEAR_VELOCITY_SCALE:-1000.0}"
@@ -177,7 +199,7 @@ FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE="${FRONTEND_BACKEND_MANUAL_DRIV
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE="${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE:-${MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE}}"
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS="${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS:-${MANUAL_DRIVE_REQUIRE_COMBINED_STATUS}}"
 FRONTEND_BACKEND_MANUAL_DRIVE_PUBLISH_HZ="${FRONTEND_BACKEND_MANUAL_DRIVE_PUBLISH_HZ:-${MANUAL_DRIVE_PUBLISH_HZ}}"
-STATION_SERVER_IP="${STATION_SERVER_IP:-10.2.0.200}"
+STATION_SERVER_IP="${STATION_SERVER_IP:-192.168.127.12}"
 STATION_SERVER_PORT="${STATION_SERVER_PORT:-5007}"
 WAIT_FOR_SCAN_TOPIC="${WAIT_FOR_SCAN_TOPIC:-/scan}"
 WAIT_FOR_IMU_TOPIC="${WAIT_FOR_IMU_TOPIC:-/imu}"
@@ -186,8 +208,43 @@ WAIT_FOR_ODOM_TOPIC="${WAIT_FOR_ODOM_TOPIC:-/odom}"
 ODOMETRY_HEALTH_IMU_TOPIC="${ODOMETRY_HEALTH_IMU_TOPIC:-${DEFAULT_ODOMETRY_HEALTH_IMU_TOPIC}}"
 ODOMETRY_HEALTH_EKF_NODE_NAME="${ODOMETRY_HEALTH_EKF_NODE_NAME:-${DEFAULT_ODOMETRY_HEALTH_EKF_NODE_NAME}}"
 REQUIRE_MCORE_BRIDGE_FOR_READINESS="${REQUIRE_MCORE_BRIDGE_FOR_READINESS:-false}"
-TASK_AUTO_CHARGE_ENABLE="${TASK_AUTO_CHARGE_ENABLE:-false}"
+TASK_AUTO_CHARGE_ENABLE="${TASK_AUTO_CHARGE_ENABLE:-true}"
 EXECUTOR_AUTO_CHARGE_ENABLE="${EXECUTOR_AUTO_CHARGE_ENABLE:-false}"
+ACTUATOR_DEBUG_REQUIRE_SAFETY_STATUS="${ACTUATOR_DEBUG_REQUIRE_SAFETY_STATUS:-true}"
+DEFAULT_RETURN_TO_DOCK_ON_FINISH="${DEFAULT_RETURN_TO_DOCK_ON_FINISH:-false}"
+DOCK_TARGET_DIST="${DOCK_TARGET_DIST:-0.780}"
+DOCK_XY_TOLERANCE="${DOCK_XY_TOLERANCE:-0.005}"
+DOCK_YAW_TOLERANCE="${DOCK_YAW_TOLERANCE:-0.04}"
+DOCK_POSE_SCORE_THRESH="${DOCK_POSE_SCORE_THRESH:-0.00012}"
+DOCK_CALIBRATION_STORAGE_PATH="${DOCK_CALIBRATION_STORAGE_PATH:-/data/coverage/dock_calibration.yaml}"
+MECHANICAL_CONNECT_ENABLE="${MECHANICAL_CONNECT_ENABLE:-false}"
+SKIP_PRECISE_DOCKING_IF_STATION_IN_PLACE="${SKIP_PRECISE_DOCKING_IF_STATION_IN_PLACE:-false}"
+DIRECT_CHARGE_AFTER_PRECISE_DOCKING="${DIRECT_CHARGE_AFTER_PRECISE_DOCKING:-true}"
+CHARGE_VOLTAGE_CONFIRM_ENABLE="${CHARGE_VOLTAGE_CONFIRM_ENABLE:-false}"
+DOCK_SUPPLY_ENABLE_DRAIN="${DOCK_SUPPLY_ENABLE_DRAIN:-true}"
+DOCK_SUPPLY_ENABLE_REFILL="${DOCK_SUPPLY_ENABLE_REFILL:-false}"
+DOCK_SUPPLY_DRAIN_TIMEOUT_S="${DOCK_SUPPLY_DRAIN_TIMEOUT_S:-600.0}"
+DOCK_SUPPLY_DRAIN_SETTLE_S="${DOCK_SUPPLY_DRAIN_SETTLE_S:-30.0}"
+DOCK_SUPPLY_COMBINED_STATUS_WAIT_S="${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S:-5.0}"
+DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S="${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S:-3.0}"
+AUTO_CHARGE_TARGET_SOC="${AUTO_CHARGE_TARGET_SOC:-${TARGET_SOC:-0.95}}"
+AUTO_CHARGE_LOW_SOC="${AUTO_CHARGE_LOW_SOC:-${LOW_SOC:-0.15}}"
+AUTO_CHARGE_RESUME_SOC="${AUTO_CHARGE_RESUME_SOC:-${RESUME_SOC:-0.95}}"
+AUTO_CHARGE_REARM_SOC="${AUTO_CHARGE_REARM_SOC:-${REARM_SOC:-0.95}}"
+AUTO_CHARGE_MONITOR_ENABLE="${AUTO_CHARGE_MONITOR_ENABLE:-true}"
+AUTO_CHARGE_MONITOR_RESET_ON_START="${AUTO_CHARGE_MONITOR_RESET_ON_START:-false}"
+AUTO_CHARGE_MONITOR_COUNT_AUTO_ONLY="${AUTO_CHARGE_MONITOR_COUNT_AUTO_ONLY:-true}"
+AUTO_CHARGE_MONITOR_RECOVERY_ENABLE="${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE:-true}"
+AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY="${AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY:-redock}"
+AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S="${AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S:-180.0}"
+AUTO_CHARGE_MONITOR_RECOVERY_MIN_SOC_DELTA="${AUTO_CHARGE_MONITOR_RECOVERY_MIN_SOC_DELTA:-0.001}"
+AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS="${AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS:-2}"
+AUTO_CHARGE_MONITOR_RECOVERY_BACK_DISTANCE_M="${AUTO_CHARGE_MONITOR_RECOVERY_BACK_DISTANCE_M:-0.20}"
+AUTO_CHARGE_MONITOR_RECOVERY_FORWARD_DISTANCE_M="${AUTO_CHARGE_MONITOR_RECOVERY_FORWARD_DISTANCE_M:-0.205}"
+AUTO_CHARGE_MONITOR_RECOVERY_SPEED_MPS="${AUTO_CHARGE_MONITOR_RECOVERY_SPEED_MPS:-0.03}"
+AUTO_CHARGE_MONITOR_RECOVERY_TOGGLE_CHARGE="${AUTO_CHARGE_MONITOR_RECOVERY_TOGGLE_CHARGE:-false}"
+AUTO_CHARGE_MONITOR_RECOVERY_REDOCK_SERVICE="${AUTO_CHARGE_MONITOR_RECOVERY_REDOCK_SERVICE:-/coverage_task_manager/auto_charge_redock}"
+AUTO_CHARGE_MONITOR_RECOVERY_EXHAUSTED_SERVICE="${AUTO_CHARGE_MONITOR_RECOVERY_EXHAUSTED_SERVICE:-/coverage_task_manager/auto_charge_recovery_exhausted}"
 RUN_BACKEND_RUNTIME_SMOKE="${RUN_BACKEND_RUNTIME_SMOKE:-1}"
 BACKEND_RUNTIME_SMOKE_TASK_ID="${BACKEND_RUNTIME_SMOKE_TASK_ID:-0}"
 BACKEND_RUNTIME_SMOKE_ACTIONS="${BACKEND_RUNTIME_SMOKE_ACTIONS:-}"
@@ -225,9 +282,11 @@ Environment highlights:
   BACKEND_PRODUCTION_ACCEPTANCE_PROFILE=
   BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS=0
   START_WHEEL_ODOM=true
-  ODOM_SERIAL_DEVICE=/dev/serial/by-path/pci-0000:65:00.3-usb-0:1:1.0-port0
+  ODOM_SERIAL_DEVICE=/dev/wheel_odom
   START_MCORE_VELOCITY_SENDER=true
-  MCORE_SERIAL_DEVICE=/dev/serial/by-path/pci-0000:67:00.4-usb-0:1.3:1.0-port0
+  MCORE_TRANSPORT=tcp
+  MCORE_TCP_HOST=192.168.127.10
+  MCORE_TCP_PORT=8080
   CHASSIS_DRIVER=wheeltec_senior_diff
   WHEELTEC_SERIAL_DEVICE=/dev/wheeltec_controller
   RUNTIME_BASE_EXTRA_ARGS=
@@ -235,6 +294,26 @@ Environment highlights:
   MCORE_VELOCITY_EXTRA_ARGS=
   WHEELTEC_BASE_EXTRA_ARGS=
   HARDWARE_BRIDGES_EXTRA_ARGS=
+  STATION_SERVER_IP=192.168.127.12
+  STATION_SERVER_PORT=5007
+  DOCK_TARGET_DIST=0.780
+  DOCK_XY_TOLERANCE=0.005
+  DOCK_YAW_TOLERANCE=0.04
+  DOCK_POSE_SCORE_THRESH=0.00012
+  DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
+  DOCK_SUPPLY_ENABLE_DRAIN=true
+  DOCK_SUPPLY_ENABLE_REFILL=false
+  DOCK_SUPPLY_DRAIN_TIMEOUT_S=600.0
+  DOCK_SUPPLY_DRAIN_SETTLE_S=30.0
+  AUTO_CHARGE_TARGET_SOC=0.95
+  AUTO_CHARGE_LOW_SOC=0.15
+  AUTO_CHARGE_RESUME_SOC=0.95
+  AUTO_CHARGE_REARM_SOC=0.95
+  AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock
+  AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S=180.0
+  AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS=2
+  AUTO_CHARGE_MONITOR_RECOVERY_BACK_DISTANCE_M=0.20
+  AUTO_CHARGE_MONITOR_RECOVERY_FORWARD_DISTANCE_M=0.205
 EOF
 }
 
@@ -300,6 +379,21 @@ startup_relocalize_enabled() {
       return 1
       ;;
   esac
+}
+
+log_effective_runtime_parameters() {
+  local dock_threshold
+  dock_threshold="$(awk -v target="${DOCK_TARGET_DIST}" -v tol="${DOCK_XY_TOLERANCE}" 'BEGIN { printf "%.3f", target + tol }' 2>/dev/null || printf 'unknown')"
+
+  runtime_log_status "station bridge: ${STATION_SERVER_IP}:${STATION_SERVER_PORT}"
+  runtime_log_status "dock tuning: target=${DOCK_TARGET_DIST} xy_tolerance=${DOCK_XY_TOLERANCE} yaw_tolerance=${DOCK_YAW_TOLERANCE} threshold=${dock_threshold} score_thresh=${DOCK_POSE_SCORE_THRESH}"
+  runtime_log_status "auto charge: task=${TASK_AUTO_CHARGE_ENABLE} executor=${EXECUTOR_AUTO_CHARGE_ENABLE} low=${AUTO_CHARGE_LOW_SOC} resume=${AUTO_CHARGE_RESUME_SOC} rearm=${AUTO_CHARGE_REARM_SOC} target=${AUTO_CHARGE_TARGET_SOC}"
+  runtime_log_status "dock supply: post_charge_drain=${DOCK_SUPPLY_ENABLE_DRAIN} refill=${DOCK_SUPPLY_ENABLE_REFILL} drain_timeout_s=${DOCK_SUPPLY_DRAIN_TIMEOUT_S} drain_settle_s=${DOCK_SUPPLY_DRAIN_SETTLE_S} combined_status_wait_s=${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S} combined_status_stale_s=${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
+  if [[ "${AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY}" == "redock" ]]; then
+    runtime_log_status "charge recovery monitor: enable=${AUTO_CHARGE_MONITOR_ENABLE} recovery=${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE} strategy=redock timeout_s=${AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S} retreat=/dock_supply/recovery_retreat attempts=${AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS}"
+  else
+    runtime_log_status "charge recovery monitor: enable=${AUTO_CHARGE_MONITOR_ENABLE} recovery=${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE} strategy=${AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY} timeout_s=${AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S} back_m=${AUTO_CHARGE_MONITOR_RECOVERY_BACK_DISTANCE_M} forward_m=${AUTO_CHARGE_MONITOR_RECOVERY_FORWARD_DISTANCE_M} attempts=${AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS}"
+  fi
 }
 
 build_backend_runtime_smoke_cmd() {
@@ -370,9 +464,19 @@ start_runtime_session() {
   if [[ "${RUNTIME_START_LIDAR}" != "true" ]]; then
     base_cmd_words+=(start_lidar:="${RUNTIME_START_LIDAR}")
   fi
+  base_cmd_words+=(
+    lidar_ntp_ip:="${RUNTIME_LIDAR_NTP_IP}"
+    lidar_ntp_port:="${RUNTIME_LIDAR_NTP_PORT}"
+    lidar_ntp_enable:="${RUNTIME_LIDAR_NTP_ENABLE}"
+  )
   if [[ "${RUNTIME_START_IMU}" != "true" ]]; then
     base_cmd_words+=(start_imu:="${RUNTIME_START_IMU}")
   fi
+  base_cmd_words+=(
+    imu_port:="${RUNTIME_IMU_PORT}"
+    imu_baud:="${RUNTIME_IMU_BAUD}"
+    imu_slave_address:="${RUNTIME_IMU_SLAVE_ADDRESS}"
+  )
   if [[ "${RUNTIME_START_AHRS}" != "false" ]]; then
     base_cmd_words+=(start_ahrs:="${RUNTIME_START_AHRS}")
   fi
@@ -436,12 +540,16 @@ start_runtime_session() {
       roslaunch
       mcore_chassis_bridge
       mcore_velocity_sender.launch
+      transport:="${MCORE_TRANSPORT}"
       serial_device:="${MCORE_SERIAL_DEVICE}"
+      serial_baudrate:="${MCORE_SERIAL_BAUDRATE}"
+      tcp_host:="${MCORE_TCP_HOST}"
+      tcp_port:="${MCORE_TCP_PORT}"
     )
     append_shell_words mcore_velocity_cmd_words "${MCORE_VELOCITY_EXTRA_ARGS}"
     runtime_tmux_window "${TMUX_SESSION}" mcore_velocity "$(join_shell_words mcore_velocity_cmd_words)"
   else
-    runtime_log_status "[INFO] skip M-core serial velocity sender: START_MCORE_VELOCITY_SENDER=${START_MCORE_VELOCITY_SENDER}"
+    runtime_log_status "[INFO] skip M-core velocity sender: START_MCORE_VELOCITY_SENDER=${START_MCORE_VELOCITY_SENDER}"
   fi
 
   if [[ "${START_MCORE_BRIDGE}" == "true" || "${START_STATION_BRIDGE}" == "true" || "${START_DOCK_SUPPLY_MANAGER}" == "true" || "${START_DOCKING_STACK}" == "true" ]]; then
@@ -454,6 +562,23 @@ start_runtime_session() {
       enable_station_bridge:="${START_STATION_BRIDGE}"
       enable_dock_supply_manager:="${START_DOCK_SUPPLY_MANAGER}"
       enable_docking_stack:="${START_DOCKING_STACK}"
+      station_server_ip:="${STATION_SERVER_IP}"
+      station_server_port:="${STATION_SERVER_PORT}"
+      dock_target_dist:="${DOCK_TARGET_DIST}"
+      dock_xy_tolerance:="${DOCK_XY_TOLERANCE}"
+      dock_yaw_tolerance:="${DOCK_YAW_TOLERANCE}"
+      dock_pose_score_thresh:="${DOCK_POSE_SCORE_THRESH}"
+      mechanical_connect_enable:="${MECHANICAL_CONNECT_ENABLE}"
+      skip_precise_docking_if_station_in_place:="${SKIP_PRECISE_DOCKING_IF_STATION_IN_PLACE}"
+      direct_charge_after_precise_docking:="${DIRECT_CHARGE_AFTER_PRECISE_DOCKING}"
+      dock_supply_enable_drain:="${DOCK_SUPPLY_ENABLE_DRAIN}"
+      dock_supply_enable_refill:="${DOCK_SUPPLY_ENABLE_REFILL}"
+      dock_supply_drain_timeout_s:="${DOCK_SUPPLY_DRAIN_TIMEOUT_S}"
+      dock_supply_drain_settle_s:="${DOCK_SUPPLY_DRAIN_SETTLE_S}"
+      dock_supply_combined_status_wait_s:="${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S}"
+      dock_supply_combined_status_stale_timeout_s:="${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
+      target_soc:="${AUTO_CHARGE_TARGET_SOC}"
+      charge_voltage_confirm_enable:="${CHARGE_VOLTAGE_CONFIRM_ENABLE}"
     )
     append_shell_words hardware_cmd_words "${HARDWARE_BRIDGES_EXTRA_ARGS}"
     runtime_tmux_window "${TMUX_SESSION}" hardware "$(join_shell_words hardware_cmd_words)"
@@ -461,7 +586,45 @@ start_runtime_session() {
     runtime_log_status "[INFO] skip legacy hardware bridges: all hardware bridge switches are false"
   fi
   runtime_tmux_window "${TMUX_SESSION}" nav "exec roslaunch cleanrobot mbf_nav.launch start_map_asset_service:=false enable_depth_obstacle_tracking:=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} enable_depth_up_cam:=${RUNTIME_ENABLE_DEPTH_UP_CAM} plan_db_path:=${PLAN_DB_PATH} ops_db_path:=${OPS_DB_PATH} maps_root:=${MAPS_ROOT} external_maps_root:=${EXTERNAL_MAPS_ROOT} robot_id:=${ROBOT_ID}"
-  runtime_tmux_window "${TMUX_SESSION}" task "exec roslaunch coverage_task_manager task_system.launch task_auto_charge_enable:=${TASK_AUTO_CHARGE_ENABLE} executor_auto_charge_enable:=${EXECUTOR_AUTO_CHARGE_ENABLE} odometry_health_imu_topic:=${ODOMETRY_HEALTH_IMU_TOPIC} odometry_health_ekf_node_name:=${ODOMETRY_HEALTH_EKF_NODE_NAME} require_mcore_bridge_for_readiness:=${REQUIRE_MCORE_BRIDGE_FOR_READINESS} plan_db_path:=${PLAN_DB_PATH} ops_db_path:=${OPS_DB_PATH} maps_root:=${MAPS_ROOT} robot_id:=${ROBOT_ID}"
+  local task_cmd_words=(
+    exec
+    roslaunch
+    coverage_task_manager
+    task_system.launch
+    task_auto_charge_enable:="${TASK_AUTO_CHARGE_ENABLE}"
+    executor_auto_charge_enable:="${EXECUTOR_AUTO_CHARGE_ENABLE}"
+    default_return_to_dock_on_finish:="${DEFAULT_RETURN_TO_DOCK_ON_FINISH}"
+    low_soc:="${AUTO_CHARGE_LOW_SOC}"
+    resume_soc:="${AUTO_CHARGE_RESUME_SOC}"
+    rearm_soc:="${AUTO_CHARGE_REARM_SOC}"
+    dock_calibration_storage_path:="${DOCK_CALIBRATION_STORAGE_PATH}"
+    dock_calibration_score_threshold:="${DOCK_POSE_SCORE_THRESH}"
+    dock_calibration_target_dist:="${DOCK_TARGET_DIST}"
+    dock_calibration_xy_tolerance:="${DOCK_XY_TOLERANCE}"
+    auto_charge_monitor_enable:="${AUTO_CHARGE_MONITOR_ENABLE}"
+    auto_charge_monitor_reset_on_start:="${AUTO_CHARGE_MONITOR_RESET_ON_START}"
+    auto_charge_monitor_count_auto_only:="${AUTO_CHARGE_MONITOR_COUNT_AUTO_ONLY}"
+    auto_charge_monitor_recovery_enable:="${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE}"
+    auto_charge_monitor_recovery_strategy:="${AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY}"
+    auto_charge_monitor_recovery_timeout_s:="${AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S}"
+    auto_charge_monitor_recovery_min_soc_delta:="${AUTO_CHARGE_MONITOR_RECOVERY_MIN_SOC_DELTA}"
+    auto_charge_monitor_recovery_max_attempts:="${AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS}"
+    auto_charge_monitor_recovery_back_distance_m:="${AUTO_CHARGE_MONITOR_RECOVERY_BACK_DISTANCE_M}"
+    auto_charge_monitor_recovery_forward_distance_m:="${AUTO_CHARGE_MONITOR_RECOVERY_FORWARD_DISTANCE_M}"
+    auto_charge_monitor_recovery_speed_mps:="${AUTO_CHARGE_MONITOR_RECOVERY_SPEED_MPS}"
+    auto_charge_monitor_recovery_toggle_charge:="${AUTO_CHARGE_MONITOR_RECOVERY_TOGGLE_CHARGE}"
+    auto_charge_monitor_recovery_redock_service:="${AUTO_CHARGE_MONITOR_RECOVERY_REDOCK_SERVICE}"
+    auto_charge_monitor_recovery_exhausted_service:="${AUTO_CHARGE_MONITOR_RECOVERY_EXHAUSTED_SERVICE}"
+    odometry_health_imu_topic:="${ODOMETRY_HEALTH_IMU_TOPIC}"
+    odometry_health_ekf_node_name:="${ODOMETRY_HEALTH_EKF_NODE_NAME}"
+    require_mcore_bridge_for_readiness:="${REQUIRE_MCORE_BRIDGE_FOR_READINESS}"
+    actuator_debug_require_safety_status:="${ACTUATOR_DEBUG_REQUIRE_SAFETY_STATUS}"
+    plan_db_path:="${PLAN_DB_PATH}"
+    ops_db_path:="${OPS_DB_PATH}"
+    maps_root:="${MAPS_ROOT}"
+    robot_id:="${ROBOT_ID}"
+  )
+  runtime_tmux_window "${TMUX_SESSION}" task "$(join_shell_words task_cmd_words)"
 
   tmux new-window -t "${TMUX_SESSION}" -n status \
     "bash -lc 'clear; echo \"Doraemon startup status\"; echo; exec tail -n 200 -f \"${STATUS_LOG}\"'"
@@ -627,6 +790,8 @@ main() {
   runtime_log_status "startup begin"
   runtime_log_status "chassis driver: ${CHASSIS_DRIVER}"
   runtime_log_status "workspace layout: ${DORAEMON_WORKSPACE_LAYOUT:-unknown}"
+  runtime_log_status "runtime config: ${DORAEMON_RUNTIME_CONFIG_FILE} loaded=${DORAEMON_RUNTIME_CONFIG_LOADED}"
+  log_effective_runtime_parameters
   runtime_ensure_frontend_service_session
   runtime_log_status "wait frontend roscore"
   runtime_wait_for_master 20

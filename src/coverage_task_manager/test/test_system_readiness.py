@@ -59,8 +59,17 @@ class TaskManagerReadinessTest(unittest.TestCase):
         public_state="IDLE",
         executor_state="IDLE",
         slam_task_ready=True,
+        slam_task_running=False,
         slam_blocking_reason="",
+        slam_blocking_reasons=None,
         slam_busy=False,
+        slam_runtime_mode="localization",
+        slam_runtime_map_ready=True,
+        slam_active_map_match=True,
+        slam_runtime_map_match=True,
+        slam_map_topic_fresh=True,
+        slam_tracked_pose_fresh=True,
+        slam_last_error_code="",
         slam_manual_assist=False,
         slam_localization_state=None,
         slam_localization_valid=None,
@@ -88,10 +97,24 @@ class TaskManagerReadinessTest(unittest.TestCase):
         slam_state.workflow_state = "LOCALIZED" if slam_task_ready else "IDLE"
         slam_state.workflow_phase = "ready" if slam_task_ready else "idle"
         slam_state.task_ready = bool(slam_task_ready)
+        slam_state.task_running = bool(slam_task_running)
         slam_state.busy = bool(slam_busy)
+        slam_state.current_mode = str(slam_runtime_mode or "")
+        slam_state.runtime_mode = str(slam_runtime_mode or "")
+        slam_state.runtime_map_ready = bool(slam_runtime_map_ready)
+        slam_state.active_map_match = bool(slam_active_map_match)
+        slam_state.runtime_map_match = bool(slam_runtime_map_match)
+        slam_state.map_topic_fresh = bool(slam_map_topic_fresh)
+        slam_state.tracked_pose_fresh = bool(slam_tracked_pose_fresh)
+        slam_state.last_error_code = str(slam_last_error_code or "")
+        slam_state.mapping_session_active = False
         slam_state.manual_assist_required = bool(slam_manual_assist)
         slam_state.blocking_reason = str(slam_blocking_reason or "")
-        slam_state.blocking_reasons = [str(slam_blocking_reason or "")] if slam_blocking_reason else []
+        slam_state.blocking_reasons = list(
+            slam_blocking_reasons
+            if slam_blocking_reasons is not None
+            else ([str(slam_blocking_reason or "")] if slam_blocking_reason else [])
+        )
         slam_state.localization_state = str(
             localization_state if slam_localization_state is None else slam_localization_state
         )
@@ -388,13 +411,15 @@ class TaskManagerReadinessTest(unittest.TestCase):
             "workflow=IDLE phase=idle task_ready=false busy=false manual_assist=true",
         )
 
-    def test_deduplicates_same_blocker_from_slam_gate_and_platform_gate(self):
+    def test_active_task_reports_slam_runtime_healthy_while_start_gate_remains_busy(self):
         mgr, get_param, fake_now = self._build_manager(
             odometry_msg=self._odometry_msg(valid=True),
             require_odometry=True,
             mission_state="RUNNING",
             public_state="RUNNING",
+            executor_state="FOLLOW:block_0",
             slam_task_ready=False,
+            slam_task_running=True,
             slam_blocking_reason="task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
         )
         with mock.patch("coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param), mock.patch(
@@ -408,6 +433,171 @@ class TaskManagerReadinessTest(unittest.TestCase):
             ),
             1,
         )
+        self.assertFalse(readiness.overall_ready)
+        self.assertFalse(readiness.can_start_task)
+        slam_check = next(item for item in readiness.checks if item.key == "slam_runtime")
+        self.assertTrue(slam_check.ok)
+        self.assertEqual(slam_check.level, "OK")
+        self.assertEqual(
+            slam_check.summary,
+            "runtime healthy; occupied by active task; "
+            "workflow=IDLE phase=idle task_running=true task_ready=false busy=false manual_assist=false",
+        )
+
+    def test_active_task_does_not_mask_real_slam_runtime_blockers(self):
+        cases = (
+            {
+                "name": "odometry invalid",
+                "odometry_msg": self._odometry_msg(
+                    valid=False,
+                    code="odom_stale",
+                    message="odom stale",
+                ),
+                "slam_blocking_reasons": [
+                    "task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+                    "odometry not ready: code=odom_stale message=odom stale",
+                ],
+            },
+            {
+                "name": "manual assist",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_manual_assist": True,
+                "slam_localization_state": "manual_assist_required",
+                "slam_localization_valid": False,
+                "slam_blocking_reasons": [
+                    "task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+                    "runtime localization not ready",
+                ],
+            },
+            {
+                "name": "localization degraded",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_localization_state": "degraded",
+                "slam_localization_valid": False,
+                "slam_blocking_reasons": [
+                    "task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+                    "runtime localization not ready",
+                ],
+            },
+            {
+                "name": "tracked pose stale",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_tracked_pose_fresh": False,
+            },
+            {
+                "name": "slam workflow busy",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_busy": True,
+            },
+            {
+                "name": "wrong runtime mode",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_runtime_mode": "mapping",
+            },
+            {
+                "name": "runtime map mismatch reported by slam",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_runtime_map_match": False,
+            },
+            {
+                "name": "runtime map not ready",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_runtime_map_ready": False,
+            },
+            {
+                "name": "active map mismatch reported by slam",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_active_map_match": False,
+            },
+            {
+                "name": "map topic stale",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_map_topic_fresh": False,
+            },
+            {
+                "name": "current slam error",
+                "odometry_msg": self._odometry_msg(valid=True),
+                "slam_last_error_code": "SLAM_RUNTIME_ERROR",
+            },
+        )
+        for case in cases:
+            with self.subTest(case["name"]):
+                kwargs = dict(case)
+                kwargs.pop("name")
+                mgr, get_param, fake_now = self._build_manager(
+                    require_odometry=True,
+                    mission_state="RUNNING",
+                    public_state="RUNNING",
+                    executor_state="FOLLOW:block_0",
+                    slam_task_ready=False,
+                    slam_task_running=True,
+                    slam_blocking_reason="task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+                    **kwargs,
+                )
+                with mock.patch(
+                    "coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param
+                ), mock.patch(
+                    "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+                ), mock.patch(
+                    "coverage_task_manager.task_manager.time.time", return_value=self.now
+                ):
+                    readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+                slam_check = next(item for item in readiness.checks if item.key == "slam_runtime")
+                self.assertFalse(slam_check.ok)
+                self.assertEqual(slam_check.level, "ERROR")
+
+    def test_active_task_does_not_mask_runtime_map_mismatch(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            mission_state="RUNNING",
+            public_state="RUNNING",
+            executor_state="FOLLOW:block_0",
+            slam_task_ready=False,
+            slam_task_running=True,
+            slam_blocking_reason="task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+            slam_blocking_reasons=[
+                "task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+                "runtime map does not match active map",
+            ],
+        )
+        mgr._runtime_map_snapshot = lambda refresh=False: {
+            "map_name": "wrong_map",
+            "revision_id": "rev_wrong",
+            "map_id": "map_wrong",
+            "map_md5": "wrong",
+        }
+        with mock.patch("coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch("coverage_task_manager.task_manager.time.time", return_value=self.now):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        slam_check = next(item for item in readiness.checks if item.key == "slam_runtime")
+        self.assertFalse(slam_check.ok)
+        self.assertEqual(slam_check.level, "ERROR")
+
+    def test_active_task_stale_slam_state_remains_blocking(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            mission_state="RUNNING",
+            public_state="RUNNING",
+            executor_state="FOLLOW:block_0",
+            slam_task_ready=False,
+            slam_task_running=True,
+            slam_blocking_reason="task manager busy: mission=RUNNING phase=IDLE public=RUNNING",
+            slam_state_ts=self.now - 30.0,
+        )
+        with mock.patch("coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch("coverage_task_manager.task_manager.time.time", return_value=self.now):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        self.assertIn("slam state stale age=30.0s", list(readiness.blocking_reasons))
+        slam_check = next(item for item in readiness.checks if item.key == "slam_runtime")
+        self.assertFalse(slam_check.ok)
+        self.assertEqual(slam_check.level, "ERROR")
 
     def test_task_specific_readiness_reports_selected_vs_task_map_mismatch(self):
         mgr, get_param, fake_now = self._build_manager(

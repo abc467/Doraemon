@@ -76,6 +76,32 @@ class F2CAdapterSnakeSortTest(unittest.TestCase):
             ],
         )
 
+    def test_python_snake_sort_filters_subthreshold_swaths(self):
+        swaths = [
+            _Swath([(0.0, 0.0), (0.0005, 0.0)]),
+            _Swath([(0.0, 1.0), (0.399, 1.0)]),
+            _Swath([(0.0, 2.0), (0.400, 2.0)]),
+            _Swath([(0.0, 3.0), (10.0, 3.0)]),
+        ]
+
+        ordered = snake_sorted_swaths(swaths, min_swath_length_m=0.40)
+        lengths = []
+        for swath in ordered:
+            pts = swath_polyline_xyz(swath)
+            lengths.append(round(abs(pts[-1][0] - pts[0][0]), 3))
+
+        self.assertEqual(sorted(lengths), [0.4, 10.0])
+
+    def test_python_snake_sort_keeps_short_swaths_by_default(self):
+        swaths = [
+            _Swath([(0.0, 0.0), (0.0005, 0.0)]),
+            _Swath([(0.0, 1.0), (0.399, 1.0)]),
+        ]
+
+        ordered = snake_sorted_swaths(swaths)
+
+        self.assertEqual(len(ordered), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

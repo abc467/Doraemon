@@ -25,7 +25,8 @@ options = {
   published_frame = "odom",
   odom_frame = "odom",
   provide_odom_frame = false,
-  publish_frame_projected_to_2d = false,
+  -- Keep map/odom planar for the 2D navigation stack and RViz overlays.
+  publish_frame_projected_to_2d = true,
   use_pose_extrapolator = false,
   publish_tracked_pose = true,
   use_odometry = true,
@@ -88,7 +89,7 @@ TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_wei
 TRAJECTORY_BUILDER_2D.submaps.num_range_data = 80 
 POSE_GRAPH.optimization_problem.huber_scale = 1e1
 POSE_GRAPH.optimize_every_n_nodes = 30 --提高后端优化频率，让定位轨迹更快被冻结地图约束拉回
-POSE_GRAPH.global_sampling_ratio = 0.005 --降低后端全局采样压力，避免 active-frozen 约束搜索积压
+POSE_GRAPH.global_sampling_ratio = 0.005 --active->frozen 由外层轮询调度；该参数仅限制其他全局约束
 POSE_GRAPH.constraint_builder.min_score = 0.62
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.66 --提高全局重定位弱匹配门槛，降低重复结构误匹配
 

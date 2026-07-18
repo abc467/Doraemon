@@ -1,10 +1,33 @@
 #include "flirt.h"
 
+#include <utility>
+
+#include "glog/logging.h"
+
 BOOST_CLASS_EXPORT_IMPLEMENT(BetaGrid)
 BOOST_CLASS_EXPORT_IMPLEMENT(ShapeContext)
 
 namespace flirt
 {
+  namespace
+  {
+    struct RawInterestPointGuard
+    {
+      explicit RawInterestPointGuard(std::vector<InterestPoint *> *points)
+          : points(points) {}
+
+      ~RawInterestPointGuard()
+      {
+        for (InterestPoint *point : *points)
+        {
+          delete point;
+        }
+      }
+
+      std::vector<InterestPoint *> *points;
+    };
+  } // namespace
+
   std::atomic<bool> use_flirt;
   std::atomic<bool> need_flirt;
   std::atomic<bool> need_optimizing;
@@ -12,7 +35,7 @@ namespace flirt
 
   std::condition_variable cv_flirt_busy;
   std::mutex flirt_busy_lock;
-  volatile int flirt_return_code;
+  std::atomic<int> flirt_return_code{kRelocationIdle};
 
   std::atomic<double> relocation_min_score{0.60};
   std::atomic<int> relocation_required_consistent_hits{1};
@@ -78,7 +101,7 @@ namespace flirt
     need_flirt.store(false);
     need_optimizing.store(false);
     flirt_working.store(false);
-    flirt_return_code = kRelocationIdle;
+    flirt_return_code.store(kRelocationIdle);
     relocation_min_score.store(0.60);
     relocation_required_consistent_hits.store(1);
     relocation_consistency_max_submap_index_delta.store(1);
@@ -108,14 +131,70 @@ namespace flirt
     return &distance_function;
   }
 
-  void detect(const LaserReading &reading, std::vector<InterestPoint *> &point)
+  FeatureSet::FeatureSet(OwnedPoints points)
+      : owned_points_(std::move(points))
   {
-    g_detector->detect(reading, point);
+    raw_points_.reserve(owned_points_.size());
+    for (const auto &point : owned_points_)
+    {
+      CHECK(point != nullptr);
+      raw_points_.push_back(point.get());
+    }
   }
 
-  Descriptor *describe(const InterestPoint &point, const LaserReading &reading)
+  std::shared_ptr<const FeatureSet> FeatureSet::Adopt(OwnedPoints points)
   {
-    return g_descriptor_generator->describe(point, reading);
+    return std::shared_ptr<const FeatureSet>(
+        new FeatureSet(std::move(points)));
+  }
+
+  std::shared_ptr<const FeatureSet> FeatureSet::Build(
+      const LaserReading &reading)
+  {
+    // CurvatureDetector assumes enough vertices for endpoint removal and uses
+    // unsigned `size - 2` loop bounds. Treat sparse scans as a successfully
+    // computed empty feature set instead of entering undefined behavior.
+    if (reading.getRho().size() < 5)
+    {
+      return Adopt({});
+    }
+    CHECK(g_detector != nullptr) << "flirt::init() must be called first";
+    CHECK(g_descriptor_generator != nullptr)
+        << "flirt::init() must be called first";
+
+    std::vector<InterestPoint *> detected_points;
+    RawInterestPointGuard detected_points_guard(&detected_points);
+    g_detector->detect(reading, detected_points);
+
+    OwnedPoints owned_points;
+    owned_points.reserve(detected_points.size());
+    for (InterestPoint *&point : detected_points)
+    {
+      owned_points.emplace_back(point);
+      point = nullptr;
+    }
+
+    for (const auto &point : owned_points)
+    {
+      CHECK(point != nullptr);
+      std::unique_ptr<Descriptor> descriptor(
+          g_descriptor_generator->describe(*point, reading));
+      CHECK(descriptor != nullptr);
+      point->setDescriptor(descriptor.get());
+    }
+    return Adopt(std::move(owned_points));
+  }
+
+  std::shared_ptr<const FeatureSet> BuildFeatureSet(
+      const LaserReading &reading)
+  {
+    return FeatureSet::Build(reading);
+  }
+
+  std::shared_ptr<const FeatureSet> AdoptFeatureSet(
+      FeatureSet::OwnedPoints points)
+  {
+    return FeatureSet::Adopt(std::move(points));
   }
 
   void match(const std::vector<InterestPoint *> &reference, const std::vector<InterestPoint *> &data, OrientedPoint2D &transformation,

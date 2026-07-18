@@ -32,7 +32,7 @@
   <arg name="combined_status_stale_timeout_s" default="5.0"/>
   <arg name="station_status_topic" default="/station_status"/>
   <arg name="station_status_stale_timeout_s" default="5.0"/>
-  <arg name="mcore_connected_topic" default="/mcore_tcp_bridge/connected"/>
+  <arg name="mcore_connected_topic" default="/mcore_velocity_sender/connected"/>
   <arg name="station_connected_topic" default="/station_tcp_bridge/connected"/>
   <arg name="connected_stale_timeout_s" default="5.0"/>
   <arg name="require_mcore_bridge_for_readiness" default="false"/>
@@ -46,16 +46,21 @@
   <arg name="app_clean_schedule_service_name" default="/database_server/app/clean_schedule_service"/>
   <arg name="app_clean_schedule_contract_param_ns" default="/database_server/contracts/app/clean_schedule_service"/>
 
-  <!-- auto charge enable (Task 层作为 owner：测试默认关闭) -->
-  <arg name="auto_charge_enable" default="false"/>
-  <arg name="low_soc" default="0.80"/>
-  <arg name="resume_soc" default="0.99"/>
+  <!-- auto charge enable (Task 层作为 owner) -->
+  <arg name="auto_charge_enable" default="true"/>
+  <arg name="low_soc" default="0.15"/>
+  <arg name="resume_soc" default="0.95"/>
   <arg name="rearm_soc" default="0.95"/>
 
   <!-- Real-robot dock supply manager (fine dock + station ops + charging) -->
   <arg name="dock_supply_enable" default="true"/>
   <arg name="dock_supply_set_defer_exit_service" default="/dock_supply/set_defer_exit"/>
   <arg name="dock_supply_exit_service" default="/dock_supply/exit"/>
+  <arg name="dock_supply_recovery_retreat_service" default="/dock_supply/recovery_retreat"/>
+  <arg name="auto_charge_redock_service_name" default="/coverage_task_manager/auto_charge_redock"/>
+  <arg name="auto_charge_recovery_exhausted_service_name" default="/coverage_task_manager/auto_charge_recovery_exhausted"/>
+  <arg name="auto_charge_redock_settle_s" default="2.0"/>
+  <arg name="auto_charge_redock_retreat_timeout_s" default="60.0"/>
   <arg name="app_restart_localization_service" default="/cartographer/runtime/app/restart_localization"/>
   <arg name="app_slam_submit_command_service" default="/clean_robot_server/app/submit_slam_command"/>
   <arg name="app_slam_get_job_service" default="/clean_robot_server/app/get_slam_job"/>
@@ -65,6 +70,7 @@
   <arg name="dock_two_stage_enable" default="true"/>
   <arg name="dock_stage1_xyyaw" default="[-1.071339,-1.179026,1.583066]"/>
   <arg name="dock_stage2_controller" default="MyPlanner"/>
+  <arg name="dock_stage2_disable_replanning" default="true"/>
   <arg name="dock_retry_limit" default="2"/>
 
   <!-- 第二预对接点（靠近充电桩，随后进入精准对接） -->
@@ -78,7 +84,8 @@
   <arg name="dock_calibration_score_topic" default="/dock_pose_score"/>
   <arg name="dock_calibration_storage_path" default="/data/coverage/dock_calibration.yaml"/>
   <arg name="dock_calibration_score_threshold" default="0.00012"/>
-  <arg name="dock_calibration_target_dist" default="0.607"/>
+  <arg name="dock_calibration_target_dist" default="0.780"/>
+  <arg name="dock_calibration_xy_tolerance" default="0.005"/>
 
   <!-- Scheduler：打开并加载 schedules -->
   <arg name="scheduler_enable" default="true"/>
@@ -171,6 +178,11 @@
     <param name="dock_supply_state_topic" value="/dock_supply/state"/>
     <param name="dock_supply_set_defer_exit_service" value="$(arg dock_supply_set_defer_exit_service)"/>
     <param name="dock_supply_exit_service" value="$(arg dock_supply_exit_service)"/>
+    <param name="dock_supply_recovery_retreat_service" value="$(arg dock_supply_recovery_retreat_service)"/>
+    <param name="auto_charge_redock_service_name" value="$(arg auto_charge_redock_service_name)"/>
+    <param name="auto_charge_recovery_exhausted_service_name" value="$(arg auto_charge_recovery_exhausted_service_name)"/>
+    <param name="auto_charge_redock_settle_s" value="$(arg auto_charge_redock_settle_s)"/>
+    <param name="auto_charge_redock_retreat_timeout_s" value="$(arg auto_charge_redock_retreat_timeout_s)"/>
     <param name="app_restart_localization_service" value="$(arg app_restart_localization_service)"/>
     <param name="app_slam_submit_command_service" value="$(arg app_slam_submit_command_service)"/>
     <param name="app_slam_get_job_service" value="$(arg app_slam_get_job_service)"/>
@@ -180,6 +192,7 @@
     <param name="dock_two_stage_enable" value="$(arg dock_two_stage_enable)"/>
     <param name="dock_stage1_xyyaw" value="$(arg dock_stage1_xyyaw)"/>
     <param name="dock_stage2_controller" value="$(arg dock_stage2_controller)"/>
+    <param name="dock_stage2_disable_replanning" value="$(arg dock_stage2_disable_replanning)"/>
     <param name="dock_retry_limit" value="$(arg dock_retry_limit)"/>
     <param name="trigger_when_idle" value="false"/>
     <param name="low_soc" value="$(arg low_soc)"/>
@@ -262,9 +275,12 @@
     <param name="stage1_param_name" value="/coverage_task_manager/dock_stage1_xyyaw"/>
     <param name="stage2_param_name" value="/coverage_task_manager/dock_xyyaw"/>
     <param name="docking_target_dist_param_name" value="/dock_supply_manager/docking_target_dist"/>
+    <param name="docking_controller_dist_param_name" value="/docking_controller/docking_distance"/>
+    <param name="docking_xy_tolerance_param_name" value="/docking_controller/xy_tolerance"/>
     <param name="storage_path" value="$(arg dock_calibration_storage_path)"/>
     <param name="dock_score_threshold" value="$(arg dock_calibration_score_threshold)"/>
     <param name="dock_target_dist" value="$(arg dock_calibration_target_dist)"/>
+    <param name="dock_xy_tolerance" value="$(arg dock_calibration_xy_tolerance)"/>
   </node>
 
   <node pkg="coverage_task_manager" type="task_api_service_node.py" name="task_api_service" output="screen"

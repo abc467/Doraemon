@@ -93,24 +93,70 @@ def _geometry_to_region_list(geom, *, prec: int = 3) -> List[Dict[str, Any]]:
     if (not _HAS_SHAPELY) or geom is None or geom.is_empty:
         return out
 
-    if geom.geom_type == "Polygon":
-        polys = [geom]
-    elif geom.geom_type == "MultiPolygon":
-        polys = list(geom.geoms)
-    elif geom.geom_type == "GeometryCollection":
-        polys = [g for g in geom.geoms if getattr(g, "geom_type", "") == "Polygon" and not g.is_empty]
-    else:
-        polys = []
+    def _quantized_ring(coords) -> List[XY]:
+        ring: List[XY] = []
+        for x, y in list(coords or []):
+            point = _round_xy(x, y, prec=prec)
+            if not ring or ring[-1] != point:
+                ring.append(point)
+        if len(ring) >= 2 and ring[0] == ring[-1]:
+            ring = ring[:-1]
+        if len(set(ring)) < 3:
+            return []
+        return ring
 
-    for poly in polys:
-        outer = [_round_xy(x, y, prec=prec) for x, y in list(poly.exterior.coords)[:-1]]
+    def _rebuild_quantized(poly):
+        outer = _quantized_ring(poly.exterior.coords)
         if len(outer) < 3:
-            continue
+            return None
         holes: List[List[XY]] = []
-        for ring in poly.interiors:
-            hole = [_round_xy(x, y, prec=prec) for x, y in list(ring.coords)[:-1]]
+        for interior in poly.interiors:
+            hole = _quantized_ring(interior.coords)
             if len(hole) >= 3:
                 holes.append(hole)
+        try:
+            rebuilt = Polygon(outer, holes)
+        except Exception:
+            return None
+        return rebuilt if not rebuilt.is_empty else None
+
+    # Rounding a valid GEOS result can move a boundary intersection just far
+    # enough to create a tiny self-intersection. Rebuild on the requested
+    # precision grid, repair only invalid results, then quantize once more so
+    # the exact coordinates handed to Fields2Cover are themselves valid.
+    pending = _iter_polygon_geometries(geom)
+    valid_polys: List["Polygon"] = []
+    for _ in range(4):
+        if not pending:
+            break
+        retry: List["Polygon"] = []
+        for source_poly in pending:
+            rebuilt = _rebuild_quantized(source_poly)
+            if rebuilt is None:
+                continue
+            if rebuilt.is_valid:
+                valid_polys.append(rebuilt)
+                continue
+            try:
+                repaired = rebuilt.buffer(0.0)
+            except Exception:
+                continue
+            retry.extend(_iter_polygon_geometries(repaired))
+        pending = retry
+
+    for poly in valid_polys:
+        # Serialize from the validated, quantized Polygon rather than from the
+        # original GEOS result. This keeps the validity check and payload exact.
+        outer = _quantized_ring(poly.exterior.coords)
+        holes = [_quantized_ring(ring.coords) for ring in poly.interiors]
+        holes = [hole for hole in holes if len(hole) >= 3]
+        if len(outer) < 3:
+            continue
+        final_poly = Polygon(outer, holes)
+        if final_poly.is_empty or not final_poly.is_valid:
+            # Fail closed: an irreparable quantized sliver must never reach the
+            # native planner.
+            continue
         out.append({"outer": outer, "holes": holes})
     return out
 
@@ -492,20 +538,22 @@ def compile_zone_constraints(
 
     zone_poly = _safe_polygon(zone_outer, zone_holes)
 
+    # Keep complete keepout polygons for the boolean operation. Clipping every
+    # part to the zone first duplicates the zone boundary in both operands; a
+    # later coordinate quantization can then turn a shared endpoint into a
+    # tiny self-intersection (the field failure seen around -11.921, 36.089).
     keepout_parts = []
     for area in map_constraints.no_go_polygons:
         for geom in area.get("geometry") or []:
             part = _safe_polygon(geom.get("outer") or [], geom.get("holes") or [])
-            clipped = zone_poly.intersection(part)
-            if not clipped.is_empty:
-                keepout_parts.append(clipped)
+            if zone_poly.intersects(part):
+                keepout_parts.append(part)
 
     for wall in map_constraints.virtual_wall_keepouts:
         for geom in wall.get("geometry") or []:
             part = _safe_polygon(geom.get("outer") or [], geom.get("holes") or [])
-            clipped = zone_poly.intersection(part)
-            if not clipped.is_empty:
-                keepout_parts.append(clipped)
+            if zone_poly.intersects(part):
+                keepout_parts.append(part)
 
     keepout_union = unary_union(keepout_parts) if keepout_parts else GeometryCollection()
     effective = zone_poly.difference(keepout_union) if keepout_parts else zone_poly
@@ -513,7 +561,10 @@ def compile_zone_constraints(
     keepout_snapshot_rings = []
     for hole in zone_holes or []:
         keepout_snapshot_rings.append(_normalize_open_ring(hole, prec=prec))
-    for geom in _geometry_to_region_list(keepout_union, prec=prec):
+    # Stored snapshots describe only the keepout actually affecting this zone,
+    # while the difference above deliberately uses the complete keepout parts.
+    keepout_snapshot = zone_poly.intersection(keepout_union) if keepout_parts else keepout_union
+    for geom in _geometry_to_region_list(keepout_snapshot, prec=prec):
         keepout_snapshot_rings.append(geom["outer"])
 
     return CompiledZoneConstraints(

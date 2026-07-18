@@ -14,7 +14,7 @@
        last_wheel_update_ms 为 uint32，无符号；
        left_encoder_count/right_encoder_count/left_speed/right_speed 为 int32，有符号；
        seq 为 uint32，无符号。 -->
-  <arg name="serial_device" default="/dev/serial/by-id/usb-1a86_USB2.0-Serial-if00-port0"/>
+  <arg name="serial_device" default="/dev/wheel_odom"/>
   <arg name="serial_baudrate" default="115200"/>
   <!-- 里程计串口协议：
        framed_434c      = 43 4C + length + 40 01 + payload + checksum + tail

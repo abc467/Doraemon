@@ -23,10 +23,28 @@ def hexdump(bs: bytes) -> str:
     return " ".join(f"{b:02X}" for b in bs)
 
 
+def parse_byte_pair(value, default):
+    if isinstance(value, str):
+        parts = value.replace(",", " ").replace(":", " ").split()
+        parsed = [int(p, 16) if p.lower().startswith("0x") else int(p, 16) for p in parts]
+    elif isinstance(value, (list, tuple)):
+        parsed = [int(p) for p in value]
+    else:
+        parsed = list(default)
+    if len(parsed) != 2:
+        raise ValueError(f"expected exactly 2 bytes, got {parsed}")
+    return [p & 0xFF for p in parsed]
+
+
+def parse_u8(value, default: int) -> int:
+    if isinstance(value, str):
+        return int(value.strip(), 16) & 0xFF
+    return int(value if value is not None else default) & 0xFF
+
+
 class StationTCPBridge:
     HDR0 = 0x43
     HDR_RX_1 = 0x4F     # station -> robot
-    HDR_TX_1 = 0x4E     # robot -> station
     TAIL = 0xDA
 
     def __init__(self):
@@ -41,10 +59,14 @@ class StationTCPBridge:
         self.tcp_keepalive_idle_s = int(rospy.get_param('~tcp_keepalive_idle_s', 15))
         self.tcp_keepalive_intvl_s = int(rospy.get_param('~tcp_keepalive_intvl_s', 5))
         self.tcp_keepalive_cnt = int(rospy.get_param('~tcp_keepalive_cnt', 3))
-        self.heartbeat_enable = bool(rospy.get_param('~heartbeat_enable', True))
+        self.heartbeat_enable = bool(rospy.get_param('~heartbeat_enable', False))
         self.heartbeat_interval_s = float(rospy.get_param('~heartbeat_interval_s', 20.0))
         self.heartbeat_route = int(rospy.get_param('~heartbeat_route', 0x06)) & 0xFF
         self.heartbeat_value = int(rospy.get_param('~heartbeat_value', 0x00)) & 0xFF
+        self.tx_header = parse_byte_pair(rospy.get_param('~tx_header', '50 43'), [0x50, 0x43])
+        self.add_water_command_mode = str(rospy.get_param('~add_water_command_mode', 'combined')).strip().lower()
+        self.add_water_combined_mask = parse_u8(rospy.get_param('~add_water_combined_mask', '0x60'), 0x60)
+        self.add_detergent_combined_mask = parse_u8(rospy.get_param('~add_detergent_combined_mask', '0x40'), 0x40)
 
         # 发送增强
         self.tx_repeat = int(rospy.get_param('~tx_repeat', 1))  # 每条命令重复发 N 次（抗丢）
@@ -69,6 +91,7 @@ class StationTCPBridge:
         self.control_sub = rospy.Subscriber('/station/control', ControlStation, self._on_control, queue_size=20)
 
         self._status = StationStatus()
+        self._combined_mask = 0x00
         self._timer = rospy.Timer(rospy.Duration(0.05), self._tick)  # 20Hz
 
     # ---------------- connect / disconnect ----------------
@@ -124,7 +147,7 @@ class StationTCPBridge:
             rospy.logwarn_throttle(2.0, '[STATION] send skipped: not connected')
             return False
 
-        cmd_header = [0x43, 0x4E]
+        cmd_header = list(self.tx_header)
         cmd_length = [0x00, 0x00]
         cmd_check = [0x00]
         cmd_end = [0xDA]
@@ -174,6 +197,19 @@ class StationTCPBridge:
             )
 
     # ---------------- control mapping ----------------
+    def _send_combined_mask(self, mask: int):
+        mask = int(mask) & 0xFF
+        rospy.loginfo('[STATION] cmd: combined 0x4101 mask=0x%02X', mask)
+        self._data_send([0x41, 0x01], [0x00, mask])
+
+    def _update_combined_mask_bit(self, bit_mask: int, on: bool):
+        bit_mask = int(bit_mask) & 0xFF
+        if on:
+            self._combined_mask = (self._combined_mask | bit_mask) & 0xFF
+        else:
+            self._combined_mask = (self._combined_mask & (~bit_mask)) & 0xFF
+        self._send_combined_mask(self._combined_mask)
+
     def _on_control(self, msg: ControlStation):
         op = int(msg.operation) & 0xFF
         on = 0x01 if bool(msg.status) else 0x00
@@ -184,9 +220,23 @@ class StationTCPBridge:
             self._data_send([0x41, 0x02], [on])
             return
 
-        # 4100 通道：进水/排水/电缸/其他
-        # 和 clean_robot 对齐：进水使用 0x0B，排水 0x03
-        if op in (2, 11):         # 2: 加水中 / 11: 进水阀
+        # 新充电桩协议：
+        #   0x4100 [0x0A, on] 清洁液蠕动泵 IO10
+        #   0x4100 [0x0B, on] 清水进水电磁阀 IO11
+        #   0x4101 [0x00, mask] 组合控制，0x40=清洁液泵，0x20=进水阀，0x60=两者一起
+        if op == 2:               # 加水中：默认按现场文档走泵+阀一起控制
+            if self.add_water_command_mode in ('combined', 'combo', 'both'):
+                self._combined_mask = self.add_water_combined_mask if on else 0x00
+                self._send_combined_mask(self._combined_mask)
+            else:
+                self._data_send([0x41, 0x00], [0x0B, on])
+            return
+        if op == 4:               # 加洗涤剂中
+            self._update_combined_mask_bit(self.add_detergent_combined_mask, bool(on))
+            return
+        if op == 10:              # 清洁液蠕动泵 IO10
+            proto_op = 0x0A
+        elif op == 11:            # 清水进水电磁阀 IO11
             proto_op = 0x0B
         elif op == 3:             # 排水中
             proto_op = 0x03

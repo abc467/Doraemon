@@ -4,10 +4,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import signal
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+try:
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from shapely.validation import explain_validity
+
+    _HAS_SHAPELY = True
+except Exception:  # pragma: no cover - runtime packaging decides this
+    Polygon = None
+    unary_union = None
+    explain_validity = None
+    _HAS_SHAPELY = False
 
 from .types import BlockDebug, BlockPlan, PlanResult, PlannerParams, RobotSpec
 
@@ -18,6 +31,79 @@ class IsolatedPlanOutcome:
     crashed: bool = False
     timeout: bool = False
     message: str = ""
+
+
+def _validated_ring(value: Any, *, label: str) -> Tuple[Optional[List[Tuple[float, float]]], str]:
+    if not isinstance(value, (list, tuple)):
+        return None, "%s must be an array" % label
+    ring: List[Tuple[float, float]] = []
+    for index, point in enumerate(value):
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            return None, "%s[%d] must contain x/y" % (label, int(index))
+        try:
+            x = float(point[0])
+            y = float(point[1])
+        except (TypeError, ValueError, OverflowError):
+            return None, "%s[%d] has non-numeric x/y" % (label, int(index))
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return None, "%s[%d] has non-finite x/y" % (label, int(index))
+        if not ring or ring[-1] != (x, y):
+            ring.append((x, y))
+    if len(ring) >= 2 and ring[0] == ring[-1]:
+        ring = ring[:-1]
+    if len(set(ring)) < 3:
+        return None, "%s must contain at least 3 distinct points" % label
+    return ring, ""
+
+
+def _effective_regions_validation_error(regions: Any) -> str:
+    """Validate the exact payload before any native Fields2Cover call."""
+    if not _HAS_SHAPELY:
+        return "Shapely is unavailable; cannot validate effective regions"
+    if not isinstance(regions, (list, tuple)) or not regions:
+        return "effective_regions must contain at least one Polygon"
+
+    polygons = []
+    for region_index, region in enumerate(regions):
+        if not isinstance(region, dict):
+            return "effective_regions[%d] must be an object" % int(region_index)
+        outer, error = _validated_ring(
+            region.get("outer"),
+            label="effective_regions[%d].outer" % int(region_index),
+        )
+        if error:
+            return error
+        raw_holes = region.get("holes") or []
+        if not isinstance(raw_holes, (list, tuple)):
+            return "effective_regions[%d].holes must be an array" % int(region_index)
+        holes: List[List[Tuple[float, float]]] = []
+        for hole_index, raw_hole in enumerate(raw_holes):
+            hole, error = _validated_ring(
+                raw_hole,
+                label="effective_regions[%d].holes[%d]" % (int(region_index), int(hole_index)),
+            )
+            if error:
+                return error
+            holes.append(hole or [])
+        try:
+            polygon = Polygon(outer or [], holes)
+        except Exception as exc:
+            return "effective_regions[%d] cannot be constructed: %s" % (int(region_index), str(exc))
+        if polygon.is_empty or polygon.geom_type != "Polygon" or float(polygon.area) <= 1e-9:
+            return "effective_regions[%d] is empty or degenerate" % int(region_index)
+        if not polygon.is_valid:
+            reason = str(explain_validity(polygon) if explain_validity is not None else "invalid geometry")
+            return "effective_regions[%d] is invalid: %s" % (int(region_index), reason)
+        polygons.append(polygon)
+
+    try:
+        combined = unary_union(polygons)
+    except Exception as exc:
+        return "effective_regions union failed validation: %s" % str(exc)
+    if combined.is_empty or not combined.is_valid:
+        reason = str(explain_validity(combined) if explain_validity is not None else "invalid geometry")
+        return "effective_regions union is invalid: %s" % reason
+    return ""
 
 
 def _block_debug_to_dict(debug: Optional[BlockDebug]) -> Optional[Dict[str, Any]]:
@@ -117,6 +203,27 @@ def run_plan_coverage_isolated(
     debug: bool = False,
     timeout_s: float = 45.0,
 ) -> IsolatedPlanOutcome:
+    regions_to_validate: Sequence[Dict[str, Any]]
+    if effective_regions is None:
+        regions_to_validate = [{"outer": outer or [], "holes": holes or []}]
+    else:
+        regions_to_validate = effective_regions
+    validation_error = _effective_regions_validation_error(regions_to_validate)
+    if validation_error:
+        message = "native planner rejected invalid effective geometry: %s" % validation_error
+        return IsolatedPlanOutcome(
+            result=PlanResult(
+                ok=False,
+                error_code="INVALID_EFFECTIVE_REGION",
+                error_message=message,
+                frame_id=str(frame_id or "map"),
+                blocks=[],
+                exec_order=[],
+                total_length_m=0.0,
+            ),
+            message=message,
+        )
+
     payload = {
         "frame_id": str(frame_id or "map"),
         "outer": outer or [],

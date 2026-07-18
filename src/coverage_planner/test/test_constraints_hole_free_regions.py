@@ -6,6 +6,13 @@ import os
 import sys
 import unittest
 
+try:
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+except Exception:  # pragma: no cover - exercised only without test dependency
+    Polygon = None
+    unary_union = None
+
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PKG_DIR = os.path.dirname(THIS_DIR)
@@ -16,6 +23,7 @@ if SRC_DIR not in sys.path:
 
 from coverage_planner.constraints import (
     _HAS_SHAPELY,
+    _geometry_to_region_list,
     compile_map_constraints,
     compile_zone_constraints,
     filter_effective_regions_for_planner,
@@ -43,6 +51,75 @@ def _ring_bounds(points):
 
 @unittest.skipUnless(_HAS_SHAPELY, "Shapely is required for constraint compilation")
 class ConstraintHoleFreeRegionTest(unittest.TestCase):
+    def test_field_715_cross_boundary_keepout_stays_valid_after_quantization(self):
+        zone_outer = [
+            [-17.952219286719107, -1.323259016318092],
+            [39.23789631563458, 1.294598388014979],
+            [37.541556726363574, 38.35309403055115],
+            [-19.648558875990116, 35.735236626218075],
+        ]
+        no_go_outer = [
+            [-20.039, 19.675],
+            [-11.339, 20.074],
+            [-12.188, 38.633],
+            [-20.888, 38.235],
+        ]
+        map_constraints = compile_map_constraints(
+            map_id="field_715",
+            map_md5="field-md5",
+            constraint_version="field-constraints",
+            no_go_areas=[{"area_id": "cross_boundary", "polygon": no_go_outer, "enabled": True}],
+            virtual_walls=[],
+            default_no_go_buffer_m=0.30,
+            default_no_go_long_edge_normal_buffer_m=0.15,
+            default_no_go_short_edge_normal_buffer_m=0.40,
+            prec=3,
+        )
+
+        compiled = compile_zone_constraints(
+            zone_outer=zone_outer,
+            zone_holes=[],
+            map_constraints=map_constraints,
+            prec=3,
+        )
+
+        effective_polys = [
+            Polygon(region["outer"], region.get("holes") or [])
+            for region in compiled.effective_regions
+        ]
+        self.assertTrue(effective_polys)
+        self.assertTrue(all(poly.is_valid for poly in effective_polys), compiled.effective_regions)
+
+        # This rounded zone vertex was the extra backtracking point in the
+        # field payload. A full-part difference excludes it from the effective
+        # boundary; the clipped snapshot still records the actual keepout edge.
+        self.assertNotIn((-19.649, 35.735), compiled.effective_regions[0]["outer"])
+        self.assertIn((-19.649, 35.735), compiled.keepout_snapshot_rings[0])
+
+        zone_poly = Polygon(zone_outer)
+        keepout_polys = []
+        for area in map_constraints.no_go_polygons:
+            keepout_polys.extend(
+                Polygon(region["outer"], region.get("holes") or [])
+                for region in area.get("geometry") or []
+            )
+        expected = zone_poly.difference(unary_union(keepout_polys))
+        actual = unary_union(effective_polys)
+        self.assertAlmostEqual(actual.area, expected.area, places=1)
+
+        # Exercise the serializer repair independently of the full-part fix:
+        # this is the old clip-first geometry whose three-decimal ring became
+        # self-intersecting in the field.
+        legacy_clip_first = zone_poly.difference(zone_poly.intersection(unary_union(keepout_polys)))
+        repaired_regions = _geometry_to_region_list(legacy_clip_first, prec=3)
+        repaired_polys = [
+            Polygon(region["outer"], region.get("holes") or [])
+            for region in repaired_regions
+        ]
+        self.assertTrue(repaired_polys)
+        self.assertTrue(all(poly.is_valid for poly in repaired_polys), repaired_regions)
+        self.assertAlmostEqual(unary_union(repaired_polys).area, legacy_clip_first.area, places=1)
+
     def test_inner_no_go_preserves_primary_holes_and_builds_degraded_regions(self):
         zone_outer = [
             [-0.347, -5.903],

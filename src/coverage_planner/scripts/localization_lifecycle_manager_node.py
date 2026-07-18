@@ -16,6 +16,7 @@ from cleanrobot_app_msgs.srv import (
     SubmitSlamCommand as AppSubmitSlamCommand,
 )
 from geometry_msgs.msg import PoseStamped
+from diagnostic_msgs.msg import DiagnosticArray
 from nav_msgs.msg import OccupancyGrid
 from coverage_planner.manual_assist_pose import (
     DEFAULT_MANUAL_ASSIST_POSE_PARAM_NS,
@@ -47,6 +48,26 @@ def _map_id_from_md5(map_md5: str) -> str:
     return "map_%s" % value[:8]
 
 
+def _diagnostic_values(msg: DiagnosticArray, status_name: str) -> Optional[Dict[str, str]]:
+    """Return the exact machine-readable diagnostic payload, if present."""
+    expected = str(status_name or "").strip()
+    for status in list(getattr(msg, "status", []) or []):
+        if str(getattr(status, "name", "") or "").strip() != expected:
+            continue
+        return {
+            str(getattr(item, "key", "") or "").strip(): str(
+                getattr(item, "value", "") or ""
+            ).strip()
+            for item in list(getattr(status, "values", []) or [])
+            if str(getattr(item, "key", "") or "").strip()
+        }
+    return None
+
+
+def _diagnostic_bool(value: object) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 class LocalizationLifecycleManagerNode:
     def __init__(self):
         self.workspace_root = _workspace_root()
@@ -74,6 +95,9 @@ class LocalizationLifecycleManagerNode:
         ).strip()
         self.map_topic = str(rospy.get_param("~map_topic", "/map")).strip() or "/map"
         self.tracked_pose_topic = str(rospy.get_param("~tracked_pose_topic", "/tracked_pose")).strip() or "/tracked_pose"
+        self.localization_health_topic = str(
+            rospy.get_param("~localization_health_topic", "/cartographer/localization_health")
+        ).strip() or "/cartographer/localization_health"
         self.tf_parent_frame = str(rospy.get_param("~tf_parent_frame", "map")).strip() or "map"
         self.tf_child_frame = str(rospy.get_param("~tf_child_frame", "odom")).strip() or "odom"
         self.ready_timeout_s = max(10.0, float(rospy.get_param("~ready_timeout_s", 120.0)))
@@ -94,7 +118,13 @@ class LocalizationLifecycleManagerNode:
 
         self._plan_store = PlanStore(self.plan_db_path)
         self._ops = OperationsStore(self.ops_db_path)
+        # Restart requests remain serialized, but this lock must never be used
+        # by the health callback: a delegated restart can legitimately block
+        # for the full runtime job timeout.
         self._service_lock = threading.Lock()
+        self._localization_transition_lock = threading.Lock()
+        self._localization_transition_epoch = 0
+        self._last_localization_lost_episode = ""
         self._app_contract_report = self._prepare_app_contract_report()
 
         self._tracked_pose_ts = 0.0
@@ -106,6 +136,12 @@ class LocalizationLifecycleManagerNode:
 
         rospy.Subscriber(self.tracked_pose_topic, PoseStamped, self._on_tracked_pose, queue_size=20)
         rospy.Subscriber(self.map_topic, OccupancyGrid, self._on_map, queue_size=2)
+        rospy.Subscriber(
+            self.localization_health_topic,
+            DiagnosticArray,
+            self._on_localization_health,
+            queue_size=5,
+        )
         self._app_service = rospy.Service(self.app_service_name, AppRestartLocalization, self._handle_restart)
         publish_contract_param(rospy, self.app_contract_param_ns, self._app_contract_report, enabled=True)
 
@@ -180,6 +216,140 @@ class LocalizationLifecycleManagerNode:
             self._map_md5 = str(compute_occupancy_grid_md5(msg) or "").strip()
         except Exception:
             self._map_md5 = ""
+
+    def _on_localization_health(self, msg: DiagnosticArray):
+        values = _diagnostic_values(msg, "cartographer/localization_health")
+        if values is None:
+            return
+        if not _diagnostic_bool(values.get("localization_lost_confirmed")):
+            # A healthy sample rearms episode handling. Cartographer's episode
+            # counter may restart from one after an explicit process restart.
+            with self._localization_transition_lock:
+                self._last_localization_lost_episode = ""
+            return
+
+        episode = str(values.get("localization_lost_episode") or values.get("episode") or "").strip()
+        if not episode:
+            rospy.logwarn_throttle(
+                10.0,
+                "[localization_lifecycle] ignored confirmed-lost diagnostic without episode",
+            )
+            return
+        reason = str(
+            values.get("localization_lost_reason")
+            or values.get("reason")
+            or "cartographer confirmed localization lost"
+        ).strip()
+        committed_epoch = 0
+
+        # This is deliberately a short critical section. Delegated explicit
+        # localization may take minutes; a confirmed loss must still reach the
+        # task safety path immediately. The epoch lets restart completion detect
+        # that a newer loss was committed while its RPC was in flight.
+        with self._localization_transition_lock:
+            mode = str(rospy.get_param(self._runtime_param("current_mode"), "") or "").strip().lower()
+            valid = bool(rospy.get_param(self._runtime_param("localization_valid"), False))
+            state = str(
+                rospy.get_param(self._runtime_param("localization_state"), "") or ""
+            ).strip().lower()
+            runtime_episode = str(
+                rospy.get_param(self._runtime_param("localization_lost_episode"), "") or ""
+            ).strip()
+            cached_episode = str(self._last_localization_lost_episode or "")
+            safe_tuple_committed = bool(
+                state == "manual_assist_required"
+                and not valid
+                and runtime_episode == episode
+            )
+            if mode != "localization":
+                return
+            if safe_tuple_committed and cached_episode == episode:
+                return
+
+            message_stamp = 0.0
+            try:
+                message_stamp = float(msg.header.stamp.to_sec())
+            except Exception:
+                message_stamp = 0.0
+            localization_stamp = float(
+                rospy.get_param(self._runtime_param("localization_stamp"), 0.0) or 0.0
+            )
+            # A partially committed fail-closed tuple must always be repaired,
+            # even when its first write advanced localization_stamp. For a
+            # fully localized state, retain the stale-message guard so an old
+            # queued diagnostic cannot undo a newer explicit localization.
+            partial_fail_closed_tuple = bool(
+                state == "manual_assist_required"
+                or not valid
+                or runtime_episode == episode
+                or cached_episode == episode
+            )
+            if (
+                not partial_fail_closed_tuple
+                and message_stamp > 0.0
+                and localization_stamp > 0.0
+                and message_stamp <= localization_stamp
+            ):
+                return
+
+            now = float(rospy.Time.now().to_sec())
+            # Write the marker first and validity before the state. Every
+            # intermediate state is repairable by the next diagnostic, and the
+            # final state cannot be manual_assist_required with valid=true.
+            rospy.set_param(self._runtime_param("localization_lost_episode"), episode)
+            rospy.set_param(self._runtime_param("localization_lost_reason"), reason)
+            rospy.set_param(self._runtime_param("localization_lost_stamp"), now)
+            rospy.set_param(self._runtime_param("localization_valid"), False)
+            rospy.set_param(self._runtime_param("localization_state"), "manual_assist_required")
+            rospy.set_param(self._runtime_param("localization_stamp"), now)
+            self._last_localization_lost_episode = episode
+            self._localization_transition_epoch += 1
+            committed_epoch = int(self._localization_transition_epoch)
+            # Omitting map_name/map_revision_id deliberately preserves the
+            # selected map identity in the operations store.
+
+        # Database I/O is intentionally outside the transition lock. ROS
+        # parameters and the public SlamState projection are the immediate
+        # safety authority; the operations store is the durable mirror.
+        self._update_runtime_state(
+            robot_id=self.robot_id,
+            localization_state="manual_assist_required",
+            localization_valid=False,
+        )
+
+        # The durable mirror is deliberately updated outside the transition
+        # lock. If an explicit localization completed while that database I/O
+        # was in flight, repair a possible late manual-assist write from the
+        # authoritative runtime tuple instead of leaving the DB stale.
+        repair_localized_mirror = False
+        with self._localization_transition_lock:
+            if int(self._localization_transition_epoch) != committed_epoch:
+                current_state = str(
+                    rospy.get_param(
+                        self._runtime_param("localization_state"), ""
+                    )
+                    or ""
+                ).strip().lower()
+                current_valid = bool(
+                    rospy.get_param(
+                        self._runtime_param("localization_valid"), False
+                    )
+                )
+                repair_localized_mirror = bool(
+                    current_state == "localized" and current_valid
+                )
+        if repair_localized_mirror:
+            self._update_runtime_state(
+                robot_id=self.robot_id,
+                localization_state="localized",
+                localization_valid=True,
+            )
+
+        rospy.logerr(
+            "[localization_lifecycle] localization lost confirmed episode=%s reason=%s; manual assist required",
+            episode,
+            reason,
+        )
 
     def _update_runtime_state(
         self,
@@ -780,12 +950,51 @@ class LocalizationLifecycleManagerNode:
         robot_id = str(req.robot_id or self.robot_id).strip() or self.robot_id
         map_name = str(req.map_name or "").strip()
         map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
+        with self._localization_transition_lock:
+            start_epoch = int(self._localization_transition_epoch)
         with self._service_lock:
-            return self._delegate_restart_to_runtime_manager(
+            response = self._delegate_restart_to_runtime_manager(
                 robot_id=robot_id,
                 map_name=map_name,
                 map_revision_id=map_revision_id,
             )
+
+        if not bool(getattr(response, "success", False)):
+            return response
+
+        # Compare-and-check after the long RPC. If a newer confirmed loss won
+        # and the runtime still exposes the fail-closed tuple, do not report a
+        # stale successful localization to callers. Conversely, a genuinely
+        # successful explicit localization is allowed to clear the in-memory
+        # episode latch so a later fresh diagnostic can form a new transition.
+        with self._localization_transition_lock:
+            current_epoch = int(self._localization_transition_epoch)
+            state = str(
+                rospy.get_param(self._runtime_param("localization_state"), "") or ""
+            ).strip().lower()
+            valid = bool(rospy.get_param(self._runtime_param("localization_valid"), False))
+            newer_loss_still_active = bool(
+                current_epoch != start_epoch
+                and (state == "manual_assist_required" or not valid)
+            )
+            if not newer_loss_still_active and state == "localized" and valid:
+                self._last_localization_lost_episode = ""
+                self._localization_transition_epoch += 1
+
+        if newer_loss_still_active:
+            return self._restart_response(
+                success=False,
+                message=(
+                    "explicit localization completed, but a newer confirmed "
+                    "localization loss is active"
+                ),
+                map_name=str(getattr(response, "map_name", "") or map_name or ""),
+                map_revision_id=str(
+                    getattr(response, "map_revision_id", "") or map_revision_id or ""
+                ).strip(),
+                localization_state="manual_assist_required",
+            )
+        return response
 
 def main():
     rospy.init_node("localization_lifecycle_manager", anonymous=False)

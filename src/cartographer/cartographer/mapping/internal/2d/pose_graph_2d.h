@@ -39,6 +39,7 @@
 #include "cartographer/common/thread_pool.h"
 #include "cartographer/common/time.h"
 #include "cartographer/mapping/2d/submap_2d.h"
+#include "cartographer/mapping/internal/2d/map_scan_distance_field.h"
 #include "cartographer/mapping/internal/constraints/constraint_builder_2d.h"
 #include "cartographer/mapping/internal/optimization/optimization_problem_2d.h"
 #include "cartographer/mapping/internal/pose_graph_data.h"
@@ -78,10 +79,15 @@ class PoseGraph2D : public PoseGraph {
   PoseGraph2D(const PoseGraph2D&) = delete;
   PoseGraph2D& operator=(const PoseGraph2D&) = delete;
 
-  void DetectAndDescribe(const NodeId& node_id);
+  bool DetectAndDescribe(const NodeId& node_id);
 
   bool PushNodeForDetect(const NodeId& node_id);
-  void ComputeFlirtFeaturesForAllNodes() override;
+  bool ComputeFlirtFeaturesForAllNodes() override;
+  void SetFlirtFeatureBackfillState(
+      FlirtFeatureBackfillState state) override;
+  FlirtFeatureBackfillState GetFlirtFeatureBackfillState() const override;
+  void LockFlirtFeatureSerialization() override;
+  void UnlockFlirtFeatureSerialization() override;
 
   // Adds a new node with 'constant_data'. Its 'constant_data->local_pose' was
   // determined by scan matching against 'insertion_submaps.front()' and the
@@ -226,39 +232,11 @@ class PoseGraph2D : public PoseGraph {
 
   int ExecuteGlobalRelocationForNode(const NodeId& ref_node_id);
 
-  struct AutomaticGlobalRelocationRequest {
-    NodeId node_id{-1, -1};
-    std::shared_ptr<const TrajectoryNode::Data> constant_data;
-    transform::Rigid3d global_pose;
-    int last_cross_trajectory_id = -1;
-    int last_cross_node_index = -1;
-    std::string trigger_reason;
-  };
-
-  struct AutomaticRelocationCandidate {
-    NodeId node_id;
-    SubmapId submap_id;
-    std::shared_ptr<const TrajectoryNode::Data> constant_data;
-    std::shared_ptr<const Submap> submap;
-    transform::Rigid2d initial_trajectory_pose;
-  };
-
-  void DetectAndDescribeData(TrajectoryNode::Data* constant_data,
-                             const transform::Rigid3d& global_pose);
-  std::vector<InterestPoint*> BuildFlirtFeatures(
-      const TrajectoryNode::Data* constant_data,
-      const transform::Rigid3d& feature_pose);
-  void EnqueueAutomaticGlobalRelocation(
-      AutomaticGlobalRelocationRequest request);
-  void ProcessAutomaticGlobalRelocationQueue();
-  void StopAutomaticGlobalRelocationWorker();
-  int ExecuteAutomaticGlobalRelocationForNode(
-      const AutomaticGlobalRelocationRequest& request,
-      std::string* failure_reason);
-  bool BuildAutomaticGlobalRelocationSnapshot(
-      const NodeId& ref_node_id,
-      std::vector<AutomaticRelocationCandidate>* candidates)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+  bool DetectAndDescribeData(const TrajectoryNode::Data* constant_data);
+  std::shared_ptr<const flirt::FeatureSet> BuildFlirtFeatures(
+      const TrajectoryNode::Data* constant_data);
+  std::shared_ptr<const flirt::FeatureSet> BuildFlirtFeaturesUnderLock(
+      const TrajectoryNode::Data* constant_data);
 
   void ComputeConstraintForGlobal(const NodeId& node_id,
                                   const SubmapId& submap_id);
@@ -305,11 +283,11 @@ class PoseGraph2D : public PoseGraph {
   void UpdateTrajectoryConnectivity(const Constraint& constraint)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  bool ShouldRunAutomaticGlobalRelocation(const NodeId& node_id,
-                                          std::size_t queued_work_items,
-                                          std::string* trigger_reason)
+  void MaybeDeclareLocalizationLost(const NodeId& node_id,
+                                    std::size_t queued_work_items)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  void UpdateAutomaticGlobalRelocationState(const Constraint& constraint)
+  void UpdateLocalizationRecoveryFromAcceptedConstraint(
+      const Constraint& constraint)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   bool IsTrajectoryActive(int trajectory_id) const
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
@@ -347,13 +325,6 @@ class PoseGraph2D : public PoseGraph {
       const constraints::ConstraintBuilder2D::Result& result)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  struct CurrentPoseScanMapSubmap {
-    SubmapId id;
-    std::shared_ptr<const Submap2D> submap;
-    transform::Rigid2d global_pose = transform::Rigid2d::Identity();
-    double distance = 0.0;
-  };
-
   struct CurrentPoseScanMapQuality {
     double hit20 = -1.0;
     double mean_distance = -1.0;
@@ -362,17 +333,7 @@ class PoseGraph2D : public PoseGraph {
     int checked_submaps = 0;
   };
 
-  struct MapScanDistanceField {
-    bool valid = false;
-    double resolution = 0.05;
-    double origin_x = 0.0;
-    double origin_y = 0.0;
-    int width = 0;
-    int height = 0;
-    int frozen_finished_submap_count = 0;
-    std::vector<float> distance_m;
-    std::vector<uint8_t> known;
-  };
+  using MapScanDistanceField = map_scan_distance_field::Field;
 
   struct MapScanDistanceFieldSubmapSnapshot {
     std::shared_ptr<const Submap2D> submap;
@@ -392,16 +353,10 @@ class PoseGraph2D : public PoseGraph {
     int large_correction_consistency_reject_count_since_accept = 0;
     int recovery_full_search_attempts_since_accept = 0;
     int last_recovery_full_search_node_index = -1;
-    int auto_relocation_failures_since_accept = 0;
-    int auto_relocation_suppressed_until_node_index = -1;
     std::string recovery_state = "OK";
     std::string recovery_reason;
   };
 
-  CurrentPoseScanMapQuality ComputeCurrentPoseScanMapQuality(
-      const TrajectoryNode::Data& constant_data,
-      const transform::Rigid2d& global_pose,
-      const std::vector<CurrentPoseScanMapSubmap>& submaps) const;
   std::shared_ptr<const MapScanDistanceField>
   GetMapScanDistanceFieldIfReadyOrStartAsync()
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
@@ -411,13 +366,14 @@ class PoseGraph2D : public PoseGraph {
   std::shared_ptr<const MapScanDistanceField> BuildMapScanDistanceField(
       const std::vector<MapScanDistanceFieldSubmapSnapshot>& submaps) const;
   std::shared_ptr<const MapScanDistanceField> LoadMapScanDistanceFieldCache(
-      const std::string& cache_filename, const std::string& cache_key) const;
+      const std::string& cache_filename, const std::string& cache_key,
+      std::string* source) const;
   bool SaveMapScanDistanceFieldCache(
       const std::string& cache_filename, const std::string& cache_key,
       const MapScanDistanceField& field) const;
   void MaybeCollectFinishedMapScanDistanceFieldTask()
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
-  void InvalidateMapScanDistanceField()
+  void InvalidateMapScanDistanceField(const std::string& reason)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   CurrentPoseScanMapQuality ComputeMapScanQuality(
       const TrajectoryNode::Data& constant_data,
@@ -440,21 +396,22 @@ class PoseGraph2D : public PoseGraph {
       LocalizationRecoveryRuntime* recovery, std::string* reason)
       EXCLUSIVE_LOCKS_REQUIRED(mutex_);
   std::vector<SubmapId> SelectActiveFrozenSubmapsForSearch(
+      const NodeId& node_id,
       const std::vector<std::pair<double, SubmapId>>& candidates,
-      bool recovery_full_search, std::size_t queued_work_items_at_start) const;
+      bool local_search_window, bool recovery_full_search,
+      std::size_t queued_work_items_at_start)
+      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
-  volatile bool working = false;
+  std::atomic<bool> working{false};
   void process_queue_for_detect();
   std::thread th_process_flirt;
 
   std::mutex detecting_lock_;
+  std::mutex flirt_feature_serialization_lock_;
   std::mutex queue_for_detect_lock_;
   std::deque<NodeId> queue_for_detect_;
-  std::mutex automatic_relocation_queue_lock_;
-  std::condition_variable automatic_relocation_queue_cv_;
-  bool automatic_relocation_worker_running_ = false;
-  std::deque<AutomaticGlobalRelocationRequest> automatic_relocation_queue_;
-  std::thread automatic_relocation_thread_;
+  std::atomic<FlirtFeatureBackfillState> flirt_feature_backfill_state_{
+      FlirtFeatureBackfillState::kReady};
   const proto::PoseGraphOptions options_;
   GlobalSlamOptimizationCallback global_slam_optimization_callback_;
   mutable absl::Mutex mutex_;
@@ -475,8 +432,10 @@ class PoseGraph2D : public PoseGraph {
 
   int last_active_to_frozen_constraint_trajectory_id_ GUARDED_BY(mutex_) = -1;
   int last_active_to_frozen_constraint_node_index_ GUARDED_BY(mutex_) = -1;
-  int last_automatic_global_relocation_trajectory_id_ GUARDED_BY(mutex_) = -1;
-  int last_automatic_global_relocation_node_index_ GUARDED_BY(mutex_) = -1;
+  std::map<int, std::size_t> active_frozen_global_search_cursor_
+      GUARDED_BY(mutex_);
+  std::map<int, int> last_active_frozen_global_search_node_index_
+      GUARDED_BY(mutex_);
   std::map<int, std::deque<ActiveFrozenCorrectionObservation>>
       active_frozen_consistency_windows_ GUARDED_BY(mutex_);
   std::map<int, LocalizationRecoveryRuntime> localization_recovery_
@@ -486,7 +445,11 @@ class PoseGraph2D : public PoseGraph {
   std::string map_scan_distance_field_cache_filename_ GUARDED_BY(mutex_);
   std::string map_scan_distance_field_cache_key_ GUARDED_BY(mutex_);
   int map_scan_distance_field_generation_ GUARDED_BY(mutex_) = 0;
+  std::uint64_t map_scan_distance_field_build_token_ GUARDED_BY(mutex_) = 0;
+  int map_scan_distance_field_failed_generation_ GUARDED_BY(mutex_) = -1;
   bool map_scan_distance_field_build_in_progress_ GUARDED_BY(mutex_) = false;
+  bool map_scan_distance_field_configuration_in_progress_
+      GUARDED_BY(mutex_) = false;
   std::future<void> map_scan_distance_field_future_ GUARDED_BY(mutex_);
 
   // Current optimization problem.

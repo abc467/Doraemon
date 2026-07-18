@@ -17,7 +17,6 @@
 #include "cartographer/mapping/internal/2d/pose_graph_2d.h"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -39,6 +38,7 @@
 #include "Eigen/Eigenvalues"
 #include "absl/memory/memory.h"
 #include "cartographer/common/math.h"
+#include "cartographer/mapping/internal/2d/flirt_relocation.h"
 #include "cartographer/mapping/internal/2d/overlapping_submaps_trimmer_2d.h"
 #include "cartographer/mapping/localization_health.h"
 #include "cartographer/mapping/proto/pose_graph/constraint_builder_options.pb.h"
@@ -61,17 +61,14 @@ namespace cartographer
         static auto *kFrozenSubmapsMetric = metrics::Gauge::Null();
         static auto *kDeletedSubmapsMetric = metrics::Gauge::Null();
 
-        constexpr int kAutoRelocationCooldownNodeGap = 60;
-        constexpr int kAutoRelocationMaxFailuresPerEpisode = 3;
-        constexpr int kAutoRelocationSuppressionNodeGap = 300;
-        constexpr double kAutoRelocationMinScore = 0.68;
-        constexpr int kAutoRelocationConsistentHits = 2;
-        constexpr double kAutoRelocationMinFlirtCandidateScore = 0.12;
-        constexpr double kAutoRelocationMinFlirtScoreMargin = 0.05;
         constexpr int kStableActiveFrozenConnectionNodeGap = 40;
-        constexpr size_t kMaxStableActiveFrozenSubmapsPerNode = 24;
-        constexpr size_t kMaxSoftBackloggedActiveFrozenSubmapsPerNode = 4;
-        constexpr size_t kMaxHardBackloggedActiveFrozenSubmapsPerNode = 2;
+        constexpr size_t kMaxStableActiveFrozenSubmapsPerNode = 8;
+        constexpr size_t kMaxDisconnectedActiveFrozenSubmapsPerNode = 8;
+        constexpr size_t kMaxRecoveryActiveFrozenSubmapsPerNode = 8;
+        constexpr size_t kMaxSoftBackloggedActiveFrozenSubmapsPerNode = 2;
+        constexpr size_t kMaxMediumBackloggedActiveFrozenSubmapsPerNode = 1;
+        constexpr int kActiveFrozenGlobalSearchNodeGap = 10;
+        constexpr int kBackloggedActiveFrozenGlobalSearchNodeGap = 30;
         constexpr size_t kWorkQueueConstraintSoftBacklogThreshold = 5000;
         constexpr size_t kWorkQueueSensorMediumBacklogThreshold = 10000;
         constexpr size_t kWorkQueueDropSensorDataThreshold = 20000;
@@ -112,7 +109,6 @@ namespace cartographer
         constexpr int kMapScanHealthOkMaxSampledPoints = 128;
         constexpr int kMapScanHealthRecoveryMaxSampledPoints = 256;
         constexpr int kCurrentPoseScanMapMaxSampledPoints = 256;
-        constexpr size_t kCurrentPoseScanMapCheckedSubmaps = 8;
         constexpr double kCurrentPoseScanMapHitRadiusMeters = 0.20;
         constexpr double kCurrentPoseScanMapSearchRadiusMeters = 1.00;
         constexpr double kCurrentPoseScanMapOccupiedProbabilityThreshold = 0.55;
@@ -134,27 +130,6 @@ namespace cartographer
         constexpr double kCandidateFullMapMinKnownRatio = 0.75;
         constexpr double kCandidateFullMapMinHit20Improvement = 0.10;
         constexpr double kCandidateFullMapMinDistanceImprovement = 0.08;
-        constexpr char kMapScanDistanceFieldCacheMagic[] =
-            "DORAMON_MAP_SCAN_DF_V1";
-        constexpr int kMapScanDistanceFieldCacheVersion = 1;
-        constexpr int kMapScanDistanceFieldCacheDistanceScale = 1000;
-
-        struct ScopedInterestPoints
-        {
-            std::vector<InterestPoint *> points;
-
-            ~ScopedInterestPoints()
-            {
-                for (InterestPoint *point : points)
-                {
-                    delete point;
-                }
-            }
-
-            ScopedInterestPoints(const ScopedInterestPoints &) = delete;
-            ScopedInterestPoints &operator=(const ScopedInterestPoints &) = delete;
-            ScopedInterestPoints() = default;
-        };
 
         size_t HighRateSensorKeepEveryN(const size_t queue_size)
         {
@@ -202,19 +177,14 @@ namespace cartographer
             }
             if (flirt::use_flirt)
             {
-                this->working = true;
+                this->working.store(true, std::memory_order_release);
                 this->th_process_flirt =
                     std::thread(&PoseGraph2D::process_queue_for_detect, this);
-                this->automatic_relocation_worker_running_ = true;
-                this->automatic_relocation_thread_ =
-                    std::thread(&PoseGraph2D::ProcessAutomaticGlobalRelocationQueue,
-                                this);
             }
         }
 
         PoseGraph2D::~PoseGraph2D()
         {
-            StopAutomaticGlobalRelocationWorker();
             WaitForAllComputations();
             std::future<void> map_scan_distance_field_future;
             {
@@ -226,7 +196,7 @@ namespace cartographer
             {
                 map_scan_distance_field_future.wait();
             }
-            this->working = false;
+            this->working.store(false, std::memory_order_release);
             if (this->th_process_flirt.joinable())
             {
                 this->th_process_flirt.join();
@@ -408,7 +378,7 @@ namespace cartographer
         // 处理兴趣点检测的进程
         void PoseGraph2D::process_queue_for_detect()
         {
-            while (working)
+            while (working.load(std::memory_order_acquire))
             {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
@@ -449,59 +419,61 @@ namespace cartographer
             return flag;
         }
 
-        void PoseGraph2D::DetectAndDescribeData(
-            TrajectoryNode::Data *constant_data,
-            const transform::Rigid3d &global_pose)
+        bool PoseGraph2D::DetectAndDescribeData(
+            const TrajectoryNode::Data *constant_data)
         {
             if (constant_data == nullptr)
             {
-                return;
+                return false;
+            }
+            if (constant_data->GetFlirtFeatures() != nullptr)
+            {
+                return true;
             }
 
-            // 不能仅仅依靠size来判读是否完成
+            // Serialize detector/describer access and re-check after acquiring
+            // the lock. The background detector and synchronous PBStream
+            // backfill can otherwise both compute and overwrite the same node.
             std::lock_guard<std::mutex> detect_lock(detecting_lock_);
-            if (constant_data->interest_points.size() > 0)
+            auto features = constant_data->GetFlirtFeatures();
+            if (features != nullptr)
             {
-                return;
+                return true;
             }
-
-            std::vector<double> phi;
-            std::vector<double> rho;
-            for (auto &&p : constant_data->filtered_gravity_aligned_point_cloud)
+            features = BuildFlirtFeaturesUnderLock(constant_data);
+            if (features == nullptr)
             {
-                double x = p.position.x();
-                double y = p.position.y();
-                double _rho = std::sqrt(x * x + y * y);
-                double _phi = std::atan2(y, x);
-                rho.emplace_back(_rho);
-                phi.emplace_back(_phi);
+                return false;
             }
-
-            LaserReading scan(phi, rho);
-            double robot_x = global_pose.translation().x();
-            double robot_y = global_pose.translation().y();
-            double robot_theta = 0;
-            scan.setLaserPose({robot_x, robot_y, robot_theta});
-
-            flirt::detect(scan, constant_data->interest_points);
-            for (auto &&i : constant_data->interest_points)
-            {
-                i->setDescriptor(flirt::describe(*i, scan));
-            }
-            LOG(WARNING) << "Finish detect and describe";
+            constant_data->SetFlirtFeatures(features);
+            LOG(INFO) << "[FLIRT]Finished local-frame detect and describe, "
+                      << "interest_points="
+                      << features->size();
+            return true;
         }
 
-        std::vector<InterestPoint *> PoseGraph2D::BuildFlirtFeatures(
-            const TrajectoryNode::Data *constant_data,
-            const transform::Rigid3d &feature_pose)
+        std::shared_ptr<const flirt::FeatureSet>
+        PoseGraph2D::BuildFlirtFeatures(
+            const TrajectoryNode::Data *constant_data)
         {
-            std::vector<InterestPoint *> interest_points;
             if (constant_data == nullptr)
             {
-                return interest_points;
+                return nullptr;
             }
 
             std::lock_guard<std::mutex> detect_lock(detecting_lock_);
+            return BuildFlirtFeaturesUnderLock(constant_data);
+        }
+
+        std::shared_ptr<const flirt::FeatureSet>
+        PoseGraph2D::BuildFlirtFeaturesUnderLock(
+            const TrajectoryNode::Data *constant_data)
+        {
+            if (constant_data == nullptr)
+            {
+                return nullptr;
+            }
+
             std::vector<double> phi;
             std::vector<double> rho;
             phi.reserve(constant_data->filtered_gravity_aligned_point_cloud.size());
@@ -515,44 +487,38 @@ namespace cartographer
             }
 
             LaserReading scan(phi, rho);
-            scan.setLaserPose({feature_pose.translation().x(),
-                               feature_pose.translation().y(), 0.0});
-            flirt::detect(scan, interest_points);
-            for (auto &&point : interest_points)
-            {
-                point->setDescriptor(flirt::describe(*point, scan));
-            }
-            return interest_points;
+            scan.setLaserPose({0.0, 0.0, 0.0});
+            return flirt::BuildFeatureSet(scan);
         }
 
-        void PoseGraph2D::DetectAndDescribe(const NodeId &node_id)
+        bool PoseGraph2D::DetectAndDescribe(const NodeId &node_id)
         {
             std::shared_ptr<const TrajectoryNode::Data> constant_data;
-            transform::Rigid3d global_pose;
             {
                 absl::MutexLock locker(&mutex_);
                 auto node = this->data_.trajectory_nodes.find(node_id);
                 if (node == this->data_.trajectory_nodes.end())
                 {
-                    return;
+                    return false;
                 }
                 constant_data = node->data.constant_data;
-                global_pose = node->data.global_pose;
             }
 
-            DetectAndDescribeData(
-                const_cast<TrajectoryNode::Data *>(constant_data.get()),
-                global_pose);
+            return DetectAndDescribeData(constant_data.get());
         }
 
-        void PoseGraph2D::ComputeFlirtFeaturesForAllNodes()
+        bool PoseGraph2D::ComputeFlirtFeaturesForAllNodes()
         {
             if (!flirt::use_flirt.load())
             {
-                return;
+                // A non-FLIRT configuration has no feature migration contract;
+                // treat this as a successful no-op so ordinary 2D and 3D
+                // PBStream workflows remain unchanged.
+                return true;
             }
 
-            std::vector<NodeId> nodes_to_detect;
+            std::vector<std::shared_ptr<const TrajectoryNode::Data>>
+                nodes_to_detect;
             {
                 absl::MutexLock locker(&mutex_);
                 nodes_to_detect.reserve(data_.trajectory_nodes.size());
@@ -562,11 +528,13 @@ namespace cartographer
                     {
                         continue;
                     }
-                    if (!node_id_data.data.constant_data->interest_points.empty())
+                    if (node_id_data.data.constant_data->GetFlirtFeatures() !=
+                        nullptr)
                     {
                         continue;
                     }
-                    nodes_to_detect.push_back(node_id_data.id);
+                    nodes_to_detect.push_back(
+                        node_id_data.data.constant_data);
                 }
             }
 
@@ -574,17 +542,49 @@ namespace cartographer
             {
                 LOG(WARNING) << "[FLIRT]Backfill skipped, all trajectory nodes "
                                 "already have interest points.";
-                return;
+                return true;
             }
 
             LOG(WARNING) << "[FLIRT]Backfill start, missing_nodes="
                          << nodes_to_detect.size();
-            for (const NodeId &node_id : nodes_to_detect)
+            std::size_t populated_nodes = 0;
+            for (const auto &constant_data : nodes_to_detect)
             {
-                DetectAndDescribe(node_id);
+                if (!DetectAndDescribeData(constant_data.get()))
+                {
+                    LOG(ERROR) << "[FLIRT]Backfill failed after populated_nodes="
+                               << populated_nodes;
+                    return false;
+                }
+                ++populated_nodes;
             }
             LOG(WARNING) << "[FLIRT]Backfill finished, processed_nodes="
-                         << nodes_to_detect.size();
+                         << populated_nodes;
+            return true;
+        }
+
+        void PoseGraph2D::SetFlirtFeatureBackfillState(
+            const FlirtFeatureBackfillState state)
+        {
+            flirt_feature_backfill_state_.store(state,
+                                                std::memory_order_release);
+        }
+
+        PoseGraph::FlirtFeatureBackfillState
+        PoseGraph2D::GetFlirtFeatureBackfillState() const
+        {
+            return flirt_feature_backfill_state_.load(
+                std::memory_order_acquire);
+        }
+
+        void PoseGraph2D::LockFlirtFeatureSerialization()
+        {
+            flirt_feature_serialization_lock_.lock();
+        }
+
+        void PoseGraph2D::UnlockFlirtFeatureSerialization()
+        {
+            flirt_feature_serialization_lock_.unlock();
         }
 
         NodeId PoseGraph2D::AppendNode(
@@ -633,30 +633,22 @@ namespace cartographer
             const int trajectory_id,
             const std::vector<std::shared_ptr<const Submap2D>> &insertion_submaps)
         {
+            // A PBStream save holds this independent mutex across feature
+            // backfill and serialization. This keeps the serialized node set
+            // stable without holding the PoseGraph data mutex during I/O.
+            std::lock_guard<std::mutex> serialization_lock(
+                flirt_feature_serialization_lock_);
             const transform::Rigid3d optimized_pose(
                 GetLocalToGlobalTransform(trajectory_id) * constant_data->local_pose);
 
             const NodeId node_id = AppendNode(constant_data, trajectory_id,
                                               insertion_submaps, optimized_pose);
 
-            bool run_automatic_global_relocation = false;
-            int automatic_relocation_last_cross_trajectory_id = -1;
-            int automatic_relocation_last_cross_node_index = -1;
-            std::string automatic_relocation_trigger_reason;
-            const size_t queued_work_items_for_relocation = GetWorkQueueSize();
+            const size_t queued_work_items_for_recovery = GetWorkQueueSize();
             {
                 absl::MutexLock locker(&mutex_);
-                run_automatic_global_relocation =
-                    ShouldRunAutomaticGlobalRelocation(
-                        node_id, queued_work_items_for_relocation,
-                        &automatic_relocation_trigger_reason);
-                if (run_automatic_global_relocation)
-                {
-                    automatic_relocation_last_cross_trajectory_id =
-                        last_active_to_frozen_constraint_trajectory_id_;
-                    automatic_relocation_last_cross_node_index =
-                        last_active_to_frozen_constraint_node_index_;
-                }
+                MaybeDeclareLocalizationLost(
+                    node_id, queued_work_items_for_recovery);
             }
 
             const bool newly_finished_submap =
@@ -686,8 +678,60 @@ namespace cartographer
                     return node_id;
                 }
                 flirt::cv_flirt_busy.notify_all();
-                flirt::flirt_return_code = ExecuteGlobalRelocationForNode(node_id);
+                if (GetFlirtFeatureBackfillState() !=
+                    FlirtFeatureBackfillState::kReady)
+                {
+                    LOG(ERROR)
+                        << "[GlobalRelocation]Reject explicit request because "
+                           "FLIRT feature backfill is not ready, node="
+                        << node_id;
+                    flirt::flirt_return_code.store(
+                        flirt::kRelocationFeaturesNotReady);
+                }
+                else
+                {
+                    flirt::flirt_return_code.store(
+                        ExecuteGlobalRelocationForNode(node_id));
+                }
                 flirt::flirt_working.store(false);
+
+                if (flirt::flirt_return_code.load() ==
+                    flirt::kRelocationSuccess)
+                {
+                    absl::MutexLock locker(&mutex_);
+                    LocalizationRecoveryRuntime &recovery =
+                        localization_recovery_[node_id.trajectory_id];
+                    recovery.recovery_full_search_attempts_since_accept = 0;
+                    recovery.last_recovery_full_search_node_index = -1;
+                    recovery.recovery_state = "DEGRADED";
+                    recovery.recovery_reason =
+                        "explicit_relocation_waiting_constraint";
+                    const auto another_lost_trajectory =
+                        std::find_if(
+                            localization_recovery_.begin(),
+                            localization_recovery_.end(),
+                            [trajectory_id = node_id.trajectory_id](
+                                const std::pair<
+                                    const int,
+                                    LocalizationRecoveryRuntime> &entry)
+                            {
+                                return entry.first != trajectory_id &&
+                                       entry.second.recovery_state ==
+                                           "LOST_CONFIRMED";
+                            });
+                    if (another_lost_trajectory ==
+                        localization_recovery_.end())
+                    {
+                        RecordLocalizationHealthExplicitRelocationSuccess(
+                            recovery.recovery_reason);
+                    }
+                    else
+                    {
+                        RecordLocalizationHealthRecoveryState(
+                            another_lost_trajectory->second.recovery_state,
+                            another_lost_trajectory->second.recovery_reason);
+                    }
+                }
 
                 flirt::need_flirt.store(false);
                 flirt::cv_flirt_busy.notify_all();
@@ -698,76 +742,11 @@ namespace cartographer
                 return node_id;
             }
 
-            // Keep normal localization constraints ahead of automatic relocation.
+            // Runtime background FLIRT relocation is intentionally disabled.
+            // Continue normal active-to-frozen localization constraints only.
             AddWorkItem([=]() LOCKS_EXCLUDED(mutex_)
                         { return ComputeConstraintsForNode(node_id, insertion_submaps,
                                                            newly_finished_submap); });
-
-            if (!run_automatic_global_relocation)
-            {
-                return node_id;
-            }
-
-            bool acquired_relocation_slot = false;
-            {
-                std::lock_guard<std::mutex> lock(flirt::flirt_busy_lock);
-                if (!flirt::need_flirt.load() && !flirt::flirt_working.load())
-                {
-                    flirt::relocation_min_score.store(kAutoRelocationMinScore);
-                    flirt::relocation_required_consistent_hits.store(
-                        kAutoRelocationConsistentHits);
-                    flirt::reset_relocation_consistency();
-                    flirt::flirt_return_code = flirt::kRelocationIdle;
-                    flirt::flirt_working.store(true);
-                    acquired_relocation_slot = true;
-                }
-            }
-
-            if (!acquired_relocation_slot)
-            {
-                {
-                    absl::MutexLock locker(&mutex_);
-                    LocalizationRecoveryRuntime &recovery =
-                        localization_recovery_[node_id.trajectory_id];
-                    recovery.recovery_state = "DEGRADED";
-                    recovery.recovery_reason = "relocation_slot_busy";
-                    RecordLocalizationHealthRecoveryState(
-                        recovery.recovery_state, recovery.recovery_reason);
-                }
-                LOG(WARNING) << "[AutoRelocation]Skip node=" << node_id
-                             << " because relocation is already running.";
-                return node_id;
-            }
-            {
-                absl::MutexLock locker(&mutex_);
-                last_automatic_global_relocation_trajectory_id_ =
-                    node_id.trajectory_id;
-                last_automatic_global_relocation_node_index_ =
-                    node_id.node_index;
-            }
-
-            const int automatic_relocation_node_gap =
-                automatic_relocation_last_cross_node_index < 0
-                    ? node_id.node_index + 1
-                    : node_id.node_index -
-                          automatic_relocation_last_cross_node_index;
-            LOG(WARNING)
-                << "[AutoRelocation]Background trigger node=" << node_id
-                << " last_cross_trajectory="
-                << automatic_relocation_last_cross_trajectory_id
-                << " last_cross_node="
-                << automatic_relocation_last_cross_node_index
-                << " node_gap=" << automatic_relocation_node_gap
-                << " reason=" << automatic_relocation_trigger_reason
-                << " min_score=" << kAutoRelocationMinScore
-                << " consistent_hits=" << kAutoRelocationConsistentHits;
-            flirt::cv_flirt_busy.notify_all();
-            EnqueueAutomaticGlobalRelocation(
-                AutomaticGlobalRelocationRequest{
-                    node_id, constant_data, optimized_pose,
-                    automatic_relocation_last_cross_trajectory_id,
-                    automatic_relocation_last_cross_node_index,
-                    automatic_relocation_trigger_reason});
             return node_id;
         }
 
@@ -923,536 +902,76 @@ namespace cartographer
                         WorkItemPriority::kLowRateSensorData);
         }
 
-        void PoseGraph2D::EnqueueAutomaticGlobalRelocation(
-            AutomaticGlobalRelocationRequest request)
+        // 使用flirt执行全局重定位
+        int PoseGraph2D::ExecuteGlobalRelocationForNode(
+            const NodeId &ref_node_id)
         {
+            LOG(WARNING) << "[GlobalRelocation]Execute node=" << ref_node_id;
+
+            struct RelocationCandidate
             {
-                std::lock_guard<std::mutex> lock(automatic_relocation_queue_lock_);
-                if (!automatic_relocation_worker_running_)
-                {
-                    LOG(WARNING) << "[AutoRelocation]Background worker is stopped, "
-                                    "drop request node="
-                                 << request.node_id;
-                    std::lock_guard<std::mutex> busy_lock(flirt::flirt_busy_lock);
-                    flirt::flirt_return_code =
-                        flirt::kRelocationWorkerUnavailable;
-                    flirt::flirt_working.store(false);
-                    flirt::cv_flirt_busy.notify_all();
-                    RecordLocalizationHealthAutoRelocationResult(
-                        flirt::kRelocationWorkerUnavailable, false);
-                    return;
-                }
-                automatic_relocation_queue_.push_back(std::move(request));
-                RecordLocalizationHealthAutoRelocationTrigger(
-                    automatic_relocation_queue_.size());
-            }
-            automatic_relocation_queue_cv_.notify_one();
-        }
-
-        void PoseGraph2D::StopAutomaticGlobalRelocationWorker()
-        {
-            {
-                std::lock_guard<std::mutex> lock(automatic_relocation_queue_lock_);
-                automatic_relocation_worker_running_ = false;
-            }
-            automatic_relocation_queue_cv_.notify_all();
-            if (automatic_relocation_thread_.joinable())
-            {
-                automatic_relocation_thread_.join();
-            }
-        }
-
-        void PoseGraph2D::ProcessAutomaticGlobalRelocationQueue()
-        {
-            while (true)
-            {
-                AutomaticGlobalRelocationRequest request;
-                {
-                    std::unique_lock<std::mutex> lock(
-                        automatic_relocation_queue_lock_);
-                    automatic_relocation_queue_cv_.wait(
-                        lock, [this]()
-                        {
-                            return !automatic_relocation_worker_running_ ||
-                                   !automatic_relocation_queue_.empty();
-                        });
-                    if (!automatic_relocation_worker_running_ &&
-                        automatic_relocation_queue_.empty())
-                    {
-                        return;
-                    }
-                    request = std::move(automatic_relocation_queue_.front());
-                    automatic_relocation_queue_.pop_front();
-                }
-
-                RecordLocalizationHealthRecoveryState(
-                    "AUTO_RELOCATING",
-                    request.trigger_reason);
-                std::string failure_reason;
-                const int return_code =
-                    ExecuteAutomaticGlobalRelocationForNode(request,
-                                                           &failure_reason);
-                const bool relocation_success =
-                    return_code == flirt::kRelocationSuccess;
-                RecordLocalizationHealthAutoRelocationResult(
-                    return_code, relocation_success);
-                {
-                    std::lock_guard<std::mutex> lock(flirt::flirt_busy_lock);
-                    flirt::flirt_return_code = return_code;
-                    flirt::flirt_working.store(false);
-                }
-                {
-                    absl::MutexLock locker(&mutex_);
-                    LocalizationRecoveryRuntime &recovery =
-                        localization_recovery_[request.node_id.trajectory_id];
-                    recovery.recovery_state = relocation_success
-                                                  ? "COOLDOWN"
-                                                  : "DEGRADED";
-                    if (relocation_success)
-                    {
-                        recovery.auto_relocation_failures_since_accept = 0;
-                        recovery.auto_relocation_suppressed_until_node_index =
-                            -1;
-                        recovery.recovery_reason = "auto_relocation_success";
-                    }
-                    else
-                    {
-                        ++recovery.auto_relocation_failures_since_accept;
-                        if (failure_reason.empty())
-                        {
-                            failure_reason = "auto_relocation_failed";
-                        }
-                        if (recovery.auto_relocation_failures_since_accept >=
-                            kAutoRelocationMaxFailuresPerEpisode)
-                        {
-                            recovery.auto_relocation_suppressed_until_node_index =
-                                request.node_id.node_index +
-                                kAutoRelocationSuppressionNodeGap;
-                            recovery.recovery_reason = "relocation_exhausted";
-                        }
-                        else
-                        {
-                            recovery.recovery_reason = failure_reason;
-                        }
-                    }
-                    RecordLocalizationHealthRecoveryState(
-                        recovery.recovery_state, recovery.recovery_reason);
-                }
-                LOG(WARNING) << "[AutoRelocation]Background result node="
-                             << request.node_id
-                             << " return_code=" << return_code
-                             << " reason="
-                             << (failure_reason.empty() ? "success"
-                                                        : failure_reason);
-                flirt::cv_flirt_busy.notify_all();
-
-                if (relocation_success)
-                {
-                    AddWorkItem([=]() LOCKS_EXCLUDED(mutex_)
-                                {
-                                    LOG(WARNING)
-                                        << "[AutoRelocation]Request optimization "
-                                           "after background relocation node="
-                                        << request.node_id;
-                                    return WorkItem::Result::kRunOptimization;
-                                });
-                }
-            }
-        }
-
-        bool PoseGraph2D::BuildAutomaticGlobalRelocationSnapshot(
-            const NodeId &ref_node_id,
-            std::vector<AutomaticRelocationCandidate> *candidates)
-        {
-            bool has_frozen_trajectory = false;
-            for (const auto &trajectory_state : data_.trajectories_state)
-            {
-                const int trajectory_id = trajectory_state.first;
-                if (trajectory_state.second.state == TrajectoryState::FROZEN &&
-                    data_.trajectory_nodes.SizeOfTrajectoryOrZero(trajectory_id) > 0 &&
-                    data_.submap_data.SizeOfTrajectoryOrZero(trajectory_id) > 0)
-                {
-                    has_frozen_trajectory = true;
-                    break;
-                }
-            }
-            if (!has_frozen_trajectory)
-            {
-                return false;
-            }
-
-            for (const auto &node_id_data : data_.trajectory_nodes)
-            {
-                const auto node_state_it =
-                    data_.trajectories_state.find(node_id_data.id.trajectory_id);
-                if (node_state_it == data_.trajectories_state.end() ||
-                    node_state_it->second.state != TrajectoryState::FROZEN)
-                {
-                    continue;
-                }
-
-                const auto &candidate_data = node_id_data.data.constant_data;
-                if (candidate_data == nullptr ||
-                    candidate_data->interest_points.empty())
-                {
-                    continue;
-                }
-
-                auto submap_it =
-                    data_.submap_data.BeginOfTrajectory(node_id_data.id.trajectory_id);
-                const auto submaps_end =
-                    data_.submap_data.EndOfTrajectory(node_id_data.id.trajectory_id);
-                for (; submap_it != submaps_end; submap_it.operator++())
-                {
-                    const auto node_id_in_submap =
-                        submap_it->data.node_ids.find(node_id_data.id);
-                    if (node_id_in_submap != submap_it->data.node_ids.end())
-                    {
-                        break;
-                    }
-                }
-
-                if (submap_it == submaps_end ||
-                    submap_it->data.submap == nullptr)
-                {
-                    LOG(WARNING)
-                        << "[AutoRelocation]Snapshot skipped frozen node="
-                        << node_id_data.id
-                        << " because containing submap was not found.";
-                    continue;
-                }
-
-                const auto first_node =
-                    data_.trajectory_nodes.BeginOfTrajectory(
-                        node_id_data.id.trajectory_id);
-                candidates->push_back(
-                    AutomaticRelocationCandidate{
-                        node_id_data.id, submap_it->id, candidate_data,
-                        submap_it->data.submap,
-                        transform::Project2D(first_node->data.global_pose)});
-            }
-
-            LOG(WARNING) << "[AutoRelocation]Snapshot node=" << ref_node_id
-                         << " frozen_candidates=" << candidates->size();
-            return true;
-        }
-
-        int PoseGraph2D::ExecuteAutomaticGlobalRelocationForNode(
-            const AutomaticGlobalRelocationRequest &request,
-            std::string *const failure_reason)
-        {
-            auto SetFailureReason = [failure_reason](const std::string &reason)
-            {
-                if (failure_reason != nullptr)
-                {
-                    *failure_reason = reason;
-                }
+                NodeId node_id;
+                SubmapId submap_id;
+                std::shared_ptr<const flirt::FeatureSet> features;
+                std::shared_ptr<const Submap2D> submap;
+                std::shared_ptr<const TrajectoryNode::Data> reference_data;
             };
-            LOG(WARNING) << "[AutoRelocation]Background execute node="
-                         << request.node_id << " last_cross_trajectory="
-                         << request.last_cross_trajectory_id
-                         << " last_cross_node=" << request.last_cross_node_index;
 
-            if (request.constant_data == nullptr)
-            {
-                SetFailureReason("relocation_no_interest_points");
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationNoInterestPoints;
-            }
-
-            const TrajectoryNode::Data *constant_data =
-                request.constant_data.get();
-            ScopedInterestPoints query_interest_points;
-            query_interest_points.points =
-                BuildFlirtFeatures(constant_data, transform::Rigid3d::Identity());
-            if (query_interest_points.points.empty())
-            {
-                SetFailureReason("relocation_no_interest_points");
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationNoInterestPoints;
-            }
-            LOG(WARNING) << "[AutoRelocation]Query local FLIRT features node="
-                         << request.node_id
-                         << " interest_points="
-                         << query_interest_points.points.size();
-
-            std::vector<AutomaticRelocationCandidate> candidates;
+            std::shared_ptr<const TrajectoryNode::Data> query_data;
+            std::vector<RelocationCandidate> candidates;
             {
                 absl::MutexLock locker(&mutex_);
                 const auto ref_state_it =
-                    data_.trajectories_state.find(request.node_id.trajectory_id);
+                    data_.trajectories_state.find(ref_node_id.trajectory_id);
                 if (ref_state_it == data_.trajectories_state.end() ||
-                    ref_state_it->second.state != TrajectoryState::ACTIVE)
+                    ref_state_it->second.state != TrajectoryState::ACTIVE ||
+                    !data_.trajectory_nodes.Contains(ref_node_id))
                 {
-                    SetFailureReason("relocation_need_more_trajectories");
                     flirt::reset_relocation_consistency();
                     return flirt::kRelocationNeedMoreTrajectories;
                 }
-                if (!BuildAutomaticGlobalRelocationSnapshot(
-                        request.node_id, &candidates))
+                query_data =
+                    data_.trajectory_nodes.at(ref_node_id).constant_data;
+                for (const auto &node_id_data : data_.trajectory_nodes)
                 {
-                    SetFailureReason("relocation_need_more_trajectories");
-                    flirt::reset_relocation_consistency();
-                    return flirt::kRelocationNeedMoreTrajectories;
-                }
-            }
-
-            std::vector<constraints::EstimatedPose> estimated_pose;
-            for (const auto &candidate : candidates)
-            {
-                OrientedPoint2D matched_transform;
-                std::vector<std::pair<InterestPoint *, InterestPoint *>> corres;
-                flirt::match(candidate.constant_data->interest_points,
-                             query_interest_points.points, matched_transform,
-                             corres);
-
-                const float score =
-                    static_cast<float>(corres.size()) /
-                    static_cast<float>(query_interest_points.points.size());
-                if (score < kAutoRelocationMinFlirtCandidateScore)
-                {
-                    continue;
-                }
-
-                const transform::Rigid2d node_global_pose =
-                    transform::Rigid2d({matched_transform.x, matched_transform.y},
-                                       matched_transform.theta);
-                const transform::Rigid2d node_local_pose =
-                    candidate.initial_trajectory_pose.inverse() * node_global_pose;
-                const auto submap_2d =
-                    std::dynamic_pointer_cast<const Submap2D>(candidate.submap);
-                if (submap_2d == nullptr)
-                {
-                    continue;
-                }
-                estimated_pose.push_back(
-                    {NodeId(request.node_id), SubmapId(candidate.submap_id), score,
-                     node_local_pose, submap_2d.get(), submap_2d});
-            }
-
-            std::sort(
-                estimated_pose.begin(), estimated_pose.end(),
-                [](const constraints::EstimatedPose &lhs,
-                   const constraints::EstimatedPose &rhs) -> bool
-                {
-                    return lhs.score > rhs.score;
-                });
-            if (estimated_pose.empty())
-            {
-                SetFailureReason("relocation_no_candidate");
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationNoCandidatePose;
-            }
-
-            const float best_score = estimated_pose.front().score;
-            const float second_score =
-                estimated_pose.size() > 1 ? estimated_pose[1].score : 0.f;
-            if (estimated_pose.size() > 1 &&
-                best_score - second_score <
-                    kAutoRelocationMinFlirtScoreMargin)
-            {
-                LOG(WARNING)
-                    << "[AutoRelocation]Rejected ambiguous FLIRT candidates "
-                    << "node=" << request.node_id
-                    << " best_score=" << best_score
-                    << " second_score=" << second_score
-                    << " min_margin=" << kAutoRelocationMinFlirtScoreMargin;
-                SetFailureReason("relocation_ambiguous");
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationLowConstraintScore;
-            }
-
-            auto GetTopk = [&estimated_pose](size_t k)
-            {
-                std::vector<constraints::EstimatedPose> poses;
-                for (size_t i = 0; i < estimated_pose.size() &&
-                                   poses.size() < k;
-                     i++)
-                {
-                    poses.push_back(estimated_pose.at(i));
-                    const float score = estimated_pose.at(i).score;
-                    const double x = estimated_pose.at(i).pose.translation().x();
-                    const double y = estimated_pose.at(i).pose.translation().y();
-                    const double theta =
-                        estimated_pose.at(i).pose.rotation().angle();
-                    const int trajectory_id =
-                        estimated_pose.at(i).submap_id.trajectory_id;
-                    const int submap_index =
-                        estimated_pose.at(i).submap_id.submap_index;
-                    LOG(WARNING) << "[AutoRelocation]FLIRT score=" << score
-                                 << " pose=" << x << "|" << y << "|" << theta
-                                 << " in Submap(" << trajectory_id << ", "
-                                 << submap_index << ")";
-                }
-                return poses;
-            };
-
-            std::string constraint_rejection_reason;
-            const bool constraint_added =
-                constraint_builder_.ComputeConstraintWithEstimatedPoses(
-                    GetTopk(3), constant_data, &constraint_rejection_reason);
-            if (!constraint_added)
-            {
-                SetFailureReason(constraint_rejection_reason.empty()
-                                     ? "relocation_low_score"
-                                     : constraint_rejection_reason);
-                return flirt::kRelocationLowConstraintScore;
-            }
-
-            SetFailureReason("");
-            return flirt::kRelocationSuccess;
-        }
-
-        // 使用flirt执行全局重定位
-        int PoseGraph2D::ExecuteGlobalRelocationForNode(const NodeId &ref_node_id)
-        {
-            // check enable flag
-            LOG(WARNING) << "ExecuteGlobalRelocationForNode=" << ref_node_id.trajectory_id
-                         << "|" << ref_node_id.node_index;
-
-            const auto ref_state_it =
-                data_.trajectories_state.find(ref_node_id.trajectory_id);
-            if (ref_state_it == data_.trajectories_state.end() ||
-                ref_state_it->second.state != TrajectoryState::ACTIVE)
-            {
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationNeedMoreTrajectories;
-            }
-
-            bool has_frozen_trajectory = false;
-            for (const auto &trajectory_state : data_.trajectories_state)
-            {
-                const int trajectory_id = trajectory_state.first;
-                if (trajectory_state.second.state == TrajectoryState::FROZEN &&
-                    data_.trajectory_nodes.SizeOfTrajectoryOrZero(trajectory_id) > 0 &&
-                    data_.submap_data.SizeOfTrajectoryOrZero(trajectory_id) > 0)
-                {
-                    has_frozen_trajectory = true;
-                    break;
-                }
-            }
-            if (!has_frozen_trajectory)
-            {
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationNeedMoreTrajectories;
-            }
-
-            // define pose structure
-            std::vector<constraints::EstimatedPose> estimated_pose;
-
-            const TrajectoryNode::Data *constant_data =
-                data_.trajectory_nodes.at(ref_node_id).constant_data.get();
-
-            ScopedInterestPoints query_interest_points;
-            query_interest_points.points =
-                BuildFlirtFeatures(constant_data, transform::Rigid3d::Identity());
-
-            // Check again, make sure that the current scan has interest points.
-            if (query_interest_points.points.empty())
-            {
-                flirt::reset_relocation_consistency();
-                return flirt::kRelocationNoInterestPoints;
-            }
-            LOG(WARNING) << "[GlobalRelocation]Query local FLIRT features node="
-                         << ref_node_id
-                         << " interest_points="
-                         << query_interest_points.points.size();
-
-            // 这里是用于输出点云信息到csv文件，用来做测试的
-            // append_node_data_pose("NewNodeData", constant_data->local_pose,
-            //                       constant_data->filtered_gravity_aligned_point_cloud);
-
-            // append_interest_points("^KptsXYA^", constant_data->interest_points);
-
-            auto node_it = data_.trajectory_nodes.begin();
-            auto nodes_end = data_.trajectory_nodes.end();
-            LOG(WARNING) << "Search range in frozen trajectories.";
-            for (; node_it != nodes_end; node_it.operator++())
-            {
-                const auto node_state_it =
-                    data_.trajectories_state.find(node_it->id.trajectory_id);
-                if (node_state_it == data_.trajectories_state.end() ||
-                    node_state_it->second.state != TrajectoryState::FROZEN)
-                {
-                    continue;
-                }
-                // check the nodes in the old trajectories.
-                // The InterestPoint must NOT be Empty.
-                if (node_it->data.constant_data->interest_points.empty())
-                {
-                    continue;
-                }
-                // match with the old nodes
-                OrientedPoint2D _transform;
-                std::vector<std::pair<InterestPoint *, InterestPoint *>> _corres;
-                flirt::match(node_it->data.constant_data->interest_points,
-                             query_interest_points.points, _transform, _corres);
-
-                // compute score
-                float score = (float)_corres.size() /
-                              (float)query_interest_points.points.size();
-                if (score > 0.1)
-                {
-                    // 寻找冻结轨迹中包含这个历史node的submap。
-                    auto submap_it = data_.submap_data.BeginOfTrajectory(node_it->id.trajectory_id);
-                    auto submaps_end = data_.submap_data.EndOfTrajectory(node_it->id.trajectory_id);
-
-                    for (; submap_it != submaps_end; submap_it.operator++())
+                    const auto state_it = data_.trajectories_state.find(
+                        node_id_data.id.trajectory_id);
+                    if (state_it == data_.trajectories_state.end() ||
+                        state_it->second.state != TrajectoryState::FROZEN ||
+                        node_id_data.data.constant_data == nullptr)
                     {
-                        auto r = submap_it->data.node_ids.find(node_it->id);
-                        if (r != submap_it->data.node_ids.end())
+                        continue;
+                    }
+                    const auto reference_features =
+                        node_id_data.data.constant_data->GetFlirtFeatures();
+                    if (reference_features == nullptr ||
+                        reference_features->empty())
+                    {
+                        continue;
+                    }
+
+                    auto submap_it = data_.submap_data.BeginOfTrajectory(
+                        node_id_data.id.trajectory_id);
+                    const auto submaps_end =
+                        data_.submap_data.EndOfTrajectory(
+                            node_id_data.id.trajectory_id);
+                    for (; submap_it != submaps_end; ++submap_it)
+                    {
+                        if (submap_it->data.node_ids.count(
+                                node_id_data.id) != 0)
                         {
                             break;
                         }
                     }
-
-                    if (submap_it == submaps_end)
+                    if (submap_it == submaps_end ||
+                        submap_it->data.submap == nullptr)
                     {
-                        // 原来的版本中这里是return但是这样处理会有问题
-                        // 假设拓建了2次地图，则现在一共有3个Trajectories：
-                        // ID    状态
-                        //  0    冻结
-                        //  1    冻结
-                        //  2    激活
-                        // 如果在第二次拓建的区域内（ID=1）范围内重定位，首先肯定会有一些分数大于0.1的node
-                        // 并且是按照顺序去查找的，比如在TrajecotyID=0里面找到了
-                        // 但是如果我去找这个
-                        // return -4;
-                        LOG(WARNING) << "failed to find submap_id in trajecotry" << node_it->id.trajectory_id;
+                        LOG(WARNING)
+                            << "[GlobalRelocation]Reference node has no "
+                               "containing submap: "
+                            << node_id_data.id;
                         continue;
                     }
-
-                    //
-                    // 计算出相对当前trajectory而言的位姿
-                    //
-                    // FLIRT算出的全局位姿（相对[0,0,0]而言的
-                    // 第一种方法是使用node的pose
-                    // transform::Rigid2d node_global_pose = transform::Project2D(node_it->data.global_pose);
-                    // 第二种方法是使用FLIRT算出来的pose
-                    transform::Rigid2d node_global_pose = transform::Rigid2d({_transform.x, _transform.y}, _transform.theta);
-
-                    // 我们需要获取当前trajectory的位姿，将FLIRT的全局位姿转换到相对Trajectory而言的位姿
-                    // 第一种方法是使用initial_trajectory_poses
-                    // 但是！！里面全是空的……
-
-                    // LOG(WARNING) << "Total Size=" << data_.initial_trajectory_poses.size();
-                    // for (auto &&i : data_.initial_trajectory_poses)
-                    // {
-                    //     LOG(WARNING) << "TrajectoryPose, ID=" << i.first << "="
-                    //                  << i.second.relative_pose.translation().x() << "|"
-                    //                  << i.second.relative_pose.translation().y() << "|"
-                    //                  << i.second.relative_pose.translation().z();
-                    // }
-                    //
-
-                    // 第二种方法，就是取trajectory下的第一个node的global pose作为trajectory相对于世界的pose
-                    transform::Rigid3d initial_trajectory_pose = data_.trajectory_nodes.BeginOfTrajectory(node_it->id.trajectory_id)->data.global_pose;
-                    transform::Rigid2d initial_trajectory_post2d = transform::Project2D(initial_trajectory_pose);
-                    transform::Rigid2d node_local_pose = initial_trajectory_post2d.inverse() * node_global_pose;
-
-                    //
-                    // 这里是把符合条件的位姿找到，加到队列中，作为候选位姿。
-                    //
                     const auto submap_2d =
                         std::dynamic_pointer_cast<const Submap2D>(
                             submap_it->data.submap);
@@ -1460,53 +979,105 @@ namespace cartographer
                     {
                         continue;
                     }
-                    estimated_pose.push_back(
-                        {NodeId(ref_node_id), SubmapId(submap_it->id), score,
-                         node_local_pose, submap_2d.get(), submap_2d});
+                    candidates.push_back(
+                        RelocationCandidate{
+                            node_id_data.id, submap_it->id,
+                            reference_features, submap_2d,
+                            node_id_data.data.constant_data});
                 }
             }
 
-            auto compare_func = [](const constraints::EstimatedPose &lhs,
-                                   const constraints::EstimatedPose &rhs) -> bool
+            if (query_data == nullptr || candidates.empty())
             {
-                return lhs.score > rhs.score;
-            };
+                flirt::reset_relocation_consistency();
+                return flirt::kRelocationNeedMoreTrajectories;
+            }
 
-            std::sort(estimated_pose.begin(), estimated_pose.end(), compare_func);
-            if (estimated_pose.empty())
+            const auto query_features =
+                BuildFlirtFeatures(query_data.get());
+            if (query_features == nullptr || query_features->empty())
+            {
+                flirt::reset_relocation_consistency();
+                return flirt::kRelocationNoInterestPoints;
+            }
+            LOG(WARNING)
+                << "[GlobalRelocation]Query gravity-aligned local features "
+                << "node=" << ref_node_id
+                << " interest_points=" << query_features->size()
+                << " frozen_candidates=" << candidates.size();
+
+            std::vector<constraints::EstimatedPose> estimated_poses;
+            for (const RelocationCandidate &candidate : candidates)
+            {
+                OrientedPoint2D reference_from_query;
+                std::vector<std::pair<InterestPoint *, InterestPoint *>>
+                    correspondences;
+                flirt::match(candidate.features->raw(),
+                             query_features->raw(),
+                             reference_from_query, correspondences);
+                const float score =
+                    static_cast<float>(correspondences.size()) /
+                    static_cast<float>(query_features->size());
+                if (score <= 0.1f)
+                {
+                    continue;
+                }
+
+                const transform::Rigid2d reference_from_query_pose(
+                    {reference_from_query.x, reference_from_query.y},
+                    reference_from_query.theta);
+                const transform::Rigid2d trajectory_from_query =
+                    ComputeFlirtQueryPoseInTrajectory(
+                        *candidate.reference_data, reference_from_query_pose);
+                estimated_poses.push_back(
+                    constraints::EstimatedPose{
+                        ref_node_id, candidate.submap_id, score,
+                        trajectory_from_query, candidate.submap.get(),
+                        candidate.submap});
+            }
+
+            std::sort(
+                estimated_poses.begin(), estimated_poses.end(),
+                [](const constraints::EstimatedPose &lhs,
+                   const constraints::EstimatedPose &rhs)
+                { return lhs.score > rhs.score; });
+            if (estimated_poses.empty())
             {
                 flirt::reset_relocation_consistency();
                 return flirt::kRelocationNoCandidatePose;
             }
-            // 选取flirt得分最高的top k个待选psoe
-            auto GetTopk = [&estimated_pose](size_t k)
-            {
-                std::vector<constraints::EstimatedPose> poses;
-                for (size_t i = 0; i < estimated_pose.size() && i < k; i++)
+
+            auto top_candidates =
+                [&estimated_poses](const std::size_t limit)
                 {
-                    poses.push_back(estimated_pose.at(i));
-                    float score = estimated_pose.at(i).score;
-                    double x = estimated_pose.at(i).pose.translation().x();
-                    double y = estimated_pose.at(i).pose.translation().y();
-                    double theta = estimated_pose.at(i).pose.rotation().angle();
-                    int trajectory_id = estimated_pose.at(i).submap_id.trajectory_id;
-                    int submap_index = estimated_pose.at(i).submap_id.submap_index;
-                    LOG(WARNING) << "[GlobalRelocation]" << "Score=" << score
-                                 << "  Pose=" << x << "|" << y << "|" << theta
-                                 << " in Submap(" << trajectory_id << ", " << submap_index
-                                 << ")";
-                }
-                return poses;
-            };
+                    std::vector<constraints::EstimatedPose> result;
+                    for (std::size_t i = 0;
+                         i < estimated_poses.size() &&
+                         result.size() < limit;
+                         ++i)
+                    {
+                        result.push_back(estimated_poses[i]);
+                        LOG(WARNING)
+                            << "[GlobalRelocation]FLIRT score="
+                            << estimated_poses[i].score
+                            << " trajectory_local_pose="
+                            << estimated_poses[i].pose.translation().x()
+                            << "|" << estimated_poses[i].pose.translation().y()
+                            << "|"
+                            << estimated_poses[i].pose.rotation().angle()
+                            << " submap="
+                            << estimated_poses[i].submap_id;
+                    }
+                    return result;
+                };
 
             const bool constraint_added =
                 constraint_builder_.ComputeConstraintWithEstimatedPoses(
-                    GetTopk(3), constant_data);
+                    top_candidates(3), query_data.get());
             if (!constraint_added)
             {
                 return flirt::kRelocationLowConstraintScore;
             }
-
             return flirt::kRelocationSuccess;
         }
         /**
@@ -1539,6 +1110,10 @@ namespace cartographer
                 const common::Time last_connection_time =
                     data_.trajectory_connectivity_state.LastConnectionTime(
                         node_id.trajectory_id, submap_id.trajectory_id);
+                active_node_to_frozen_submap =
+                    node_id.trajectory_id != submap_id.trajectory_id &&
+                    IsTrajectoryActive(node_id.trajectory_id) &&
+                    IsTrajectoryFrozen(submap_id.trajectory_id);
                 // 如果节点和子图属于同一轨迹, 或者时间小于阈值
                 // 则只需进行 局部搜索窗口 的约束计算(对局部子图进行回环检测)
                 if (node_id.trajectory_id == submap_id.trajectory_id ||
@@ -1553,18 +1128,19 @@ namespace cartographer
                     // local search window.
                     maybe_add_local_constraint = true;
                 }
-                else if (global_localization_samplers_[node_id.trajectory_id]->Pulse())
+                else if (active_node_to_frozen_submap ||
+                         global_localization_samplers_[node_id.trajectory_id]->Pulse())
                 {
+                    // Active-to-frozen searches are already deterministically
+                    // budgeted and rotated before reaching this point. Do not
+                    // sample them a second time, or some frozen submaps can be
+                    // skipped indefinitely.
                     maybe_add_global_constraint = true;
                 }
                 constant_data = const_cast<TrajectoryNode::Data *>(
                     data_.trajectory_nodes.at(node_id).constant_data.get());
                 submap = static_cast<const Submap2D *>(
                     data_.submap_data.at(submap_id).submap.get());
-                active_node_to_frozen_submap =
-                    node_id.trajectory_id != submap_id.trajectory_id &&
-                    IsTrajectoryActive(node_id.trajectory_id) &&
-                    IsTrajectoryFrozen(submap_id.trajectory_id);
             }
             // 建图时只会执行这块, 通过局部搜索进行回环检测
             if (maybe_add_local_constraint)
@@ -1607,6 +1183,7 @@ namespace cartographer
             bool has_recent_active_frozen_connection = false;
             bool newly_finished_submap_on_active_trajectory = false;
             bool force_optimization_for_pure_localization_trim = false;
+            bool pure_localization_node = false;
             bool localization_degraded = false;
             bool recovery_full_search = false;
             int active_submap_count = 0;
@@ -1616,7 +1193,6 @@ namespace cartographer
                 scan_map_health_constant_data;
             transform::Rigid2d scan_map_health_global_pose =
                 transform::Rigid2d::Identity();
-            std::vector<CurrentPoseScanMapSubmap> scan_map_health_submaps;
             std::shared_ptr<const MapScanDistanceField>
                 map_scan_health_distance_field;
             int map_scan_health_max_sampled_points =
@@ -1646,18 +1222,27 @@ namespace cartographer
                                              constant_data->gravity_alignment});
                 const bool node_on_active_trajectory =
                     IsTrajectoryActive(node_id.trajectory_id);
+                pure_localization_node =
+                    node_on_active_trajectory &&
+                    HasFrozenTrajectoryForLocalization();
                 has_recent_active_frozen_connection =
                     node_on_active_trajectory &&
                     HasRecentActiveFrozenConnection(node_id.trajectory_id,
                                                     node_id.node_index);
-                if (node_on_active_trajectory &&
-                    HasFrozenTrajectoryForLocalization())
+                if (pure_localization_node)
                 {
                     LocalizationRecoveryRuntime &recovery =
                         localization_recovery_[node_id.trajectory_id];
                     localization_degraded =
                         IsLocalizationDegraded(node_id, recovery);
-                    if (localization_degraded)
+                    if (recovery.recovery_state == "LOST_CONFIRMED")
+                    {
+                        recovery_search_reason = recovery.recovery_reason;
+                        RecordLocalizationHealthRecoveryState(
+                            recovery.recovery_state,
+                            recovery.recovery_reason);
+                    }
+                    else if (localization_degraded)
                     {
                         recovery_full_search = ShouldRunRecoveryFullSearch(
                             node_id, queued_work_items_at_start, &recovery,
@@ -1671,9 +1256,7 @@ namespace cartographer
                                 recovery.recovery_reason);
                         }
                     }
-                    else if (recovery.recovery_state != "OK" &&
-                             recovery.recovery_state != "COOLDOWN" &&
-                             recovery.recovery_state != "AUTO_RELOCATING")
+                    else if (recovery.recovery_state != "OK")
                     {
                         recovery.recovery_state = "OK";
                         recovery.recovery_reason.clear();
@@ -1706,7 +1289,9 @@ namespace cartographer
                 // TODO(danielsievers): Add a member variable and avoid having to copy
                 // them out here.
                 std::vector<std::pair<double, SubmapId>>
-                    active_frozen_submap_candidates;
+                    active_frozen_local_submap_candidates;
+                std::vector<std::pair<double, SubmapId>>
+                    active_frozen_global_submap_candidates;
                 for (const auto &submap_id_data : data_.submap_data)
                 {
                     if (submap_id_data.data.state == SubmapState::kFinished)
@@ -1717,9 +1302,15 @@ namespace cartographer
                             node_id.trajectory_id !=
                                 submap_id_data.id.trajectory_id &&
                             IsTrajectoryFrozen(submap_id_data.id.trajectory_id);
-                        if (active_node_to_frozen_submap &&
-                            (has_recent_active_frozen_connection ||
-                             localization_degraded))
+                        // In pure localization, only anchor active nodes to the
+                        // frozen map. Same-trajectory loop closures merely keep
+                        // the drifting active trajectory internally consistent.
+                        if (pure_localization_node &&
+                            !active_node_to_frozen_submap)
+                        {
+                            continue;
+                        }
+                        if (active_node_to_frozen_submap)
                         {
                             if (!optimization_problem_->submap_data().Contains(
                                     submap_id_data.id))
@@ -1736,13 +1327,39 @@ namespace cartographer
                                 (submap_pose.inverse() * global_pose_2d)
                                     .translation()
                                     .norm();
-                            active_frozen_submap_candidates.emplace_back(
-                                distance, submap_id_data.id);
+                            const common::Time candidate_node_time =
+                                GetLatestNodeTime(node_id, submap_id_data.id);
+                            const common::Time last_connection_time =
+                                data_.trajectory_connectivity_state
+                                    .LastConnectionTime(
+                                        node_id.trajectory_id,
+                                        submap_id_data.id.trajectory_id);
+                            if (candidate_node_time <
+                                last_connection_time +
+                                    common::FromSeconds(
+                                        options_
+                                            .global_constraint_search_after_n_seconds()))
+                            {
+                                active_frozen_local_submap_candidates.emplace_back(
+                                    distance, submap_id_data.id);
+                            }
+                            else
+                            {
+                                active_frozen_global_submap_candidates.emplace_back(
+                                    distance, submap_id_data.id);
+                            }
                             continue;
                         }
                         finished_submap_ids.emplace_back(submap_id_data.id);
                     }
                 }
+                const bool active_frozen_local_search_window =
+                    !active_frozen_local_submap_candidates.empty();
+                std::vector<std::pair<double, SubmapId>>
+                    &active_frozen_submap_candidates =
+                        active_frozen_local_search_window
+                            ? active_frozen_local_submap_candidates
+                            : active_frozen_global_submap_candidates;
                 if (!active_frozen_submap_candidates.empty())
                 {
                     std::sort(active_frozen_submap_candidates.begin(),
@@ -1754,7 +1371,8 @@ namespace cartographer
                               });
                     const std::vector<SubmapId> selected_active_frozen_submaps =
                         SelectActiveFrozenSubmapsForSearch(
-                            active_frozen_submap_candidates,
+                            node_id, active_frozen_submap_candidates,
+                            active_frozen_local_search_window,
                             recovery_full_search, queued_work_items_at_start);
                     for (const SubmapId &submap_id :
                          selected_active_frozen_submaps)
@@ -1762,7 +1380,9 @@ namespace cartographer
                         finished_submap_ids.emplace_back(submap_id);
                     }
                     skipped_active_frozen_submaps =
-                        static_cast<int>(active_frozen_submap_candidates.size() -
+                        static_cast<int>(
+                            active_frozen_local_submap_candidates.size() +
+                            active_frozen_global_submap_candidates.size() -
                                          selected_active_frozen_submaps.size());
                     if (recovery_full_search)
                     {
@@ -1826,47 +1446,6 @@ namespace cartographer
                                 : kMapScanHealthOkMaxSampledPoints;
                         map_scan_health_distance_field =
                             GetMapScanDistanceFieldIfReadyOrStartAsync();
-                        std::vector<CurrentPoseScanMapSubmap> candidates;
-                        for (const auto &submap_id_data : data_.submap_data)
-                        {
-                            if (submap_id_data.data.state !=
-                                    SubmapState::kFinished ||
-                                submap_id_data.id.trajectory_id ==
-                                    node_id.trajectory_id ||
-                                !IsTrajectoryFrozen(
-                                    submap_id_data.id.trajectory_id) ||
-                                !optimization_problem_->submap_data().Contains(
-                                    submap_id_data.id) ||
-                                submap_id_data.data.submap == nullptr)
-                            {
-                                continue;
-                            }
-                            const auto submap_2d =
-                                std::static_pointer_cast<const Submap2D>(
-                                    submap_id_data.data.submap);
-                            const auto &submap_pose =
-                                optimization_problem_->submap_data()
-                                    .at(submap_id_data.id)
-                                    .global_pose;
-                            const double distance =
-                                (submap_pose.inverse() * global_pose_2d)
-                                    .translation()
-                                    .norm();
-                            candidates.push_back(
-                                CurrentPoseScanMapSubmap{
-                                    submap_id_data.id, submap_2d,
-                                    submap_pose, distance});
-                        }
-                        std::sort(candidates.begin(), candidates.end(),
-                                  [](const CurrentPoseScanMapSubmap &lhs,
-                                     const CurrentPoseScanMapSubmap &rhs)
-                                  { return lhs.distance < rhs.distance; });
-                        const size_t checked_submaps =
-                            std::min(kCurrentPoseScanMapCheckedSubmaps,
-                                     candidates.size());
-                        scan_map_health_submaps.assign(
-                            candidates.begin(),
-                            candidates.begin() + checked_submaps);
                     }
                 }
             }
@@ -1880,29 +1459,20 @@ namespace cartographer
                         scan_map_health_global_pose,
                         *map_scan_health_distance_field,
                         map_scan_health_max_sampled_points);
+                const bool map_quality_bad =
+                    map_quality.sampled_points > 0 &&
+                    map_quality.checked_submaps > 0 &&
+                    map_quality.hit20 >= 0.0 &&
+                    map_quality.mean_distance >= 0.0 &&
+                    (map_quality.hit20 < kMapScanBadHit20 ||
+                     map_quality.mean_distance > kMapScanBadMeanDistance);
+                RecordLocalizationHealthCurrentPoseScanMapQuality(
+                    map_quality.hit20, map_quality.mean_distance,
+                    map_quality.sampled_points,
+                    map_quality.checked_submaps, map_quality_bad);
                 absl::MutexLock locker(&mutex_);
                 UpdateLocalizationRecoveryFromMapScanQuality(node_id,
                                                              map_quality);
-            }
-
-            if (scan_map_health_constant_data != nullptr &&
-                !scan_map_health_submaps.empty())
-            {
-                const CurrentPoseScanMapQuality quality =
-                    ComputeCurrentPoseScanMapQuality(
-                        *scan_map_health_constant_data,
-                        scan_map_health_global_pose,
-                        scan_map_health_submaps);
-                const bool bad =
-                    quality.sampled_points > 0 &&
-                    quality.checked_submaps > 0 &&
-                    quality.hit20 >= 0.0 &&
-                    quality.mean_distance >= 0.0 &&
-                    (quality.hit20 < kMapScanBadHit20 ||
-                     quality.mean_distance > kMapScanBadMeanDistance);
-                RecordLocalizationHealthCurrentPoseScanMapQuality(
-                    quality.hit20, quality.mean_distance,
-                    quality.sampled_points, quality.checked_submaps, bad);
             }
 
             if (skipped_active_frozen_submaps > 0)
@@ -1944,7 +1514,7 @@ namespace cartographer
                 ComputeConstraint(node_id, submap_id);
             }
 
-            if (newly_finished_submap)
+            if (newly_finished_submap && !pure_localization_node)
             {
                 const SubmapId newly_finished_submap_id = submap_ids.front();
                 // We have a new completed submap, so we look into adding constraints for
@@ -2005,130 +1575,6 @@ namespace cartographer
             return WorkItem::Result::kDoNotRunOptimization;
         }
 
-        PoseGraph2D::CurrentPoseScanMapQuality
-        PoseGraph2D::ComputeCurrentPoseScanMapQuality(
-            const TrajectoryNode::Data &constant_data,
-            const transform::Rigid2d &global_pose,
-            const std::vector<CurrentPoseScanMapSubmap> &submaps) const
-        {
-            CurrentPoseScanMapQuality best_quality;
-            best_quality.checked_submaps =
-                static_cast<int>(submaps.size());
-            const sensor::PointCloud &point_cloud =
-                constant_data.filtered_gravity_aligned_point_cloud;
-            if (point_cloud.empty() || submaps.empty())
-            {
-                return best_quality;
-            }
-
-            for (const CurrentPoseScanMapSubmap &submap_data : submaps)
-            {
-                if (submap_data.submap == nullptr ||
-                    submap_data.submap->grid() == nullptr)
-                {
-                    continue;
-                }
-                const Grid2D &grid = *submap_data.submap->grid();
-                const transform::Rigid2d pose_in_submap =
-                    submap_data.global_pose.inverse() * global_pose;
-                const double resolution = grid.limits().resolution();
-                const int hit_radius_cells = std::max(
-                    1, common::RoundToInt(
-                           kCurrentPoseScanMapHitRadiusMeters / resolution));
-                const int search_radius_cells = std::max(
-                    hit_radius_cells,
-                    common::RoundToInt(
-                        kCurrentPoseScanMapSearchRadiusMeters / resolution));
-                const size_t sample_step = std::max<size_t>(
-                    1, (point_cloud.size() +
-                        kCurrentPoseScanMapMaxSampledPoints - 1) /
-                           kCurrentPoseScanMapMaxSampledPoints);
-
-                int sampled_points = 0;
-                int hit20_count = 0;
-                double distance_sum = 0.0;
-                for (size_t point_index = 0; point_index < point_cloud.size();
-                     point_index += sample_step)
-                {
-                    const Eigen::Vector2d local_point(
-                        point_cloud[point_index].position.x(),
-                        point_cloud[point_index].position.y());
-                    const Eigen::Vector2f point =
-                        (pose_in_submap * local_point).cast<float>();
-                    const Eigen::Array2i cell_index =
-                        grid.limits().GetCellIndex(point);
-                    ++sampled_points;
-
-                    double best_distance =
-                        kCurrentPoseScanMapSearchRadiusMeters;
-                    bool found_occupied = false;
-                    for (int dx = -search_radius_cells;
-                         dx <= search_radius_cells; ++dx)
-                    {
-                        for (int dy = -search_radius_cells;
-                             dy <= search_radius_cells; ++dy)
-                        {
-                            const Eigen::Array2i candidate_index =
-                                cell_index + Eigen::Array2i(dx, dy);
-                            if (!grid.limits().Contains(candidate_index) ||
-                                !grid.IsKnown(candidate_index))
-                            {
-                                continue;
-                            }
-                            const double probability =
-                                1.0 - grid.GetCorrespondenceCost(
-                                          candidate_index);
-                            if (probability <
-                                kCurrentPoseScanMapOccupiedProbabilityThreshold)
-                            {
-                                continue;
-                            }
-                            const Eigen::Vector2d cell_center =
-                                grid.limits()
-                                    .GetCellCenter(candidate_index)
-                                    .cast<double>();
-                            const double distance =
-                                (cell_center - point.cast<double>()).norm();
-                            if (distance < best_distance)
-                            {
-                                best_distance = distance;
-                                found_occupied = true;
-                            }
-                        }
-                    }
-                    if (found_occupied &&
-                        best_distance <=
-                            kCurrentPoseScanMapHitRadiusMeters)
-                    {
-                        ++hit20_count;
-                    }
-                    distance_sum +=
-                        found_occupied
-                            ? best_distance
-                            : kCurrentPoseScanMapSearchRadiusMeters;
-                }
-
-                if (sampled_points <= 0)
-                {
-                    continue;
-                }
-                CurrentPoseScanMapQuality quality;
-                quality.hit20 = static_cast<double>(hit20_count) /
-                                static_cast<double>(sampled_points);
-                quality.mean_distance =
-                    distance_sum / static_cast<double>(sampled_points);
-                quality.sampled_points = sampled_points;
-                quality.checked_submaps = static_cast<int>(submaps.size());
-                if (best_quality.sampled_points == 0 ||
-                    quality.hit20 > best_quality.hit20 ||
-                    (quality.hit20 == best_quality.hit20 &&
-                     quality.mean_distance < best_quality.mean_distance))
-                {
-                    best_quality = quality;
-                }
-            }
-            return best_quality;
-        }
 
         std::vector<PoseGraph2D::MapScanDistanceFieldSubmapSnapshot>
         PoseGraph2D::SnapshotMapScanDistanceFieldSubmaps(
@@ -2166,458 +1612,208 @@ namespace cartographer
         PoseGraph2D::BuildMapScanDistanceField(
             const std::vector<MapScanDistanceFieldSubmapSnapshot> &submaps) const
         {
-            auto field = std::make_shared<MapScanDistanceField>();
-            field->frozen_finished_submap_count =
+            auto invalid_field = std::make_shared<MapScanDistanceField>();
+            invalid_field->frozen_finished_submap_count =
                 static_cast<int>(submaps.size());
             if (submaps.empty())
             {
-                return field;
+                return invalid_field;
             }
 
-            double resolution =
-                submaps.front().submap->grid()->limits().resolution();
-            for (const MapScanDistanceFieldSubmapSnapshot &submap_snapshot : submaps)
+            std::vector<map_scan_distance_field::RasterSource> sources;
+            sources.reserve(submaps.size());
+            double resolution = std::numeric_limits<double>::infinity();
+            for (const auto &snapshot : submaps)
             {
-                resolution = std::min(
-                    resolution,
-                    submap_snapshot.submap->grid()->limits().resolution());
-            }
-            field->resolution = resolution;
-
-            double min_x = std::numeric_limits<double>::infinity();
-            double min_y = std::numeric_limits<double>::infinity();
-            double max_x = -std::numeric_limits<double>::infinity();
-            double max_y = -std::numeric_limits<double>::infinity();
-            for (const MapScanDistanceFieldSubmapSnapshot &submap_snapshot : submaps)
-            {
-                const Grid2D &grid = *submap_snapshot.submap->grid();
-                const auto &limits = grid.limits();
-                const int max_cell_x = limits.cell_limits().num_x_cells - 1;
-                const int max_cell_y = limits.cell_limits().num_y_cells - 1;
-                const std::array<Eigen::Array2i, 4> corners = {{
-                    Eigen::Array2i(0, 0),
-                    Eigen::Array2i(max_cell_x, 0),
-                    Eigen::Array2i(0, max_cell_y),
-                    Eigen::Array2i(max_cell_x, max_cell_y)}};
-                for (const Eigen::Array2i &corner : corners)
-                {
-                    const Eigen::Vector2d global =
-                        submap_snapshot.global_pose *
-                        limits.GetCellCenter(corner).cast<double>();
-                    min_x = std::min(min_x, global.x());
-                    min_y = std::min(min_y, global.y());
-                    max_x = std::max(max_x, global.x());
-                    max_y = std::max(max_y, global.y());
-                }
-            }
-
-            const double margin = kCurrentPoseScanMapSearchRadiusMeters +
-                                  2.0 * resolution;
-            const int min_ix =
-                static_cast<int>(std::floor((min_x - margin) / resolution));
-            const int min_iy =
-                static_cast<int>(std::floor((min_y - margin) / resolution));
-            const int max_ix =
-                static_cast<int>(std::ceil((max_x + margin) / resolution));
-            const int max_iy =
-                static_cast<int>(std::ceil((max_y + margin) / resolution));
-            field->origin_x = min_ix * resolution;
-            field->origin_y = min_iy * resolution;
-            field->width = std::max(1, max_ix - min_ix + 1);
-            field->height = std::max(1, max_iy - min_iy + 1);
-
-            const size_t cell_count =
-                static_cast<size_t>(field->width) *
-                static_cast<size_t>(field->height);
-            field->known.assign(cell_count, 0);
-            std::vector<float> distance_cells(
-                cell_count, std::numeric_limits<float>::infinity());
-            auto flat_index = [width = field->width](const int x,
-                                                     const int y)
-            {
-                return static_cast<size_t>(y) * static_cast<size_t>(width) +
-                       static_cast<size_t>(x);
-            };
-
-            int occupied_cells = 0;
-            for (const MapScanDistanceFieldSubmapSnapshot &submap_snapshot : submaps)
-            {
-                const Grid2D &grid = *submap_snapshot.submap->grid();
-                const auto &limits = grid.limits();
+                const Grid2D *const grid = snapshot.submap->grid();
                 Eigen::Array2i cropped_offset;
                 CellLimits cropped_limits;
-                grid.ComputeCroppedLimits(&cropped_offset, &cropped_limits);
-                for (int x = 0; x < cropped_limits.num_x_cells; ++x)
+                grid->ComputeCroppedLimits(&cropped_offset, &cropped_limits);
+                if (cropped_limits.num_x_cells <= 0 ||
+                    cropped_limits.num_y_cells <= 0)
                 {
-                    for (int y = 0; y < cropped_limits.num_y_cells; ++y)
-                    {
-                        const Eigen::Array2i cell_index =
-                            cropped_offset + Eigen::Array2i(x, y);
-                        if (!grid.IsKnown(cell_index))
-                        {
-                            continue;
-                        }
-                        const Eigen::Vector2d global =
-                            submap_snapshot.global_pose *
-                            limits.GetCellCenter(cell_index).cast<double>();
-                        const int gx = static_cast<int>(
-                            std::floor((global.x() - field->origin_x) /
-                                       resolution));
-                        const int gy = static_cast<int>(
-                            std::floor((global.y() - field->origin_y) /
-                                       resolution));
-                        if (gx < 0 || gx >= field->width ||
-                            gy < 0 || gy >= field->height)
-                        {
-                            continue;
-                        }
-                        const size_t index = flat_index(gx, gy);
-                        field->known[index] = 1;
-                        const double probability =
-                            1.0 - grid.GetCorrespondenceCost(cell_index);
-                        if (probability >=
-                            kCurrentPoseScanMapOccupiedProbabilityThreshold)
-                        {
-                            if (distance_cells[index] != 0.0f)
-                            {
-                                ++occupied_cells;
-                            }
-                            distance_cells[index] = 0.0f;
-                        }
-                    }
+                    continue;
                 }
+
+                const int max_cell_x =
+                    cropped_offset.x() + cropped_limits.num_x_cells - 1;
+                const int max_cell_y =
+                    cropped_offset.y() + cropped_limits.num_y_cells - 1;
+                const Eigen::Vector2f first_center =
+                    grid->limits().GetCellCenter(cropped_offset);
+                const Eigen::Vector2f last_center =
+                    grid->limits().GetCellCenter(
+                        Eigen::Array2i(max_cell_x, max_cell_y));
+                const double source_resolution =
+                    grid->limits().resolution();
+
+                map_scan_distance_field::RasterSource source;
+                source.resolution = source_resolution;
+                source.local_min_x =
+                    std::min(first_center.x(), last_center.x()) -
+                    0.5 * source_resolution;
+                source.local_min_y =
+                    std::min(first_center.y(), last_center.y()) -
+                    0.5 * source_resolution;
+                source.local_max_x =
+                    std::max(first_center.x(), last_center.x()) +
+                    0.5 * source_resolution;
+                source.local_max_y =
+                    std::max(first_center.y(), last_center.y()) +
+                    0.5 * source_resolution;
+                source.global_from_local_translation_x =
+                    snapshot.global_pose.translation().x();
+                source.global_from_local_translation_y =
+                    snapshot.global_pose.translation().y();
+                source.global_from_local_rotation =
+                    snapshot.global_pose.rotation().angle();
+                source.sample =
+                    [grid, cropped_offset, cropped_limits](
+                        const double local_x, const double local_y)
+                {
+                    map_scan_distance_field::RasterCell cell;
+                    const Eigen::Array2i source_index =
+                        grid->limits().GetCellIndex(Eigen::Vector2f(
+                            static_cast<float>(local_x),
+                            static_cast<float>(local_y)));
+                    if (source_index.x() < cropped_offset.x() ||
+                        source_index.y() < cropped_offset.y() ||
+                        source_index.x() >=
+                            cropped_offset.x() +
+                                cropped_limits.num_x_cells ||
+                        source_index.y() >=
+                            cropped_offset.y() +
+                                cropped_limits.num_y_cells ||
+                        !grid->IsKnown(source_index))
+                    {
+                        return cell;
+                    }
+                    cell.known = true;
+                    cell.occupied =
+                        1.0 - grid->GetCorrespondenceCost(source_index) >=
+                        kCurrentPoseScanMapOccupiedProbabilityThreshold;
+                    return cell;
+                };
+                resolution = std::min(resolution, source_resolution);
+                sources.push_back(std::move(source));
             }
 
-            if (occupied_cells <= 0)
+            map_scan_distance_field::Raster raster;
+            std::string error;
+            if (!map_scan_distance_field::Rasterize(
+                    sources,
+                    kCurrentPoseScanMapSearchRadiusMeters +
+                        2.0 * resolution,
+                    static_cast<int>(submaps.size()), &raster, &error))
             {
-                return field;
+                LOG(ERROR) << "[MapScanHealth]Failed to rasterize frozen "
+                              "submaps: "
+                           << error;
+                return invalid_field;
             }
 
-            const float diagonal = static_cast<float>(std::sqrt(2.0));
-            for (int y = 0; y < field->height; ++y)
+            auto field = std::make_shared<MapScanDistanceField>();
+            if (!map_scan_distance_field::Build(
+                    raster, kCurrentPoseScanMapSearchRadiusMeters,
+                    field.get(), &error))
             {
-                for (int x = 0; x < field->width; ++x)
-                {
-                    const size_t index = flat_index(x, y);
-                    float best = distance_cells[index];
-                    if (x > 0)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x - 1, y)] + 1.0f);
-                    }
-                    if (y > 0)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x, y - 1)] + 1.0f);
-                    }
-                    if (x > 0 && y > 0)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x - 1, y - 1)] + diagonal);
-                    }
-                    if (x + 1 < field->width && y > 0)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x + 1, y - 1)] + diagonal);
-                    }
-                    distance_cells[index] = best;
-                }
+                LOG(ERROR) << "[MapScanHealth]Failed to build exact distance "
+                              "field: "
+                           << error;
+                return invalid_field;
             }
-            for (int y = field->height - 1; y >= 0; --y)
-            {
-                for (int x = field->width - 1; x >= 0; --x)
-                {
-                    const size_t index = flat_index(x, y);
-                    float best = distance_cells[index];
-                    if (x + 1 < field->width)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x + 1, y)] + 1.0f);
-                    }
-                    if (y + 1 < field->height)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x, y + 1)] + 1.0f);
-                    }
-                    if (x + 1 < field->width && y + 1 < field->height)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x + 1, y + 1)] + diagonal);
-                    }
-                    if (x > 0 && y + 1 < field->height)
-                    {
-                        best = std::min(best, distance_cells[flat_index(x - 1, y + 1)] + diagonal);
-                    }
-                    distance_cells[index] = best;
-                }
-            }
-
-            field->distance_m.resize(cell_count);
-            for (size_t i = 0; i < cell_count; ++i)
-            {
-                const float distance_m =
-                    std::isfinite(distance_cells[i])
-                        ? distance_cells[i] * static_cast<float>(resolution)
-                        : static_cast<float>(
-                              kCurrentPoseScanMapSearchRadiusMeters);
-                field->distance_m[i] = std::min(
-                    distance_m,
-                    static_cast<float>(kCurrentPoseScanMapSearchRadiusMeters));
-            }
-            field->valid = true;
-            LOG(WARNING) << "[MapScanHealth]Built frozen map distance field "
-                         << "submaps="
-                         << field->frozen_finished_submap_count
-                         << " size=" << field->width << "x"
-                         << field->height
-                         << " resolution=" << field->resolution
-                         << " occupied_cells=" << occupied_cells;
+            LOG(INFO) << "[MapScanHealth]Built exact packed distance field "
+                      << "submaps=" << field->frozen_finished_submap_count
+                      << " size=" << field->width << "x" << field->height
+                      << " resolution=" << field->resolution
+                      << " resident_bytes="
+                      << field->cells.size() * sizeof(uint16_t);
             return field;
         }
 
         std::shared_ptr<const PoseGraph2D::MapScanDistanceField>
         PoseGraph2D::LoadMapScanDistanceFieldCache(
             const std::string &cache_filename,
-            const std::string &cache_key) const
+            const std::string &cache_key, std::string *const source) const
         {
+            if (source != nullptr)
+            {
+                *source = "unavailable";
+            }
             if (cache_filename.empty() || cache_key.empty())
             {
                 return nullptr;
             }
-            std::ifstream input(cache_filename, std::ios::binary);
-            if (!input.is_open())
+            map_scan_distance_field::CacheOptions options;
+            options.cache_key = cache_key;
+            options.max_distance_m =
+                kCurrentPoseScanMapSearchRadiusMeters;
+            options.occupied_probability_threshold =
+                kCurrentPoseScanMapOccupiedProbabilityThreshold;
+            MapScanDistanceField loaded;
+            map_scan_distance_field::CacheFormat format =
+                map_scan_distance_field::CacheFormat::kUnknown;
+            std::string error;
+            if (!map_scan_distance_field::LoadCache(
+                    cache_filename, options, &loaded, &format, &error))
             {
+                LOG(WARNING) << "[MapScanHealth]Distance field cache miss "
+                             << cache_filename << ": " << error;
                 return nullptr;
             }
-            std::string line;
-            if (!std::getline(input, line) ||
-                line != kMapScanDistanceFieldCacheMagic)
+            LOG(INFO) << "[MapScanHealth]Loaded distance field cache "
+                      << cache_filename << " format="
+                      << (format ==
+                                  map_scan_distance_field::CacheFormat::kV2
+                              ? "V2"
+                              : "V1")
+                      << " submaps="
+                      << loaded.frozen_finished_submap_count << " size="
+                      << loaded.width << "x" << loaded.height
+                      << " resident_bytes="
+                      << loaded.cells.size() * sizeof(uint16_t);
+            if (source != nullptr)
             {
-                LOG(WARNING) << "[MapScanHealth]Ignore invalid distance field "
-                             << "cache magic: " << cache_filename;
-                return nullptr;
+                *source =
+                    format == map_scan_distance_field::CacheFormat::kV2
+                        ? "cache_v2"
+                        : "cache_v1";
             }
-
-            std::map<std::string, std::string> header;
-            while (std::getline(input, line))
-            {
-                if (line == "END_HEADER")
-                {
-                    break;
-                }
-                std::istringstream line_stream(line);
-                std::string key;
-                if (!(line_stream >> key))
-                {
-                    continue;
-                }
-                std::string value;
-                std::getline(line_stream, value);
-                if (!value.empty() && value.front() == ' ')
-                {
-                    value.erase(value.begin());
-                }
-                header[key] = value;
-            }
-
-            auto find_value = [&header](const std::string &key)
-                                  -> const std::string *
-            {
-                const auto it = header.find(key);
-                return it == header.end() ? nullptr : &it->second;
-            };
-            try
-            {
-                const std::string *version = find_value("version");
-                const std::string *stored_cache_key = find_value("cache_key");
-                const std::string *resolution = find_value("resolution");
-                const std::string *origin_x = find_value("origin_x");
-                const std::string *origin_y = find_value("origin_y");
-                const std::string *width = find_value("width");
-                const std::string *height = find_value("height");
-                const std::string *submap_count = find_value("submap_count");
-                const std::string *max_distance_m =
-                    find_value("max_distance_m");
-                const std::string *occupied_probability_threshold =
-                    find_value("occupied_probability_threshold");
-                if (version == nullptr || stored_cache_key == nullptr ||
-                    resolution == nullptr || origin_x == nullptr ||
-                    origin_y == nullptr || width == nullptr ||
-                    height == nullptr || submap_count == nullptr ||
-                    max_distance_m == nullptr ||
-                    occupied_probability_threshold == nullptr)
-                {
-                    LOG(WARNING)
-                        << "[MapScanHealth]Ignore incomplete distance field "
-                        << "cache header: " << cache_filename;
-                    return nullptr;
-                }
-                if (std::stoi(*version) !=
-                        kMapScanDistanceFieldCacheVersion ||
-                    *stored_cache_key != cache_key ||
-                    std::fabs(std::stod(*max_distance_m) -
-                              kCurrentPoseScanMapSearchRadiusMeters) > 1e-9 ||
-                    std::fabs(std::stod(*occupied_probability_threshold) -
-                              kCurrentPoseScanMapOccupiedProbabilityThreshold) >
-                        1e-9)
-                {
-                    LOG(INFO) << "[MapScanHealth]Distance field cache does "
-                              << "not match current map/parameters: "
-                              << cache_filename;
-                    return nullptr;
-                }
-                auto field = std::make_shared<MapScanDistanceField>();
-                field->resolution = std::stod(*resolution);
-                field->origin_x = std::stod(*origin_x);
-                field->origin_y = std::stod(*origin_y);
-                field->width = std::stoi(*width);
-                field->height = std::stoi(*height);
-                field->frozen_finished_submap_count =
-                    std::stoi(*submap_count);
-                if (field->width <= 0 || field->height <= 0 ||
-                    field->resolution <= 0.0)
-                {
-                    return nullptr;
-                }
-                const size_t cell_count =
-                    static_cast<size_t>(field->width) *
-                    static_cast<size_t>(field->height);
-                std::vector<uint16_t> distance_mm(cell_count);
-                input.read(reinterpret_cast<char *>(distance_mm.data()),
-                           static_cast<std::streamsize>(
-                               distance_mm.size() * sizeof(uint16_t)));
-                if (!input)
-                {
-                    LOG(WARNING)
-                        << "[MapScanHealth]Truncated distance field cache "
-                        << "distance block: " << cache_filename;
-                    return nullptr;
-                }
-                field->known.resize(cell_count);
-                input.read(reinterpret_cast<char *>(field->known.data()),
-                           static_cast<std::streamsize>(
-                               field->known.size() * sizeof(uint8_t)));
-                if (!input)
-                {
-                    LOG(WARNING)
-                        << "[MapScanHealth]Truncated distance field cache "
-                        << "known block: " << cache_filename;
-                    return nullptr;
-                }
-                field->distance_m.resize(cell_count);
-                for (size_t i = 0; i < cell_count; ++i)
-                {
-                    field->distance_m[i] =
-                        static_cast<float>(distance_mm[i]) /
-                        static_cast<float>(
-                            kMapScanDistanceFieldCacheDistanceScale);
-                }
-                field->valid = true;
-                LOG(INFO) << "[MapScanHealth]Loaded map distance field cache "
-                          << cache_filename << " submaps="
-                          << field->frozen_finished_submap_count << " size="
-                          << field->width << "x" << field->height
-                          << " resolution=" << field->resolution;
-                return field;
-            }
-            catch (const std::exception &e)
-            {
-                LOG(WARNING) << "[MapScanHealth]Failed to parse distance "
-                             << "field cache " << cache_filename << ": "
-                             << e.what();
-                return nullptr;
-            }
+            return std::make_shared<MapScanDistanceField>(
+                std::move(loaded));
         }
-
         bool PoseGraph2D::SaveMapScanDistanceFieldCache(
-            const std::string &cache_filename, const std::string &cache_key,
+            const std::string &cache_filename,
+            const std::string &cache_key,
             const MapScanDistanceField &field) const
         {
-            if (cache_filename.empty() || cache_key.empty() || !field.valid ||
-                field.width <= 0 || field.height <= 0 ||
-                field.distance_m.empty() || field.known.empty())
+            if (cache_filename.empty() || cache_key.empty())
             {
                 return false;
             }
-            const size_t cell_count =
-                static_cast<size_t>(field.width) *
-                static_cast<size_t>(field.height);
-            if (field.distance_m.size() != cell_count ||
-                field.known.size() != cell_count)
+            map_scan_distance_field::CacheOptions options;
+            options.cache_key = cache_key;
+            options.max_distance_m =
+                kCurrentPoseScanMapSearchRadiusMeters;
+            options.occupied_probability_threshold =
+                kCurrentPoseScanMapOccupiedProbabilityThreshold;
+            std::string error;
+            if (!map_scan_distance_field::SaveCacheV2(
+                    cache_filename, options, field, &error))
             {
-                LOG(WARNING) << "[MapScanHealth]Skip distance field cache "
-                             << "write due to inconsistent field size.";
+                LOG(WARNING) << "[MapScanHealth]Failed to save V2 distance "
+                                "field cache "
+                             << cache_filename << ": " << error;
                 return false;
             }
-            std::vector<uint16_t> distance_mm(cell_count);
-            for (size_t i = 0; i < cell_count; ++i)
-            {
-                const double clamped_distance = std::max(
-                    0.0, std::min<double>(
-                             field.distance_m[i],
-                             kCurrentPoseScanMapSearchRadiusMeters));
-                distance_mm[i] = static_cast<uint16_t>(std::lround(
-                    clamped_distance *
-                    kMapScanDistanceFieldCacheDistanceScale));
-            }
-
-            const std::string tmp_filename = cache_filename + ".tmp";
-            std::ofstream output(tmp_filename,
-                                 std::ios::binary | std::ios::trunc);
-            if (!output.is_open())
-            {
-                LOG(WARNING) << "[MapScanHealth]Failed to open distance field "
-                             << "cache temp file: " << tmp_filename;
-                return false;
-            }
-            output << kMapScanDistanceFieldCacheMagic << "\n"
-                   << "version " << kMapScanDistanceFieldCacheVersion << "\n"
-                   << "cache_key " << cache_key << "\n"
-                   << "resolution " << std::setprecision(17)
-                   << field.resolution << "\n"
-                   << "origin_x " << std::setprecision(17) << field.origin_x
-                   << "\n"
-                   << "origin_y " << std::setprecision(17) << field.origin_y
-                   << "\n"
-                   << "width " << field.width << "\n"
-                   << "height " << field.height << "\n"
-                   << "submap_count "
-                   << field.frozen_finished_submap_count << "\n"
-                   << "max_distance_m " << std::setprecision(17)
-                   << kCurrentPoseScanMapSearchRadiusMeters << "\n"
-                   << "hit_radius_m " << std::setprecision(17)
-                   << kCurrentPoseScanMapHitRadiusMeters << "\n"
-                   << "occupied_probability_threshold "
-                   << std::setprecision(17)
-                   << kCurrentPoseScanMapOccupiedProbabilityThreshold << "\n"
-                   << "distance_scale "
-                   << kMapScanDistanceFieldCacheDistanceScale << "\n"
-                   << "encoding uint16_mm_then_uint8_known\n"
-                   << "END_HEADER\n";
-            output.write(reinterpret_cast<const char *>(distance_mm.data()),
-                         static_cast<std::streamsize>(
-                             distance_mm.size() * sizeof(uint16_t)));
-            output.write(reinterpret_cast<const char *>(field.known.data()),
-                         static_cast<std::streamsize>(
-                             field.known.size() * sizeof(uint8_t)));
-            output.close();
-            if (!output)
-            {
-                LOG(WARNING) << "[MapScanHealth]Failed while writing "
-                             << "distance field cache temp file: "
-                             << tmp_filename;
-                std::remove(tmp_filename.c_str());
-                return false;
-            }
-            if (std::rename(tmp_filename.c_str(), cache_filename.c_str()) != 0)
-            {
-                LOG(WARNING) << "[MapScanHealth]Failed to atomically replace "
-                             << "distance field cache " << cache_filename
-                             << ": " << std::strerror(errno);
-                std::remove(tmp_filename.c_str());
-                return false;
-            }
-            LOG(INFO) << "[MapScanHealth]Saved map distance field cache "
+            LOG(INFO) << "[MapScanHealth]Saved V2 distance field cache "
                       << cache_filename << " submaps="
                       << field.frozen_finished_submap_count << " size="
                       << field.width << "x" << field.height
-                      << " resolution=" << field.resolution;
+                      << " payload_bytes="
+                      << field.cells.size() * sizeof(uint16_t);
             return true;
         }
-
         void PoseGraph2D::MaybeCollectFinishedMapScanDistanceFieldTask()
         {
             if (map_scan_distance_field_future_.valid() &&
@@ -2628,46 +1824,34 @@ namespace cartographer
             }
         }
 
-        void PoseGraph2D::InvalidateMapScanDistanceField()
+        void PoseGraph2D::InvalidateMapScanDistanceField(
+            const std::string &reason)
         {
             map_scan_distance_field_.reset();
             ++map_scan_distance_field_generation_;
+            ++map_scan_distance_field_build_token_;
+            map_scan_distance_field_failed_generation_ = -1;
+            LOG(INFO) << "[MapScanHealth]Invalidated distance field generation="
+                      << map_scan_distance_field_generation_
+                      << " reason=" << reason;
+            RecordLocalizationHealthMapScanDistanceFieldInvalidation(
+                map_scan_distance_field_generation_, reason);
         }
 
         std::shared_ptr<const PoseGraph2D::MapScanDistanceField>
         PoseGraph2D::GetMapScanDistanceFieldIfReadyOrStartAsync()
         {
             MaybeCollectFinishedMapScanDistanceFieldTask();
-            const std::vector<MapScanDistanceFieldSubmapSnapshot> submaps =
-                SnapshotMapScanDistanceFieldSubmaps(
-                    false /* include_unfrozen_finished_submaps */);
-            const int frozen_finished_submap_count =
-                static_cast<int>(submaps.size());
-            if (frozen_finished_submap_count <= 0)
-            {
-                return nullptr;
-            }
             if (map_scan_distance_field_ != nullptr &&
-                map_scan_distance_field_->valid &&
-                map_scan_distance_field_->frozen_finished_submap_count ==
-                    frozen_finished_submap_count)
+                map_scan_distance_field_->valid)
             {
                 return map_scan_distance_field_;
             }
-            if (!map_scan_distance_field_cache_filename_.empty() &&
-                !map_scan_distance_field_cache_key_.empty())
+            if (map_scan_distance_field_configuration_in_progress_ ||
+                map_scan_distance_field_failed_generation_ ==
+                    map_scan_distance_field_generation_)
             {
-                std::shared_ptr<const MapScanDistanceField> loaded =
-                    LoadMapScanDistanceFieldCache(
-                        map_scan_distance_field_cache_filename_,
-                        map_scan_distance_field_cache_key_);
-                if (loaded != nullptr && loaded->valid &&
-                    loaded->frozen_finished_submap_count ==
-                        frozen_finished_submap_count)
-                {
-                    map_scan_distance_field_ = loaded;
-                    return map_scan_distance_field_;
-                }
+                return nullptr;
             }
             if (map_scan_distance_field_future_.valid() &&
                 map_scan_distance_field_future_.wait_for(
@@ -2679,34 +1863,132 @@ namespace cartographer
             {
                 return nullptr;
             }
-            InvalidateMapScanDistanceField();
+            const std::vector<MapScanDistanceFieldSubmapSnapshot> submaps =
+                SnapshotMapScanDistanceFieldSubmaps(
+                    false /* include_unfrozen_finished_submaps */);
+            const int frozen_finished_submap_count =
+                static_cast<int>(submaps.size());
+            if (frozen_finished_submap_count <= 0)
+            {
+                return nullptr;
+            }
             const int generation = map_scan_distance_field_generation_;
+            const std::uint64_t build_token =
+                ++map_scan_distance_field_build_token_;
             const std::string cache_filename =
                 map_scan_distance_field_cache_filename_;
             const std::string cache_key = map_scan_distance_field_cache_key_;
             map_scan_distance_field_build_in_progress_ = true;
             map_scan_distance_field_future_ =
                 std::async(std::launch::async,
-                           [this, submaps, generation, cache_filename,
-                            cache_key]()
+                           [this, submaps, generation, build_token,
+                            cache_filename, cache_key]()
                            {
+                               const auto build_started =
+                                   std::chrono::steady_clock::now();
                                const auto field =
                                    BuildMapScanDistanceField(submaps);
+                               const double build_duration_ms =
+                                   std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() -
+                                       build_started)
+                                       .count();
+                               std::string staging_filename;
+                               bool cache_staged = false;
                                if (field != nullptr && field->valid &&
                                    !cache_filename.empty() &&
                                    !cache_key.empty())
                                {
-                                   SaveMapScanDistanceFieldCache(
-                                       cache_filename, cache_key, *field);
+                                   staging_filename =
+                                       cache_filename + ".generation-" +
+                                       std::to_string(generation) + ".token-" +
+                                       std::to_string(build_token) + ".pending";
+                                   cache_staged = SaveMapScanDistanceFieldCache(
+                                       staging_filename, cache_key, *field);
                                }
-                               absl::MutexLock locker(&mutex_);
-                               if (generation ==
-                                   map_scan_distance_field_generation_)
+
+                               bool published = false;
+                               bool cache_committed = false;
+                               std::string build_result = "build_failed";
                                {
-                                   map_scan_distance_field_ = field;
+                                   absl::MutexLock locker(&mutex_);
+                                   if (generation !=
+                                           map_scan_distance_field_generation_ ||
+                                       build_token !=
+                                           map_scan_distance_field_build_token_)
+                                   {
+                                       map_scan_distance_field_build_in_progress_ =
+                                           false;
+                                       build_result = "stale_generation";
+                                   }
+                                   else if (field == nullptr || !field->valid)
+                                   {
+                                       map_scan_distance_field_failed_generation_ =
+                                           generation;
+                                       map_scan_distance_field_build_in_progress_ =
+                                           false;
+                                       build_result = "build_failed";
+                                   }
+                                   else
+                                   {
+                                       if (cache_staged)
+                                       {
+                                           if (std::rename(
+                                                   staging_filename.c_str(),
+                                                   cache_filename.c_str()) == 0)
+                                           {
+                                               cache_committed = true;
+                                               build_result =
+                                                   "published_cache_committed";
+                                           }
+                                           else
+                                           {
+                                               LOG(WARNING)
+                                                   << "[MapScanHealth]Failed to "
+                                                      "commit generation "
+                                                   << generation
+                                                   << " distance field cache: "
+                                                   << std::strerror(errno);
+                                               build_result =
+                                                   "published_cache_commit_failed";
+                                           }
+                                       }
+                                       else if (!cache_filename.empty() &&
+                                                !cache_key.empty())
+                                       {
+                                           build_result =
+                                               "published_cache_stage_failed";
+                                       }
+                                       else
+                                       {
+                                           build_result = "published";
+                                       }
+                                       map_scan_distance_field_ = field;
+                                       map_scan_distance_field_failed_generation_ =
+                                           -1;
+                                       map_scan_distance_field_build_in_progress_ =
+                                           false;
+                                       published = true;
+                                   }
                                }
-                               map_scan_distance_field_build_in_progress_ =
-                                   false;
+                               if (cache_staged && !cache_committed)
+                               {
+                                   std::remove(staging_filename.c_str());
+                               }
+                               if (!published)
+                               {
+                                   LOG(WARNING)
+                                       << "[MapScanHealth]Discarded distance "
+                                          "field build generation="
+                                       << generation << " token=" << build_token;
+                               }
+                               const std::size_t cells =
+                                   field != nullptr ? field->cells.size() : 0;
+                               RecordLocalizationHealthMapScanDistanceFieldBuild(
+                                   field != nullptr && field->valid, published,
+                                   "cold_build", generation, cells,
+                                   cells * sizeof(uint16_t), build_duration_ms,
+                                   build_result);
                            });
             LOG(INFO) << "[MapScanHealth]Started async map distance field "
                       << "build submaps=" << frozen_finished_submap_count
@@ -2718,15 +2000,25 @@ namespace cartographer
         void PoseGraph2D::ConfigureMapScanDistanceFieldCache(
             const std::string &cache_filename, const std::string &cache_key)
         {
+            // Loaded submaps are installed through the PoseGraph work queue.
+            // Finish that one-time load before accepting a sidecar so the
+            // freshly loaded field is not immediately invalidated once per
+            // frozen submap.
+            WaitForAllComputations();
             std::future<void> previous_future;
+            int configured_generation = -1;
             {
                 absl::MutexLock locker(&mutex_);
+                map_scan_distance_field_configuration_in_progress_ = true;
+                map_scan_distance_field_cache_filename_ = cache_filename;
+                map_scan_distance_field_cache_key_ = cache_key;
+                InvalidateMapScanDistanceField("map_revision_configured");
+                configured_generation = map_scan_distance_field_generation_;
                 if (map_scan_distance_field_future_.valid())
                 {
                     previous_future =
                         std::move(map_scan_distance_field_future_);
                     map_scan_distance_field_build_in_progress_ = false;
-                    InvalidateMapScanDistanceField();
                 }
             }
             if (previous_future.valid())
@@ -2734,23 +2026,46 @@ namespace cartographer
                 previous_future.wait();
             }
 
+            std::string cache_source;
+            const auto load_started = std::chrono::steady_clock::now();
             std::shared_ptr<const MapScanDistanceField> loaded =
-                LoadMapScanDistanceFieldCache(cache_filename, cache_key);
+                LoadMapScanDistanceFieldCache(cache_filename, cache_key,
+                                              &cache_source);
+            const double load_duration_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - load_started)
+                    .count();
+            bool cache_installed = false;
+            bool start_async_build = false;
             {
                 absl::MutexLock locker(&mutex_);
-                map_scan_distance_field_cache_filename_ = cache_filename;
-                map_scan_distance_field_cache_key_ = cache_key;
-                InvalidateMapScanDistanceField();
-                if (loaded != nullptr)
+                map_scan_distance_field_configuration_in_progress_ = false;
+                if (configured_generation ==
+                        map_scan_distance_field_generation_ &&
+                    loaded != nullptr)
                 {
                     map_scan_distance_field_ = loaded;
+                    map_scan_distance_field_failed_generation_ = -1;
+                    cache_installed = true;
                     LOG(INFO) << "[MapScanHealth]Using cached map distance "
-                              << "field: " << cache_filename;
+                              << "field: " << cache_filename
+                              << " source=" << cache_source;
                 }
                 else
                 {
-                    GetMapScanDistanceFieldIfReadyOrStartAsync();
+                    start_async_build = true;
                 }
+            }
+            const std::size_t loaded_cells =
+                loaded != nullptr ? loaded->cells.size() : 0;
+            RecordLocalizationHealthMapScanDistanceFieldLoad(
+                cache_installed, cache_source, configured_generation,
+                loaded_cells, loaded_cells * sizeof(uint16_t),
+                load_duration_ms);
+            if (start_async_build)
+            {
+                absl::MutexLock locker(&mutex_);
+                GetMapScanDistanceFieldIfReadyOrStartAsync();
             }
         }
 
@@ -2766,10 +2081,10 @@ namespace cartographer
                 absl::MutexLock locker(&mutex_);
                 if (map_scan_distance_field_future_.valid())
                 {
+                    ++map_scan_distance_field_build_token_;
                     previous_future =
                         std::move(map_scan_distance_field_future_);
                     map_scan_distance_field_build_in_progress_ = false;
-                    InvalidateMapScanDistanceField();
                 }
             }
             if (previous_future.valid())
@@ -2778,29 +2093,37 @@ namespace cartographer
             }
 
             std::vector<MapScanDistanceFieldSubmapSnapshot> submaps;
+            int generation = 0;
             {
                 absl::MutexLock locker(&mutex_);
                 submaps = SnapshotMapScanDistanceFieldSubmaps(
                     true /* include_unfrozen_finished_submaps */);
+                generation = map_scan_distance_field_generation_;
             }
+            const auto build_started = std::chrono::steady_clock::now();
             const auto field = BuildMapScanDistanceField(submaps);
+            const double build_duration_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - build_started)
+                    .count();
             if (field == nullptr || !field->valid)
             {
                 LOG(WARNING)
                     << "[MapScanHealth]Failed to build map distance field "
                     << "cache: no valid finished submaps.";
+                RecordLocalizationHealthMapScanDistanceFieldBuild(
+                    false, false, "sidecar_build", generation, 0, 0,
+                    build_duration_ms, "build_failed");
                 return false;
             }
             const bool saved =
                 SaveMapScanDistanceFieldCache(cache_filename, cache_key,
                                               *field);
-            {
-                absl::MutexLock locker(&mutex_);
-                map_scan_distance_field_cache_filename_ = cache_filename;
-                map_scan_distance_field_cache_key_ = cache_key;
-                InvalidateMapScanDistanceField();
-                map_scan_distance_field_ = field;
-            }
+            const std::size_t cells = field->cells.size();
+            RecordLocalizationHealthMapScanDistanceFieldBuild(
+                saved, false, "sidecar_build", generation, cells,
+                cells * sizeof(uint16_t), build_duration_ms,
+                saved ? "sidecar_saved" : "sidecar_save_failed");
             return saved;
         }
 
@@ -2811,15 +2134,24 @@ namespace cartographer
             const MapScanDistanceField &distance_field,
             const int max_sampled_points) const
         {
+            const auto query_started = std::chrono::steady_clock::now();
+            const auto record_query_duration = [&query_started]()
+            {
+                RecordLocalizationHealthMapScanDistanceFieldQuery(
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - query_started)
+                        .count());
+            };
             CurrentPoseScanMapQuality quality;
             quality.checked_submaps =
                 distance_field.frozen_finished_submap_count;
             const sensor::PointCloud &point_cloud =
                 constant_data.filtered_gravity_aligned_point_cloud;
             if (!distance_field.valid || point_cloud.empty() ||
-                distance_field.distance_m.empty() ||
+                distance_field.cells.empty() ||
                 distance_field.width <= 0 || distance_field.height <= 0)
             {
+                record_query_duration();
                 return quality;
             }
 
@@ -2830,13 +2162,6 @@ namespace cartographer
             int known_points = 0;
             int hit20_count = 0;
             double distance_sum = 0.0;
-            auto flat_index =
-                [width = distance_field.width](const int x, const int y)
-            {
-                return static_cast<size_t>(y) * static_cast<size_t>(width) +
-                       static_cast<size_t>(x);
-            };
-
             for (size_t point_index = 0; point_index < point_cloud.size();
                  point_index += sample_step)
             {
@@ -2845,27 +2170,20 @@ namespace cartographer
                     point_cloud[point_index].position.y());
                 const Eigen::Vector2d global_point =
                     global_pose * local_point;
-                const int gx = static_cast<int>(
-                    std::floor((global_point.x() -
-                                distance_field.origin_x) /
-                               distance_field.resolution));
-                const int gy = static_cast<int>(
-                    std::floor((global_point.y() -
-                                distance_field.origin_y) /
-                               distance_field.resolution));
                 ++sampled_points;
                 double distance =
                     kCurrentPoseScanMapSearchRadiusMeters;
-                if (gx >= 0 && gx < distance_field.width &&
-                    gy >= 0 && gy < distance_field.height)
+                const map_scan_distance_field::SampleResult sample =
+                    map_scan_distance_field::Sample(
+                        distance_field, global_point.x(), global_point.y());
+                if (sample.in_bounds)
                 {
-                    const size_t index = flat_index(gx, gy);
-                    if (distance_field.known[index])
+                    if (sample.known)
                     {
                         ++known_points;
                     }
                     distance = std::min<double>(
-                        distance_field.distance_m[index],
+                        sample.distance_m,
                         kCurrentPoseScanMapSearchRadiusMeters);
                 }
                 if (distance <= kCurrentPoseScanMapHitRadiusMeters)
@@ -2877,6 +2195,7 @@ namespace cartographer
 
             if (sampled_points <= 0)
             {
+                record_query_duration();
                 return quality;
             }
             quality.hit20 = static_cast<double>(hit20_count) /
@@ -2886,6 +2205,7 @@ namespace cartographer
             quality.known_ratio = static_cast<double>(known_points) /
                                   static_cast<double>(sampled_points);
             quality.sampled_points = sampled_points;
+            record_query_duration();
             return quality;
         }
 
@@ -2938,6 +2258,12 @@ namespace cartographer
                     recovery.consecutive_scan_map_severe_bad_count >=
                     kMapScanSevereBadRequiredSamples;
             }
+            if (recovery.recovery_state == "LOST_CONFIRMED")
+            {
+                RecordLocalizationHealthRecoveryState(
+                    recovery.recovery_state, recovery.recovery_reason);
+                return;
+            }
             if (valid && !bad &&
                 recovery.recovery_reason ==
                     "active_frozen_accepted_waiting_scan_map")
@@ -2952,8 +2278,6 @@ namespace cartographer
                 recovery.large_correction_consistency_reject_count_since_accept = 0;
                 recovery.recovery_full_search_attempts_since_accept = 0;
                 recovery.last_recovery_full_search_node_index = -1;
-                recovery.auto_relocation_failures_since_accept = 0;
-                recovery.auto_relocation_suppressed_until_node_index = -1;
                 recovery.recovery_state = "OK";
                 recovery.recovery_reason = "scan_map_recovered";
                 active_frozen_consistency_windows_.erase(
@@ -2969,36 +2293,6 @@ namespace cartographer
 
             const bool degraded =
                 IsLocalizationDegraded(node_id, recovery);
-            const int nodes_since_last_auto =
-                (last_automatic_global_relocation_trajectory_id_ !=
-                     node_id.trajectory_id ||
-                 last_automatic_global_relocation_node_index_ < 0)
-                    ? kAutoRelocationCooldownNodeGap
-                    : node_id.node_index -
-                          last_automatic_global_relocation_node_index_;
-            const bool in_cooldown =
-                nodes_since_last_auto < kAutoRelocationCooldownNodeGap;
-            if (recovery.recovery_state == "AUTO_RELOCATING")
-            {
-                RecordLocalizationHealthRecoveryState(
-                    recovery.recovery_state, recovery.recovery_reason);
-                return;
-            }
-            if (in_cooldown && recovery.recovery_state == "COOLDOWN")
-            {
-                RecordLocalizationHealthRecoveryState(
-                    recovery.recovery_state, recovery.recovery_reason);
-                return;
-            }
-            if (recovery.auto_relocation_suppressed_until_node_index >=
-                node_id.node_index)
-            {
-                recovery.recovery_state = "DEGRADED";
-                recovery.recovery_reason = "auto_relocation_suppressed";
-                RecordLocalizationHealthRecoveryState(
-                    recovery.recovery_state, recovery.recovery_reason);
-                return;
-            }
             if (degraded)
             {
                 recovery.recovery_state = "DEGRADED";
@@ -3059,8 +2353,7 @@ namespace cartographer
                 *reason = "work_queue_backlogged";
                 return false;
             }
-            if (recovery->recovery_state == "AUTO_RELOCATING" ||
-                recovery->recovery_state == "COOLDOWN")
+            if (recovery->recovery_state == "LOST_CONFIRMED")
             {
                 *reason = recovery->recovery_state;
                 return false;
@@ -3101,15 +2394,98 @@ namespace cartographer
 
         std::vector<SubmapId>
         PoseGraph2D::SelectActiveFrozenSubmapsForSearch(
+            const NodeId &node_id,
             const std::vector<std::pair<double, SubmapId>> &candidates,
+            const bool local_search_window,
             const bool recovery_full_search,
-            const std::size_t queued_work_items_at_start) const
+            const std::size_t queued_work_items_at_start)
         {
             std::vector<SubmapId> selected;
-            selected.reserve(candidates.size());
+            if (candidates.empty() ||
+                queued_work_items_at_start >=
+                    kWorkQueueDropSensorDataThreshold)
+            {
+                return selected;
+            }
+
+            size_t budget = 0;
+            if (queued_work_items_at_start >=
+                kWorkQueueSensorMediumBacklogThreshold)
+            {
+                budget =
+                    kMaxMediumBackloggedActiveFrozenSubmapsPerNode;
+            }
+            else if (queued_work_items_at_start >=
+                     kWorkQueueConstraintSoftBacklogThreshold)
+            {
+                budget = kMaxSoftBackloggedActiveFrozenSubmapsPerNode;
+            }
+            else if (recovery_full_search)
+            {
+                budget = kMaxRecoveryActiveFrozenSubmapsPerNode;
+            }
+            else if (local_search_window)
+            {
+                budget = kMaxStableActiveFrozenSubmapsPerNode;
+            }
+            else
+            {
+                budget =
+                    kMaxDisconnectedActiveFrozenSubmapsPerNode;
+            }
+            budget = std::min(budget, candidates.size());
+            selected.reserve(budget);
+
+            if (local_search_window && !recovery_full_search)
+            {
+                // While localization is healthy, constrained matching only
+                // needs the closest frozen submaps.
+                for (size_t i = 0; i < budget; ++i)
+                {
+                    selected.push_back(candidates[i].second);
+                }
+                return selected;
+            }
+
+            if (!recovery_full_search)
+            {
+                const int node_gap =
+                    queued_work_items_at_start >=
+                            kWorkQueueConstraintSoftBacklogThreshold
+                        ? kBackloggedActiveFrozenGlobalSearchNodeGap
+                        : kActiveFrozenGlobalSearchNodeGap;
+                auto last_search_it =
+                    last_active_frozen_global_search_node_index_
+                        .emplace(node_id.trajectory_id, -1)
+                        .first;
+                int &last_search_node_index =
+                    last_search_it->second;
+                if (last_search_node_index >= 0 &&
+                    node_id.node_index - last_search_node_index < node_gap)
+                {
+                    return selected;
+                }
+                last_search_node_index = node_id.node_index;
+            }
+
+            // Global matching does not use the current pose as an initial
+            // estimate. Iterate by stable SubmapId order so every frozen
+            // submap is searched within a bounded number of nodes.
+            std::vector<SubmapId> coverage_order;
+            coverage_order.reserve(candidates.size());
             for (const auto &candidate : candidates)
             {
-                selected.push_back(candidate.second);
+                coverage_order.push_back(candidate.second);
+            }
+            std::sort(coverage_order.begin(), coverage_order.end());
+
+            size_t &cursor =
+                active_frozen_global_search_cursor_[node_id.trajectory_id];
+            cursor %= coverage_order.size();
+            for (size_t i = 0; i < budget; ++i)
+            {
+                selected.push_back(coverage_order[cursor]);
+                cursor = (cursor + 1) % coverage_order.size();
             }
             return selected;
         }
@@ -3837,31 +3213,27 @@ namespace cartographer
             return filtered_result;
         }
 
-        bool PoseGraph2D::ShouldRunAutomaticGlobalRelocation(
-            const NodeId &node_id, const std::size_t queued_work_items,
-            std::string *const trigger_reason)
+        void PoseGraph2D::MaybeDeclareLocalizationLost(
+            const NodeId &node_id, const std::size_t queued_work_items)
         {
-            CHECK(trigger_reason != nullptr);
-            if (!flirt::use_flirt.load())
-            {
-                return false;
-            }
             if (!IsTrajectoryActive(node_id.trajectory_id))
             {
-                return false;
+                return;
             }
             if (!HasFrozenTrajectoryForLocalization())
             {
-                return false;
+                return;
             }
-            if (flirt::need_flirt.load() || flirt::flirt_working.load())
+            LocalizationRecoveryRuntime &recovery =
+                localization_recovery_[node_id.trajectory_id];
+            if (recovery.recovery_state == "LOST_CONFIRMED")
             {
-                return false;
+                RecordLocalizationHealthRecoveryState(
+                    recovery.recovery_state, recovery.recovery_reason);
+                return;
             }
             if (queued_work_items >= kRecoveryWorkQueueTriggerThreshold)
             {
-                LocalizationRecoveryRuntime &recovery =
-                    localization_recovery_[node_id.trajectory_id];
                 if (IsLocalizationDegraded(node_id, recovery))
                 {
                     recovery.recovery_state = "DEGRADED";
@@ -3869,39 +3241,11 @@ namespace cartographer
                     RecordLocalizationHealthRecoveryState(
                         recovery.recovery_state, recovery.recovery_reason);
                 }
-                return false;
+                return;
             }
 
             const int nodes_since_cross_constraint =
                 NodesSinceLastActiveFrozenConstraint(node_id);
-            LocalizationRecoveryRuntime &recovery =
-                localization_recovery_[node_id.trajectory_id];
-            if (recovery.auto_relocation_suppressed_until_node_index >=
-                node_id.node_index)
-            {
-                recovery.recovery_state = "DEGRADED";
-                recovery.recovery_reason = "auto_relocation_suppressed";
-                RecordLocalizationHealthRecoveryState(
-                    recovery.recovery_state, recovery.recovery_reason);
-                return false;
-            }
-            if (recovery.auto_relocation_suppressed_until_node_index >= 0)
-            {
-                recovery.auto_relocation_suppressed_until_node_index = -1;
-                recovery.auto_relocation_failures_since_accept = 0;
-            }
-            if (recovery.auto_relocation_failures_since_accept >=
-                kAutoRelocationMaxFailuresPerEpisode)
-            {
-                recovery.auto_relocation_suppressed_until_node_index =
-                    node_id.node_index + kAutoRelocationSuppressionNodeGap;
-                recovery.recovery_state = "DEGRADED";
-                recovery.recovery_reason = "relocation_exhausted";
-                RecordLocalizationHealthRecoveryState(
-                    recovery.recovery_state, recovery.recovery_reason);
-                return false;
-            }
-
             const bool recovery_failed_trigger =
                 recovery.recovery_full_search_attempts_since_accept >=
                 kRecoveryFullSearchMaxAttempts;
@@ -3910,30 +3254,27 @@ namespace cartographer
                 recovery.scan_map_severe_bad;
             if (!recovery_failed_trigger || !confirmed_lost_trigger)
             {
-                return false;
+                return;
             }
 
-            const int nodes_since_last_auto_relocation =
-                (last_automatic_global_relocation_trajectory_id_ !=
-                     node_id.trajectory_id ||
-                 last_automatic_global_relocation_node_index_ < 0)
-                    ? kAutoRelocationCooldownNodeGap
-                    : node_id.node_index -
-                          last_automatic_global_relocation_node_index_;
-            if (nodes_since_last_auto_relocation <
-                kAutoRelocationCooldownNodeGap)
-            {
-                return false;
-            }
-            *trigger_reason = "confirmed_lost_recovery_failed";
-            recovery.recovery_state = "AUTO_RELOCATING";
-            recovery.recovery_reason = *trigger_reason;
+            recovery.recovery_state = "LOST_CONFIRMED";
+            recovery.recovery_reason = "confirmed_lost_recovery_failed";
             RecordLocalizationHealthRecoveryState(recovery.recovery_state,
                                                   recovery.recovery_reason);
-            return true;
+            LOG(ERROR) << "[LocalizationRecovery]Localization loss confirmed "
+                       << "node=" << node_id
+                       << " nodes_since_cross_constraint="
+                       << nodes_since_cross_constraint
+                       << " recovery_attempts="
+                       << recovery.recovery_full_search_attempts_since_accept
+                       << " scan_map_hit20="
+                       << recovery.latest_scan_map_hit20
+                       << " scan_map_mean_distance="
+                       << recovery.latest_scan_map_mean_distance
+                       << "; background FLIRT relocation is disabled.";
         }
 
-        void PoseGraph2D::UpdateAutomaticGlobalRelocationState(
+        void PoseGraph2D::UpdateLocalizationRecoveryFromAcceptedConstraint(
             const Constraint &constraint)
         {
             if (!IsActiveNodeToFrozenSubmapConstraint(constraint))
@@ -3943,6 +3284,17 @@ namespace cartographer
             RecordLocalizationHealthActiveFrozenAcceptedConstraint();
             LocalizationRecoveryRuntime &recovery =
                 localization_recovery_[constraint.node_id.trajectory_id];
+            if (recovery.recovery_state == "LOST_CONFIRMED")
+            {
+                RecordLocalizationHealthRecoveryState(
+                    recovery.recovery_state, recovery.recovery_reason);
+                LOG(WARNING)
+                    << "[LocalizationRecovery]Ignore automatic recovery from "
+                       "accepted constraint after localization loss was "
+                       "confirmed; explicit relocalization is required. node="
+                    << constraint.node_id << " submap=" << constraint.submap_id;
+                return;
+            }
             if (recovery.scan_map_bad || recovery.scan_map_severe_bad)
             {
                 recovery.recovery_state = "DEGRADED";
@@ -3971,8 +3323,6 @@ namespace cartographer
             recovery.large_correction_consistency_reject_count_since_accept = 0;
             recovery.recovery_full_search_attempts_since_accept = 0;
             recovery.last_recovery_full_search_node_index = -1;
-            recovery.auto_relocation_failures_since_accept = 0;
-            recovery.auto_relocation_suppressed_until_node_index = -1;
             recovery.recovery_state = "OK";
             recovery.recovery_reason = "active_frozen_accepted";
             active_frozen_consistency_windows_.erase(
@@ -3988,7 +3338,7 @@ namespace cartographer
                     constraint.node_id.trajectory_id;
                 last_active_to_frozen_constraint_node_index_ =
                     constraint.node_id.node_index;
-                LOG(WARNING) << "[AutoRelocation]Cross constraint node="
+                LOG(WARNING) << "[LocalizationRecovery]Cross constraint node="
                              << constraint.node_id
                              << " submap=" << constraint.submap_id
                              << " reset no-cross counter.";
@@ -4062,7 +3412,8 @@ namespace cartographer
                 for (const Constraint &constraint : filtered_result)
                 {
                     UpdateTrajectoryConnectivity(constraint);
-                    UpdateAutomaticGlobalRelocationState(constraint);
+                    UpdateLocalizationRecoveryFromAcceptedConstraint(
+                        constraint);
                 }
                 DeleteTrajectoriesIfNeeded();
                 TrimmingHandle trimming_handle(this);
@@ -4289,7 +3640,7 @@ namespace cartographer
           trajectory_id, other_trajectory_id, common::FromUniversal(0));
     }
     data_.trajectories_state[trajectory_id].state = TrajectoryState::FROZEN;
-    InvalidateMapScanDistanceField();
+    InvalidateMapScanDistanceField("frozen_trajectory_added");
     return WorkItem::Result::kDoNotRunOptimization; });
         }
 
@@ -4323,7 +3674,6 @@ namespace cartographer
                     return;
                 data_.submap_data.Insert(submap_id, InternalSubmapData());
                 data_.submap_data.at(submap_id).submap = submap_ptr;
-                InvalidateMapScanDistanceField();
                 // Immediately show the submap at the 'global_submap_pose'.
                 data_.global_submap_poses_2d.Insert(
                     submap_id, optimization::SubmapSpec2D{global_submap_pose_2d});
@@ -4346,7 +3696,11 @@ namespace cartographer
                     absl::MutexLock locker(&mutex_);
                     data_.submap_data.at(submap_id).state = SubmapState::kFinished;
                     optimization_problem_->InsertSubmap(submap_id, global_submap_pose_2d);
-                    InvalidateMapScanDistanceField();
+                    if (IsTrajectoryFrozen(submap_id.trajectory_id))
+                    {
+                        InvalidateMapScanDistanceField(
+                            "frozen_submap_added");
+                    }
                     return WorkItem::Result::kDoNotRunOptimization;
                 });
         }
@@ -4988,14 +4342,20 @@ namespace cartographer
             // Mark the submap with 'submap_id' as trimmed and remove its data.
             CHECK(parent_->data_.submap_data.at(submap_id).state ==
                   SubmapState::kFinished);
+            const bool trimmed_submap_was_frozen =
+                parent_->IsTrajectoryFrozen(submap_id.trajectory_id);
             parent_->data_.submap_data.Trim(submap_id);
             parent_->constraint_builder_.DeleteScanMatcher(submap_id);
             parent_->optimization_problem_->TrimSubmap(submap_id);
-            parent_->InvalidateMapScanDistanceField();
+            if (trimmed_submap_was_frozen)
+            {
+                parent_->InvalidateMapScanDistanceField(
+                    "frozen_submap_trimmed");
+            }
 
             // We have one submap less, update the gauge metrics.
             kDeletedSubmapsMetric->Increment();
-            if (parent_->IsTrajectoryFrozen(submap_id.trajectory_id))
+            if (trimmed_submap_was_frozen)
             {
                 kFrozenSubmapsMetric->Decrement();
             }

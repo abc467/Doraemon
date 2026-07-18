@@ -17,7 +17,9 @@
 #ifndef CARTOGRAPHER_MAPPING_TRAJECTORY_NODE_H_
 #define CARTOGRAPHER_MAPPING_TRAJECTORY_NODE_H_
 
+#include <atomic>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "Eigen/Core"
@@ -63,7 +65,21 @@ struct TrajectoryNode {
     // The node pose in the local SLAM frame.
     transform::Rigid3d local_pose;
 
-    std::vector<InterestPoint*> interest_points;
+    // FLIRT features are computed after local SLAM and published atomically to
+    // readers. A null pointer means "not computed"; a non-null empty set means
+    // "computed, no features".
+    mutable std::shared_ptr<const flirt::FeatureSet> flirt_features;
+
+    std::shared_ptr<const flirt::FeatureSet> GetFlirtFeatures() const {
+      return std::atomic_load_explicit(&flirt_features,
+                                       std::memory_order_acquire);
+    }
+
+    void SetFlirtFeatures(
+        std::shared_ptr<const flirt::FeatureSet> features) const {
+      std::atomic_store_explicit(&flirt_features, std::move(features),
+                                 std::memory_order_release);
+    }
   };
 
   common::Time time() const { return constant_data->time; }

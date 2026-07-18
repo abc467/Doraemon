@@ -1,11 +1,18 @@
 <launch>
+  <arg name="transport" default="tcp"/>
   <arg name="serial_device" default="/dev/mcore"/>
   <arg name="serial_baudrate" default="115200"/>
+  <arg name="tcp_host" default="192.168.127.10"/>
+  <arg name="tcp_port" default="8080"/>
+  <arg name="tcp_connect_timeout_sec" default="2.0"/>
+  <arg name="tcp_no_delay" default="true"/>
+  <arg name="tcp_keepalive" default="true"/>
   <arg name="cmd_vel_topic" default="/cmd_vel"/>
-  <arg name="send_rate_hz" default="20.0"/>
+  <arg name="send_rate_hz" default="10.0"/>
   <arg name="cmd_timeout_sec" default="0.5"/>
   <arg name="reconnect_interval_sec" default="1.0"/>
   <arg name="write_timeout_sec" default="0.05"/>
+  <arg name="tx_min_interval_sec" default="0.02"/>
   <!-- Real M-core debug software sends vx=50.0 for 50 mm/s and wz=34.9 for 0.0349 rad/s. -->
   <arg name="linear_velocity_scale" default="1000.0"/>
   <arg name="angular_velocity_scale" default="1000.0"/>
@@ -14,6 +21,7 @@
   <arg name="max_abs_linear_velocity" default="0.0"/>
   <arg name="max_abs_angular_velocity" default="0.0"/>
   <arg name="send_immediately" default="true"/>
+  <arg name="repeat_last_cmd_vel" default="false"/>
   <arg name="send_zero_on_connect" default="true"/>
   <arg name="send_zero_on_shutdown" default="true"/>
   <arg name="drain_after_write" default="true"/>
@@ -23,6 +31,49 @@
   <arg name="enable_rx_raw_log" default="false"/>
   <arg name="rx_log_interval_sec" default="1.0"/>
   <arg name="rx_silence_warn_sec" default="5.0"/>
+  <arg name="rx_poll_hz" default="100.0"/>
+  <arg name="enable_cleaning_control" default="true"/>
+  <arg name="clean_tools_topic" default="/mcore/control_clean_tools"/>
+  <arg name="water_tap_topic" default="/mcore/control_water_tap"/>
+  <arg name="vacuum_motor_topic" default="/mcore/control_motor"/>
+  <arg name="cleaning_params_topic" default="/mcore/cleaning_params/set"/>
+  <arg name="cleaning_params_state_topic" default="/mcore/cleaning_params/current"/>
+  <arg name="combined_status_topic" default="/combined_status"/>
+  <arg name="safety_status_bits_topic" default="/mcore_velocity_sender/safety_status_bits"/>
+  <arg name="telemetry_heartbeat_topic" default="/mcore_velocity_sender/telemetry_heartbeat"/>
+  <arg name="battery_state_topic" default="/battery_state"/>
+  <arg name="battery_remaining_topic" default="/mcore/battery_remaining"/>
+  <arg name="clean_water_level_topic" default="/mcore/clean_water_level"/>
+  <arg name="sewage_level_topic" default="/mcore/sewage_level"/>
+  <arg name="enable_battery_remaining_poll" default="true"/>
+  <arg name="battery_remaining_poll_hz" default="0.2"/>
+  <arg name="battery_full_capacity" default="150.0"/>
+  <arg name="enable_water_level_poll" default="true"/>
+  <arg name="water_level_poll_hz" default="0.2"/>
+  <arg name="telemetry_poll_interval_sec" default="1.3"/>
+  <arg name="enable_status_poll" default="false"/>
+  <arg name="status_poll_hz" default="2.0"/>
+  <arg name="telemetry_velocity_quiet_sec" default="0.0"/>
+  <arg name="telemetry_control_cooldown_sec" default="0.3"/>
+  <arg name="charge_enable_topic" default="/mcore/charge_enable"/>
+  <arg name="charge_cmd_repeat" default="3"/>
+  <arg name="charge_cmd_interval_sec" default="0.05"/>
+  <arg name="main_brush_speed" default="0"/>
+  <arg name="side_brush_follows_main_brush" default="false"/>
+  <arg name="side_brush_on_value" default="0"/>
+  <arg name="side_brush_off_value" default="0"/>
+  <arg name="brush_down_distance" default="0"/>
+  <arg name="brush_home_value" default="-10000"/>
+  <arg name="brush_stop_value" default="-10001"/>
+  <arg name="squeegee_forward_value" default="1"/>
+  <arg name="squeegee_backward_value" default="-1"/>
+  <arg name="squeegee_stop_value" default="0"/>
+  <arg name="send_cleaning_stop_on_connect" default="false"/>
+  <arg name="send_cleaning_stop_on_shutdown" default="true"/>
+  <arg name="use_height_scrub_for_brush_distance" default="false"/>
+  <arg name="vel_water_pump" default="0"/>
+  <arg name="vel_water_suction" default="0"/>
+  <arg name="height_scrub" default="0"/>
 
   <node pkg="mcore_chassis_bridge"
         type="mcore_velocity_sender_node"
@@ -30,13 +81,20 @@
         output="screen"
         respawn="true"
         respawn_delay="2.0">
+    <param name="transport" value="$(arg transport)"/>
     <param name="serial_device" value="$(arg serial_device)"/>
     <param name="serial_baudrate" value="$(arg serial_baudrate)"/>
+    <param name="tcp_host" value="$(arg tcp_host)"/>
+    <param name="tcp_port" value="$(arg tcp_port)"/>
+    <param name="tcp_connect_timeout_sec" value="$(arg tcp_connect_timeout_sec)"/>
+    <param name="tcp_no_delay" value="$(arg tcp_no_delay)"/>
+    <param name="tcp_keepalive" value="$(arg tcp_keepalive)"/>
     <param name="cmd_vel_topic" value="$(arg cmd_vel_topic)"/>
     <param name="send_rate_hz" value="$(arg send_rate_hz)"/>
     <param name="cmd_timeout_sec" value="$(arg cmd_timeout_sec)"/>
     <param name="reconnect_interval_sec" value="$(arg reconnect_interval_sec)"/>
     <param name="write_timeout_sec" value="$(arg write_timeout_sec)"/>
+    <param name="tx_min_interval_sec" value="$(arg tx_min_interval_sec)"/>
     <param name="linear_velocity_scale" value="$(arg linear_velocity_scale)"/>
     <param name="angular_velocity_scale" value="$(arg angular_velocity_scale)"/>
     <param name="linear_velocity_sign" value="$(arg linear_velocity_sign)"/>
@@ -44,6 +102,7 @@
     <param name="max_abs_linear_velocity" value="$(arg max_abs_linear_velocity)"/>
     <param name="max_abs_angular_velocity" value="$(arg max_abs_angular_velocity)"/>
     <param name="send_immediately" value="$(arg send_immediately)"/>
+    <param name="repeat_last_cmd_vel" value="$(arg repeat_last_cmd_vel)"/>
     <param name="send_zero_on_connect" value="$(arg send_zero_on_connect)"/>
     <param name="send_zero_on_shutdown" value="$(arg send_zero_on_shutdown)"/>
     <param name="drain_after_write" value="$(arg drain_after_write)"/>
@@ -53,5 +112,48 @@
     <param name="enable_rx_raw_log" value="$(arg enable_rx_raw_log)"/>
     <param name="rx_log_interval_sec" value="$(arg rx_log_interval_sec)"/>
     <param name="rx_silence_warn_sec" value="$(arg rx_silence_warn_sec)"/>
+    <param name="rx_poll_hz" value="$(arg rx_poll_hz)"/>
+    <param name="enable_cleaning_control" value="$(arg enable_cleaning_control)"/>
+    <param name="clean_tools_topic" value="$(arg clean_tools_topic)"/>
+    <param name="water_tap_topic" value="$(arg water_tap_topic)"/>
+    <param name="vacuum_motor_topic" value="$(arg vacuum_motor_topic)"/>
+    <param name="cleaning_params_topic" value="$(arg cleaning_params_topic)"/>
+    <param name="cleaning_params_state_topic" value="$(arg cleaning_params_state_topic)"/>
+    <param name="combined_status_topic" value="$(arg combined_status_topic)"/>
+    <param name="safety_status_bits_topic" value="$(arg safety_status_bits_topic)"/>
+    <param name="telemetry_heartbeat_topic" value="$(arg telemetry_heartbeat_topic)"/>
+    <param name="battery_state_topic" value="$(arg battery_state_topic)"/>
+    <param name="battery_remaining_topic" value="$(arg battery_remaining_topic)"/>
+    <param name="clean_water_level_topic" value="$(arg clean_water_level_topic)"/>
+    <param name="sewage_level_topic" value="$(arg sewage_level_topic)"/>
+    <param name="enable_battery_remaining_poll" value="$(arg enable_battery_remaining_poll)"/>
+    <param name="battery_remaining_poll_hz" value="$(arg battery_remaining_poll_hz)"/>
+    <param name="battery_full_capacity" value="$(arg battery_full_capacity)"/>
+    <param name="enable_water_level_poll" value="$(arg enable_water_level_poll)"/>
+    <param name="water_level_poll_hz" value="$(arg water_level_poll_hz)"/>
+    <param name="telemetry_poll_interval_sec" value="$(arg telemetry_poll_interval_sec)"/>
+    <param name="enable_status_poll" value="$(arg enable_status_poll)"/>
+    <param name="status_poll_hz" value="$(arg status_poll_hz)"/>
+    <param name="telemetry_velocity_quiet_sec" value="$(arg telemetry_velocity_quiet_sec)"/>
+    <param name="telemetry_control_cooldown_sec" value="$(arg telemetry_control_cooldown_sec)"/>
+    <param name="charge_enable_topic" value="$(arg charge_enable_topic)"/>
+    <param name="charge_cmd_repeat" value="$(arg charge_cmd_repeat)"/>
+    <param name="charge_cmd_interval_sec" value="$(arg charge_cmd_interval_sec)"/>
+    <param name="main_brush_speed" value="$(arg main_brush_speed)"/>
+    <param name="side_brush_follows_main_brush" value="$(arg side_brush_follows_main_brush)"/>
+    <param name="side_brush_on_value" value="$(arg side_brush_on_value)"/>
+    <param name="side_brush_off_value" value="$(arg side_brush_off_value)"/>
+    <param name="brush_down_distance" value="$(arg brush_down_distance)"/>
+    <param name="brush_home_value" value="$(arg brush_home_value)"/>
+    <param name="brush_stop_value" value="$(arg brush_stop_value)"/>
+    <param name="squeegee_forward_value" value="$(arg squeegee_forward_value)"/>
+    <param name="squeegee_backward_value" value="$(arg squeegee_backward_value)"/>
+    <param name="squeegee_stop_value" value="$(arg squeegee_stop_value)"/>
+    <param name="send_cleaning_stop_on_connect" value="$(arg send_cleaning_stop_on_connect)"/>
+    <param name="send_cleaning_stop_on_shutdown" value="$(arg send_cleaning_stop_on_shutdown)"/>
+    <param name="use_height_scrub_for_brush_distance" value="$(arg use_height_scrub_for_brush_distance)"/>
+    <param name="vel_water_pump" value="$(arg vel_water_pump)"/>
+    <param name="vel_water_suction" value="$(arg vel_water_suction)"/>
+    <param name="height_scrub" value="$(arg height_scrub)"/>
   </node>
 </launch>

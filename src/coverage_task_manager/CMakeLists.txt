@@ -12,6 +12,7 @@ find_package(catkin REQUIRED COMPONENTS
   diagnostic_msgs
   geometry_msgs
   mbf_msgs
+  dynamic_reconfigure
   coverage_msgs
   coverage_planner
   cleanrobot_app_msgs
@@ -21,7 +22,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_python_setup()
 
 catkin_package(
-  CATKIN_DEPENDS rospy actionlib std_msgs std_srvs sensor_msgs tf2_ros diagnostic_updater diagnostic_msgs geometry_msgs mbf_msgs coverage_msgs coverage_planner cleanrobot_app_msgs robot_platform_msgs
+  CATKIN_DEPENDS rospy actionlib std_msgs std_srvs sensor_msgs tf2_ros diagnostic_updater diagnostic_msgs geometry_msgs mbf_msgs dynamic_reconfigure coverage_msgs coverage_planner cleanrobot_app_msgs robot_platform_msgs
 )
 
 catkin_install_python(PROGRAMS
@@ -29,6 +30,7 @@ catkin_install_python(PROGRAMS
   scripts/task_manager_node.py
   scripts/task_api_service_node.py
   scripts/schedule_api_service_node.py
+  scripts/auto_charge_monitor_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

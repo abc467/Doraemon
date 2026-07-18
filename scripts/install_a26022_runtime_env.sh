@@ -20,5 +20,7 @@ sudo systemctl enable doraemon-runtime.service >/dev/null
 echo "[OK] installed ${TARGET_ENV}"
 echo "[OK] disabled legacy agv_speed_odom_bridge.service"
 echo "[OK] enabled doraemon-runtime.service"
+echo "[INFO] daily tuning now reads ${SOURCE_ENV} directly at runtime startup"
+echo "[INFO] rerun this installer only for first deployment or to refresh the /etc fallback"
 echo "[INFO] restart runtime with:"
 echo "  sudo systemctl restart doraemon-runtime.service"

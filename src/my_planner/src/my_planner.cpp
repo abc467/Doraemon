@@ -1,6 +1,7 @@
 #include "my_planner.h"
 #include <pluginlib/class_list_macros.h>
 #include <tf/transform_listener.h>
+#include <tf/transform_datatypes.h>
 #include <costmap_2d/cost_values.h>
 #include <costmap_2d/costmap_2d.h>
 #include <cmath>
@@ -13,7 +14,10 @@ namespace my_planner
 {
     MyPlanner::MyPlanner()
         : costmap_ros_(NULL), tf_listener_(NULL), 
-          current_vel_x_(0.0), pose_adjusting_(false), goal_reached_(false)
+          pose_adjusting_(false), goal_reached_(false),
+          target_index_(0),
+          have_plan_(false), last_goal_x_(0.0), last_goal_y_(0.0), last_goal_yaw_(0.0),
+          current_vel_x_(0.0)
     {
     }
 
@@ -37,7 +41,7 @@ namespace my_planner
             private_nh.param("max_vel_theta", max_vel_theta_, 0.3); // 最大角速度
             private_nh.param("acc_lim_theta", acc_lim_theta_, 1.0); // 角加速度
             private_nh.param("lookahead_dist", lookahead_dist_, 0.5); // 基础前瞻距离
-            private_nh.param("goal_tolerance", goal_tolerance_, 0.02); // 到达容差 (建议 0.05)
+            private_nh.param("goal_tolerance", goal_tolerance_, 0.05); // 到达容差
 
             ROS_INFO("MyPlanner Initialized: max_v=%.2f, lookahead=%.2f", max_vel_x_, lookahead_dist_);
             
@@ -49,13 +53,32 @@ namespace my_planner
     {
         if(plan.empty()) return false;
 
+        const geometry_msgs::PoseStamped& goal = plan.back();
+        const double goal_x = goal.pose.position.x;
+        const double goal_y = goal.pose.position.y;
+        const double goal_yaw = tf::getYaw(goal.pose.orientation);
+        const double goal_dist_delta = std::hypot(goal_x - last_goal_x_, goal_y - last_goal_y_);
+        const double goal_yaw_delta = std::fabs(std::atan2(
+            std::sin(goal_yaw - last_goal_yaw_),
+            std::cos(goal_yaw - last_goal_yaw_)));
+        const bool same_goal_refresh = have_plan_ && goal_dist_delta < 0.05 && goal_yaw_delta < 0.10;
+        const bool reset_velocity = (!same_goal_refresh) || goal_reached_;
+
         target_index_ = 0;
         global_plan_ = plan;
         pose_adjusting_ = false;
         goal_reached_ = false;
-        
-        // 每次接收新路径时重置速度
-        current_vel_x_ = 0.0; 
+
+        last_goal_x_ = goal_x;
+        last_goal_y_ = goal_y;
+        last_goal_yaw_ = goal_yaw;
+        have_plan_ = true;
+
+        // 连续重规划会反复调用 setPlan。同一目标刷新时保留当前速度，
+        // 避免实车出现周期性“刹停再加速”的卡顿。
+        if (reset_velocity) {
+            current_vel_x_ = 0.0;
+        }
         
         return true;
     }

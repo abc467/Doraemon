@@ -15,7 +15,8 @@ from .f2c_adapter import (
     build_turn_planner, generate_best_swaths, snake_sorted_swaths, recon_snake_polyline,
     swaths_size, swath_at, swath_endpoints_xyz, cell_outer_ring_xy
 )
-from .shrink import cell_to_shapely_polygon, long_side_shrink_cells
+from .shrink import cell_to_shapely_polygon, long_side_shrink_cells, shapely_to_f2c_cells
+from .site_axis_rectangle import largest_site_axis_rectangle
 from .stitch import StitchParams, build_edge_loop_from_rawcell_bbox, stitch_with_edge_loop
 from .exec_order import nearest_neighbor_exec_order
 
@@ -37,6 +38,92 @@ def _bbox_edge_loop_safe_for_cell(cell_geom) -> bool:
     # actual cell is essentially that rectangle; concave cells/holes are handled
     # by the snake path so we do not drive through keepout cut-outs.
     return abs(float(poly.area) - bbox_area) <= max(1e-6, bbox_area * 0.005)
+
+
+def _planning_cell_candidates(
+    raw_cell,
+    wall_margin_m: float,
+    path_step_m: float,
+) -> List[Dict[str, Any]]:
+    """Prepare geometry before swath generation.
+
+    The legacy rectangular-cell flow is kept unchanged.  A cell which would
+    previously have produced ``edge_loop_skipped=non_rectangular_or_hole_cell``
+    is instead reduced to one rectangle aligned with the already-active
+    ``site_map`` axes.  Both its edge loop and swaths then derive from the same
+    four-side-inset rectangle.
+    """
+
+    wall_margin = max(0.0, float(wall_margin_m))
+    legacy_safe_cells = (
+        long_side_shrink_cells(raw_cell, wall_margin)
+        if wall_margin > 1e-9
+        else [raw_cell]
+    )
+    if not legacy_safe_cells:
+        return []
+
+    raw_outer_xy = cell_outer_ring_xy(raw_cell)
+    regular_legacy_cell = (
+        len(legacy_safe_cells) == 1
+        and _bbox_edge_loop_safe_for_cell(legacy_safe_cells[0])
+    )
+    if wall_margin <= 1e-9 or regular_legacy_cell:
+        return [
+            {
+                "cell": cell,
+                "edge_source_xy": raw_outer_xy,
+                "edge_loop_safe": _bbox_edge_loop_safe_for_cell(cell),
+                "geometry_mode": "legacy_long_side_shrink",
+                "site_rect": None,
+                "raw_cell_area_m2": None,
+            }
+            for cell in legacy_safe_cells
+        ]
+
+    raw_poly = cell_to_shapely_polygon(raw_cell)
+    if raw_poly is not None and not raw_poly.is_empty:
+        try:
+            site_rect = largest_site_axis_rectangle(
+                raw_poly,
+                wall_margin_m=wall_margin,
+                search_step_m=max(0.01, float(path_step_m)),
+                min_usable_side_m=0.05,
+            )
+        except (RuntimeError, ValueError):
+            site_rect = None
+
+        if site_rect is not None:
+            rect_cells = shapely_to_f2c_cells(site_rect.safe_polygon)
+            if len(rect_cells) == 1:
+                return [
+                    {
+                        "cell": rect_cells[0],
+                        # The existing builder applies wall_margin once.  Give
+                        # it the source rectangle, while swaths use safe_polygon,
+                        # so both resolve to exactly the same inset bounds.
+                        "edge_source_xy": site_rect.outer_xy(inset=False),
+                        "edge_loop_safe": True,
+                        "geometry_mode": "site_axis_inscribed_rectangle",
+                        "site_rect": site_rect,
+                        "raw_cell_area_m2": float(raw_poly.area),
+                    }
+                ]
+
+    # Keep the pre-existing behavior only when no usable rectangle can be
+    # extracted (for example, when Shapely is unavailable).  Successful
+    # rectangle extraction never reaches this branch.
+    return [
+        {
+            "cell": cell,
+            "edge_source_xy": raw_outer_xy,
+            "edge_loop_safe": _bbox_edge_loop_safe_for_cell(cell),
+            "geometry_mode": "legacy_non_rectangular_fallback",
+            "site_rect": None,
+            "raw_cell_area_m2": float(raw_poly.area) if raw_poly is not None else None,
+        }
+        for cell in legacy_safe_cells
+    ]
 
 
 def _path_region_violation_message(path_xy: List[XY], effective_regions: Optional[List[Dict[str, Any]]]) -> str:
@@ -108,13 +195,33 @@ def plan_coverage(
 
             raw_cell = subcells.getGeometry(bi)
 
-            safe_cells = long_side_shrink_cells(raw_cell, wall_margin) if wall_margin > 1e-9 else [raw_cell]
-            if not safe_cells:
+            planning_cells = _planning_cell_candidates(
+                raw_cell,
+                wall_margin_m=wall_margin,
+                path_step_m=float(params.path_step_m),
+            )
+            if not planning_cells:
                 continue
 
-            for cell_b in safe_cells:
+            for planning_cell in planning_cells:
                 if preempt_cb():
                     return PlanResult(False, "PREEMPTED", "planning canceled", frame_id, [], [], 0.0)
+
+                cell_b = planning_cell["cell"]
+                site_rect = planning_cell.get("site_rect")
+                # ``turn_margin`` historically measures total setback from the
+                # source Cell boundary.  A site-axis rectangle has already
+                # applied its four-side wall margin before swaths are created,
+                # so subtract that pre-applied part instead of counting it a
+                # second time at both short ends.
+                preapplied_turn_margin = (
+                    max(0.0, float(site_rect.wall_margin_m))
+                    if site_rect is not None else 0.0
+                )
+                effective_turn_margin = max(
+                    0.0,
+                    float(turn_margin) - preapplied_turn_margin,
+                )
 
                 # 1) swaths
                 swaths_b = generate_best_swaths(sg, obj, r_w, cell_b, mute=params.mute_stderr)
@@ -135,8 +242,16 @@ def plan_coverage(
                         swath_segs.append((a, b))
 
                 # 2) snake sorted swaths
-                sw_sorted = snake_sorted_swaths(swaths_b, mute=params.mute_stderr)
-                if sw_sorted is None or swaths_size(sw_sorted) <= 0:
+                sw_sorted = snake_sorted_swaths(
+                    swaths_b,
+                    mute=params.mute_stderr,
+                    min_swath_length_m=max(
+                        0.0,
+                        float(params.min_swath_length_m),
+                    ),
+                )
+                ns_sorted = swaths_size(sw_sorted) if sw_sorted is not None else 0
+                if ns_sorted <= 0:
                     block_id += 1
                     continue
 
@@ -144,7 +259,7 @@ def plan_coverage(
                 snake_raw = recon_snake_polyline(
                     robot, sw_sorted, turn_planner,
                     turn_step_m=float(params.turn_step_m),
-                    turn_margin_m=float(turn_margin),
+                    turn_margin_m=float(effective_turn_margin),
                     mute=params.mute_stderr
                 )
                 if len(snake_raw) < 2:
@@ -163,17 +278,19 @@ def plan_coverage(
                 entry_yaw = yaws[0] if yaws else 0.0
                 exit_yaw  = yaws[-1] if yaws else 0.0
 
-                # 4) edge loop from raw_cell bbox shrunken by wall_margin (all 4 sides)
-                raw_outer_xy = cell_outer_ring_xy(raw_cell)
+                # 4) Edge loop.  Regular cells retain the legacy raw bbox
+                # source; rectangle-core cells use their verified source
+                # rectangle, which resolves to the same safe bounds as swaths.
+                edge_source_xy = planning_cell["edge_source_xy"]
 
                 edge_vertices: List[XY] = []
                 edge_dense: List[XY] = []
                 edge_close_gap = 0.0
                 edge_len = 0.0
                 edge_loop_skipped = ""
-                if _bbox_edge_loop_safe_for_cell(cell_b):
+                if bool(planning_cell["edge_loop_safe"]):
                     edge_vertices, edge_dense, edge_close_gap, edge_len = build_edge_loop_from_rawcell_bbox(
-                        raw_outer_xy, wall_margin, edge_r,
+                        edge_source_xy, wall_margin, edge_r,
                         params.edge_corner_pull, params.path_step_m, params.edge_corner_min_pts
                     )
                 elif wall_margin > 1e-9:
@@ -237,7 +354,17 @@ def plan_coverage(
                     )
 
                 stats = {
+                    "cell_geometry_mode": str(planning_cell["geometry_mode"]),
+                    "configured_turn_margin_m": float(turn_margin),
+                    "preapplied_turn_margin_m": float(preapplied_turn_margin),
+                    "effective_turn_margin_m": float(effective_turn_margin),
+                    "turn_margin_reference": "source_cell_boundary_total",
+                    "turn_margin_clamped": bool(
+                        preapplied_turn_margin > float(turn_margin) + 1e-9
+                    ),
                     "swaths": nsb,
+                    "swaths_retained": int(ns_sorted),
+                    "swaths_filtered": int(max(0, nsb - ns_sorted)),
                     "snake_raw_pts": len(snake_raw),
                     "snake_path_pts": len(snake_pts_path),
                     "edge_len": float(edge_len),
@@ -246,6 +373,21 @@ def plan_coverage(
                     "final_pts": int(len(final_pts)),
                     "final_len": float(polyline_length_xy(final_pts)),
                 }
+                if site_rect is not None:
+                    raw_cell_area = float(planning_cell.get("raw_cell_area_m2") or 0.0)
+                    stats.update({
+                        "rectangle_trigger": "non_rectangular_or_hole_cell",
+                        "rectangle_source_bounds": [float(v) for v in site_rect.source_bounds],
+                        "rectangle_safe_bounds": [float(v) for v in site_rect.safe_bounds],
+                        "rectangle_source_area_m2": float(site_rect.raw_area_m2),
+                        "rectangle_safe_area_m2": float(site_rect.usable_area_m2),
+                        "rectangle_safe_retained_ratio": (
+                            float(site_rect.usable_area_m2) / raw_cell_area
+                            if raw_cell_area > 1e-9 else 0.0
+                        ),
+                        "rectangle_wall_margin_m": float(site_rect.wall_margin_m),
+                        "rectangle_search_step_m": float(site_rect.effective_search_step_m),
+                    })
                 if edge_loop_skipped:
                     stats["edge_loop_skipped"] = edge_loop_skipped
 

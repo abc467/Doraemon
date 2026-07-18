@@ -4,6 +4,7 @@ import ast
 import shlex
 import math
 import os
+import re
 import threading
 import time
 import uuid
@@ -17,7 +18,16 @@ import rospy
 import rosnode
 import rosservice
 from std_msgs.msg import String, Bool
-from std_srvs.srv import Trigger, Empty, SetBool
+from std_srvs.srv import Trigger, TriggerResponse, Empty, SetBool
+
+try:
+    from dynamic_reconfigure.msg import Config, DoubleParameter
+    from dynamic_reconfigure.srv import Reconfigure, ReconfigureRequest
+except Exception:  # pragma: no cover - allows contract tests without full ROS deps
+    Config = None
+    DoubleParameter = None
+    Reconfigure = None
+    ReconfigureRequest = None
 
 from cleanrobot_app_msgs.msg import (
     OdometryState,
@@ -84,6 +94,67 @@ from coverage_planner.runtime_gate_messages import (
 )
 from coverage_planner.service_mode import publish_contract_param
 from coverage_planner.slam_workflow_semantics import localization_is_ready, localization_needs_manual_assist
+
+DEFAULT_MCORE_CONNECTED_TOPIC = "/mcore_velocity_sender/connected"
+DEFAULT_MCORE_NODE_NAME = "/mcore_velocity_sender"
+SLAM_LOSS_SAFETY_RETRY_S = 0.75
+_SLAM_LOSS_EPISODE_RE = re.compile(
+    r"(?:^|[\s:;,])episode\s*[=:]\s*([^\s;,]+)", re.IGNORECASE
+)
+_SLAM_LOSS_SAFE_EXECUTOR_STATES = frozenset(
+    {
+        "PAUSED",
+        "PAUSED_RECOVERY",
+        "IDLE",
+        "DONE",
+        "FAILED",
+        "CANCELED",
+        "CANCELLED",
+        "ESTOP",
+        "STOPPED",
+    }
+)
+_SLAM_LOSS_PUBLIC_TERMINAL_STATES = frozenset(
+    {"IDLE", "DONE", "FAILED", "CANCELED", "CANCELLED", "ESTOP", "STOPPED"}
+)
+
+
+def _slam_loss_episode_from_state(msg: SlamState, reason: str) -> str:
+    for value in (
+        reason,
+        getattr(msg, "blocking_reason", ""),
+        getattr(msg, "message", ""),
+        getattr(msg, "last_error_msg", ""),
+    ):
+        match = _SLAM_LOSS_EPISODE_RE.search(str(value or ""))
+        if match:
+            return str(match.group(1) or "").strip()
+    # Older publishers do not expose an episode. Keep a stable fallback so
+    # repeated latched states still drive retries without creating event storms.
+    return "manual_assist_required"
+
+
+def _infer_mcore_node_name(connected_topic: str) -> str:
+    topic = str(connected_topic or DEFAULT_MCORE_CONNECTED_TOPIC).strip()
+    if not topic.startswith("/"):
+        topic = "/" + topic
+    parts = [part for part in topic.split("/") if part]
+    if parts:
+        return "/" + parts[0]
+    return DEFAULT_MCORE_NODE_NAME
+
+
+def _infer_mbf_reconfigure_node(action_name: str) -> str:
+    action = str(action_name or "/move_base_flex/move_base").strip() or "/move_base_flex/move_base"
+    if not action.startswith("/"):
+        action = "/" + action
+    parts = [part for part in action.split("/") if part]
+    if len(parts) >= 2:
+        return "/" + "/".join(parts[:-1])
+    if parts:
+        return "/" + parts[0]
+    return "/move_base_flex"
+
 
 try:
     from zoneinfo import ZoneInfo
@@ -300,13 +371,14 @@ class TaskManager:
 
         auto_charge_enable: bool = True,
         trigger_when_idle: bool = False,
-        low_soc: float = 0.20,
-        resume_soc: float = 0.80,
+        low_soc: float = 0.15,
+        resume_soc: float = 0.95,
         rearm_soc: float = 0.30,
         dock_xyyaw: Tuple[float, float, float] = (0.0, 0.0, 0.0),
         dock_stage1_xyyaw: Optional[Tuple[float, float, float]] = None,
         dock_two_stage_enable: bool = False,
         dock_stage2_controller: str = "MyPlanner",
+        dock_stage2_disable_replanning: bool = True,
         dock_retry_limit: int = 2,
         undock_forward_m: float = 0.6,
         dock_timeout_s: float = 600.0,
@@ -369,6 +441,11 @@ class TaskManager:
         dock_supply_state_topic: str = "/dock_supply/state",
         dock_supply_set_defer_exit_service: str = "/dock_supply/set_defer_exit",
         dock_supply_exit_service: str = "/dock_supply/exit",
+        dock_supply_recovery_retreat_service: str = "/dock_supply/recovery_retreat",
+        auto_charge_redock_service_name: str = "/coverage_task_manager/auto_charge_redock",
+        auto_charge_recovery_exhausted_service_name: str = "/coverage_task_manager/auto_charge_recovery_exhausted",
+        auto_charge_redock_settle_s: float = 2.0,
+        auto_charge_redock_retreat_timeout_s: float = 60.0,
         app_restart_localization_service: str = "/cartographer/runtime/app/restart_localization",
         app_slam_submit_command_service: str = "/clean_robot_server/app/submit_slam_command",
         app_slam_get_job_service: str = "/clean_robot_server/app/get_slam_job",
@@ -395,7 +472,7 @@ class TaskManager:
         combined_status_stale_timeout_s: float = 5.0,
         station_status_topic: str = "/station_status",
         station_status_stale_timeout_s: float = 5.0,
-        mcore_connected_topic: str = "/mcore_tcp_bridge/connected",
+        mcore_connected_topic: str = DEFAULT_MCORE_CONNECTED_TOPIC,
         station_connected_topic: str = "/station_tcp_bridge/connected",
         connected_stale_timeout_s: float = 5.0,
         require_mcore_bridge_for_readiness: bool = False,
@@ -467,7 +544,11 @@ class TaskManager:
         self._combined_status_stale_timeout_s = max(0.5, float(combined_status_stale_timeout_s))
         self._station_status_topic = str(station_status_topic or "/station_status").strip() or "/station_status"
         self._station_status_stale_timeout_s = max(0.5, float(station_status_stale_timeout_s))
-        self._mcore_connected_topic = str(mcore_connected_topic or "/mcore_tcp_bridge/connected").strip() or "/mcore_tcp_bridge/connected"
+        self._mcore_connected_topic = (
+            str(mcore_connected_topic or DEFAULT_MCORE_CONNECTED_TOPIC).strip()
+            or DEFAULT_MCORE_CONNECTED_TOPIC
+        )
+        self._mcore_node_name = _infer_mcore_node_name(self._mcore_connected_topic)
         self._station_connected_topic = str(station_connected_topic or "/station_tcp_bridge/connected").strip() or "/station_tcp_bridge/connected"
         self._connected_stale_timeout_s = max(0.5, float(connected_stale_timeout_s))
         self._require_mcore_bridge_for_readiness = bool(require_mcore_bridge_for_readiness)
@@ -537,6 +618,9 @@ class TaskManager:
         )
         self.dock_two_stage_enable = bool(dock_two_stage_enable)
         self.dock_stage2_controller = str(dock_stage2_controller or "").strip()
+        self._dock_stage2_disable_replanning = bool(dock_stage2_disable_replanning)
+        self._dock_stage2_saved_planner_frequency: Optional[float] = None
+        self._dock_stage2_replanning_suppressed = False
         self.dock_retry_limit = max(0, int(dock_retry_limit))
         self.undock_forward_m = float(undock_forward_m)
         self.dock_timeout_s = float(dock_timeout_s)
@@ -558,6 +642,17 @@ class TaskManager:
         self._health_fault_active: bool = False
         self._health_error_code: str = ""
         self._health_error_msg: str = ""
+        self._slam_localization_lost_active: bool = False
+        self._slam_localization_loss_pause_applied: bool = False
+        self._slam_localization_loss_episode: str = ""
+        self._slam_localization_loss_last_enforce_ts: float = 0.0
+        self._slam_localization_lost_reason: str = ""
+        try:
+            self._slam_had_valid_localization = bool(
+                rospy.get_param(self._runtime_localization_valid_param, False)
+            )
+        except Exception:
+            self._slam_had_valid_localization = False
 
         self._armed = True
 
@@ -627,6 +722,22 @@ class TaskManager:
         self._dock_supply_state_topic = str(dock_supply_state_topic)
         self._dock_supply_set_defer_exit_service = str(dock_supply_set_defer_exit_service)
         self._dock_supply_exit_service = str(dock_supply_exit_service)
+        self._dock_supply_recovery_retreat_service = str(dock_supply_recovery_retreat_service)
+        self._auto_charge_redock_service_name = (
+            str(auto_charge_redock_service_name or "/coverage_task_manager/auto_charge_redock").strip()
+            or "/coverage_task_manager/auto_charge_redock"
+        )
+        self._auto_charge_recovery_exhausted_service_name = (
+            str(
+                auto_charge_recovery_exhausted_service_name
+                or "/coverage_task_manager/auto_charge_recovery_exhausted"
+            ).strip()
+            or "/coverage_task_manager/auto_charge_recovery_exhausted"
+        )
+        self._auto_charge_redock_settle_s = max(0.0, float(auto_charge_redock_settle_s))
+        self._auto_charge_redock_retreat_timeout_s = max(1.0, float(auto_charge_redock_retreat_timeout_s))
+        self._auto_charge_redock_running = False
+        self._auto_charge_recovery_exhausted_running = False
         self._app_restart_localization_service = str(app_restart_localization_service)
         self._app_slam_submit_command_service = str(app_slam_submit_command_service)
         self._app_slam_get_job_service = str(app_slam_get_job_service)
@@ -637,6 +748,7 @@ class TaskManager:
         self._dock_supply_cancel_cli = None
         self._dock_supply_set_defer_exit_cli = None
         self._dock_supply_exit_cli = None
+        self._dock_supply_recovery_retreat_cli = None
         self._restart_localization_cli = None
         self._slam_submit_command_cli = None
         self._slam_get_job_cli = None
@@ -650,13 +762,17 @@ class TaskManager:
                 self._dock_supply_cancel_cli = rospy.ServiceProxy(self._dock_supply_cancel_service, Trigger)
                 self._dock_supply_set_defer_exit_cli = rospy.ServiceProxy(self._dock_supply_set_defer_exit_service, SetBool)
                 self._dock_supply_exit_cli = rospy.ServiceProxy(self._dock_supply_exit_service, Trigger)
+                self._dock_supply_recovery_retreat_cli = rospy.ServiceProxy(
+                    self._dock_supply_recovery_retreat_service, Trigger
+                )
                 rospy.Subscriber(self._dock_supply_state_topic, String, self._on_dock_supply_state, queue_size=1)
                 rospy.loginfo(
-                    "[TASK] dock_supply enabled: start=%s cancel=%s defer_exit=%s exit=%s state_topic=%s",
+                    "[TASK] dock_supply enabled: start=%s cancel=%s defer_exit=%s exit=%s recovery_retreat=%s state_topic=%s",
                     self._dock_supply_start_service,
                     self._dock_supply_cancel_service,
                     self._dock_supply_set_defer_exit_service,
                     self._dock_supply_exit_service,
+                    self._dock_supply_recovery_retreat_service,
                     self._dock_supply_state_topic,
                 )
             except Exception as e:
@@ -750,6 +866,16 @@ class TaskManager:
             AppGetSystemReadiness,
             self._on_get_system_readiness_app,
         )
+        self._auto_charge_redock_srv = rospy.Service(
+            self._auto_charge_redock_service_name,
+            Trigger,
+            self._on_auto_charge_redock,
+        )
+        self._auto_charge_recovery_exhausted_srv = rospy.Service(
+            self._auto_charge_recovery_exhausted_service_name,
+            Trigger,
+            self._on_auto_charge_recovery_exhausted,
+        )
         self._app_exe_task_srv = rospy.Service(
             self._app_exe_task_service_name,
             AppExeTask,
@@ -767,6 +893,8 @@ class TaskManager:
             controller=mbf_controller,
             recovery=mbf_recovery,
         )
+        self._mbf_reconfigure_node = _infer_mbf_reconfigure_node(mbf_move_base_action)
+        self._mbf_reconfigure_service = self._mbf_reconfigure_node.rstrip("/") + "/set_parameters"
         self._dock_stage2_nav = MBFMoveBase(
             action_name=mbf_move_base_action,
             planner=mbf_planner,
@@ -894,6 +1022,13 @@ class TaskManager:
             self._executor_state = s
             executor_state_changed = (s != prev)
 
+            if (
+                bool(getattr(self, "_slam_localization_lost_active", False))
+            ):
+                self._slam_localization_loss_pause_applied = bool(
+                    str(s or "").strip().upper() in _SLAM_LOSS_SAFE_EXECUTOR_STATES
+                )
+
             if s == "PAUSED_RECOVERY" and prev != "PAUSED_RECOVERY":
                 self._mission_state = "PAUSED"
                 self._phase = "IDLE"
@@ -945,9 +1080,137 @@ class TaskManager:
             self._odometry_state.ts = time.time()
 
     def _on_slam_state(self, msg: SlamState):
+        now = time.time()
+        should_enforce_safety = False
+        transitioned_to_pause = False
+        publish_paused_recovery = False
+        new_loss_episode = False
+        run_id = ""
+        reason = ""
         with self._lock:
             self._slam_state.msg = msg
-            self._slam_state.ts = time.time()
+            self._slam_state.ts = now
+            localization_state = str(
+                getattr(msg, "localization_state", "") or ""
+            ).strip().lower()
+            localization_valid = bool(getattr(msg, "localization_valid", False))
+            manual_assist_required = bool(
+                getattr(msg, "manual_assist_required", False)
+            ) or localization_needs_manual_assist(localization_state)
+
+            if localization_is_ready(localization_state, localization_valid) and not manual_assist_required:
+                self._slam_had_valid_localization = True
+                self._slam_localization_lost_active = False
+                self._slam_localization_loss_pause_applied = False
+                self._slam_localization_loss_episode = ""
+                self._slam_localization_loss_last_enforce_ts = 0.0
+                self._slam_localization_lost_reason = ""
+                if str(self._health_error_code or "") == "SLAM_LOCALIZATION_LOST":
+                    self._health_fault_active = False
+                    self._health_error_code = ""
+                    self._health_error_msg = ""
+                return
+
+            if localization_valid:
+                self._slam_had_valid_localization = True
+
+            confirmed_lost = (not localization_valid) and manual_assist_required
+            if not confirmed_lost:
+                return
+
+            reason = str(
+                getattr(msg, "blocking_reason", "")
+                or getattr(msg, "message", "")
+                or "cartographer confirmed localization lost"
+            ).strip()
+            episode = _slam_loss_episode_from_state(msg, reason)
+            previous_episode = str(
+                getattr(self, "_slam_localization_loss_episode", "") or ""
+            )
+            new_loss_episode = bool(
+                not self._slam_localization_lost_active
+                or episode != previous_episode
+            )
+            self._slam_localization_lost_active = True
+            self._slam_localization_loss_episode = episode
+            self._slam_localization_lost_reason = reason
+            self._health_fault_active = True
+            self._health_error_code = "SLAM_LOCALIZATION_LOST"
+            self._health_error_msg = reason
+            if new_loss_episode:
+                self._slam_localization_loss_pause_applied = False
+                self._slam_localization_loss_last_enforce_ts = 0.0
+
+            # Claim the transition under the state lock, then perform ROS I/O
+            # after releasing it. Safety I/O remains retryable until an executor
+            # state callback acknowledges a stopped/paused state.
+            mission_before = str(self._mission_state or "").upper()
+            if mission_before == "RUNNING":
+                self._mission_state = "PAUSED"
+                self._phase = "IDLE"
+                run_id = str(self._active_run_id or "")
+                self._health_recover_pending = False
+                self._health_recover_resume_after_ts = 0.0
+                self._health_recover_run_id = ""
+                self._health_recover_code = ""
+                transitioned_to_pause = True
+            else:
+                run_id = str(self._active_run_id or "")
+
+            executor_state = str(getattr(self, "_executor_state", "") or "").strip().upper()
+            executor_safe = bool(
+                self._slam_localization_loss_pause_applied
+                and executor_state in _SLAM_LOSS_SAFE_EXECUTOR_STATES
+            )
+            task_context_active = bool(
+                mission_before in ("RUNNING", "PAUSED")
+                and (run_id or mission_before == "RUNNING")
+            )
+            last_enforce_ts = float(
+                getattr(self, "_slam_localization_loss_last_enforce_ts", 0.0) or 0.0
+            )
+            retry_due = bool(
+                last_enforce_ts <= 0.0
+                or (now - last_enforce_ts) >= SLAM_LOSS_SAFETY_RETRY_S
+            )
+            should_enforce_safety = bool(
+                task_context_active
+                and retry_due
+                and (transitioned_to_pause or not executor_safe)
+            )
+            if should_enforce_safety:
+                self._slam_localization_loss_last_enforce_ts = now
+            publish_paused_recovery = bool(
+                task_context_active
+                and str(getattr(self, "_public_state", "") or "").upper()
+                != "PAUSED_RECOVERY"
+            )
+
+        if should_enforce_safety:
+            for nav_client in (getattr(self, "nav", None), getattr(self, "_dock_stage2_nav", None)):
+                if nav_client is None:
+                    continue
+                try:
+                    nav_client.cancel_all()
+                except Exception as exc:
+                    rospy.logwarn("[TASK] localization-lost nav cancel failed: %s", str(exc))
+            try:
+                self._send_exec_cmd("pause")
+            except Exception as exc:
+                rospy.logwarn("[TASK] localization-lost executor pause failed: %s", str(exc))
+        if transitioned_to_pause:
+            self._mission_update_state(run_id, "PAUSED", reason="slam_localization_lost")
+        if publish_paused_recovery or transitioned_to_pause:
+            self._publish_state("PAUSED_RECOVERY")
+        if new_loss_episode:
+            self._emit("SLAM_LOCALIZATION_LOST:reason=%s" % reason)
+        if new_loss_episode or transitioned_to_pause:
+            rospy.logerr(
+                "[TASK] localization lost; task paused for explicit relocalization run=%s episode=%s reason=%s",
+                run_id or "-",
+                episode,
+                reason,
+            )
 
     def _get_fresh_slam_state(self, *, now: Optional[float] = None) -> Optional[SlamState]:
         ts = 0.0
@@ -1062,6 +1325,7 @@ class TaskManager:
         self,
         *,
         now: float,
+        task_active: bool,
         refresh_map_identity: bool,
         odometry_state: Optional[OdometryState],
         odometry_state_ts: float,
@@ -1074,15 +1338,18 @@ class TaskManager:
         slam_age = (now - slam_state_ts) if slam_state_ts > 0.0 else -1.0
         slam_fresh = slam_state_ts > 0.0 and slam_age <= self._slam_state_stale_timeout_s
         slam_task_ready = bool(getattr(slam_state, "task_ready", False)) if slam_state is not None else False
+        slam_task_running = bool(getattr(slam_state, "task_running", False)) if slam_state is not None else False
         slam_runtime_authoritative = bool(slam_state is not None and slam_fresh)
         slam_blocking_reason = ""
+        slam_blocking_reasons: List[str] = []
         if slam_state is not None:
             slam_blocking_reason = str(getattr(slam_state, "blocking_reason", "") or "").strip()
-            if not slam_blocking_reason:
-                for item in list(getattr(slam_state, "blocking_reasons", []) or []):
-                    slam_blocking_reason = str(item or "").strip()
-                    if slam_blocking_reason:
-                        break
+            if slam_blocking_reason:
+                self._append_unique_readiness_text(slam_blocking_reasons, slam_blocking_reason)
+            for item in list(getattr(slam_state, "blocking_reasons", []) or []):
+                self._append_unique_readiness_text(slam_blocking_reasons, item)
+            if not slam_blocking_reason and slam_blocking_reasons:
+                slam_blocking_reason = slam_blocking_reasons[0]
 
         selected_asset = self._get_selected_active_map() or {}
         result.active_revision_id = str(selected_asset.get("revision_id") or "").strip()
@@ -1120,6 +1387,7 @@ class TaskManager:
             or result.runtime_map_id
             or result.runtime_map_md5
         )
+        runtime_map_matches_active = False
         if runtime_missing:
             if result.active_map_name:
                 self._append_unique_readiness_text(
@@ -1159,6 +1427,7 @@ class TaskManager:
                     summary=mismatch_reason,
                 ))
             else:
+                runtime_map_matches_active = True
                 result.checks.append(self._make_readiness_check(
                     key="runtime_map",
                     level="OK",
@@ -1303,13 +1572,71 @@ class TaskManager:
             summary="state=%s valid=%s" % (localization_state or "-", str(bool(localization_valid)).lower()),
         ))
 
+        slam_busy = bool(getattr(slam_state, "busy", False)) if slam_state is not None else False
+        slam_mapping_session_active = bool(
+            getattr(slam_state, "mapping_session_active", False)
+        ) if slam_state is not None else False
+        slam_runtime_mode = str(
+            getattr(slam_state, "runtime_mode", "")
+            or getattr(slam_state, "current_mode", "")
+            or ""
+        ).strip().lower() if slam_state is not None else ""
+        slam_runtime_map_match = bool(
+            getattr(slam_state, "runtime_map_match", False)
+        ) if slam_state is not None else False
+        slam_runtime_map_ready = bool(
+            getattr(slam_state, "runtime_map_ready", False)
+        ) if slam_state is not None else False
+        slam_active_map_match = bool(
+            getattr(slam_state, "active_map_match", False)
+        ) if slam_state is not None else False
+        slam_map_topic_fresh = bool(
+            getattr(slam_state, "map_topic_fresh", False)
+        ) if slam_state is not None else False
+        slam_tracked_pose_fresh = bool(
+            getattr(slam_state, "tracked_pose_fresh", False)
+        ) if slam_state is not None else False
+        slam_last_error_code = str(
+            getattr(slam_state, "last_error_code", "") or ""
+        ).strip() if slam_state is not None else ""
+        non_occupancy_slam_blockers = [
+            item
+            for item in slam_blocking_reasons
+            if not (
+                item == "task manager busy"
+                or item.startswith("task manager busy:")
+            )
+        ]
+        active_task_runtime_healthy = bool(
+            task_active
+            and slam_task_running
+            and slam_runtime_authoritative
+            and slam_runtime_mode == "localization"
+            and result.active_map_name
+            and runtime_map_matches_active
+            and slam_runtime_map_ready
+            and slam_active_map_match
+            and slam_runtime_map_match
+            and slam_map_topic_fresh
+            and localization_ok
+            and odometry_valid
+            and slam_tracked_pose_fresh
+            and (not manual_assist_required)
+            and (not slam_busy)
+            and (not slam_mapping_session_active)
+            and (not slam_last_error_code)
+            and (not non_occupancy_slam_blockers)
+        )
+
         if slam_state is None or slam_state_ts <= 0.0:
             result.warnings.append("slam state unavailable")
+            if task_active:
+                self._append_unique_readiness_text(result.blockers, "slam state unavailable")
             for item in local_slam_blockers:
                 self._append_unique_readiness_text(result.blockers, item)
             result.checks.append(self._make_readiness_check(
                 key="slam_runtime",
-                level="WARN",
+                level="ERROR" if task_active else "WARN",
                 ok=False,
                 fresh=False,
                 missing=True,
@@ -1317,11 +1644,16 @@ class TaskManager:
             ))
         elif not slam_fresh:
             result.warnings.append("slam state stale")
+            if task_active:
+                self._append_unique_readiness_text(
+                    result.blockers,
+                    "slam state stale age=%.1fs" % slam_age,
+                )
             for item in local_slam_blockers:
                 self._append_unique_readiness_text(result.blockers, item)
             result.checks.append(self._make_readiness_check(
                 key="slam_runtime",
-                level="WARN",
+                level="ERROR" if task_active else "WARN",
                 ok=False,
                 fresh=False,
                 stale=True,
@@ -1329,34 +1661,44 @@ class TaskManager:
                 summary="slam state stale age=%.1fs" % slam_age,
             ))
         else:
-            if not slam_task_ready:
+            if (not slam_task_ready) and (not active_task_runtime_healthy):
                 appended = False
-                if slam_blocking_reason:
-                    self._append_unique_readiness_text(result.blockers, slam_blocking_reason)
-                    appended = True
-                if slam_state is not None:
-                    for item in list(getattr(slam_state, "blocking_reasons", []) or []):
-                        before = len(result.blockers)
-                        self._append_unique_readiness_text(result.blockers, item)
-                        appended = appended or len(result.blockers) != before
+                for item in slam_blocking_reasons:
+                    before = len(result.blockers)
+                    self._append_unique_readiness_text(result.blockers, item)
+                    appended = appended or len(result.blockers) != before
                 for item in local_slam_blockers:
                     before = len(result.blockers)
                     self._append_unique_readiness_text(result.blockers, item)
                     appended = appended or len(result.blockers) != before
                 if not appended:
                     self._append_unique_readiness_text(result.blockers, "slam runtime not ready")
-            result.checks.append(self._make_readiness_check(
-                key="slam_runtime",
-                level="OK" if slam_task_ready else "ERROR",
-                ok=bool(slam_task_ready),
-                fresh=True,
-                summary="workflow=%s phase=%s task_ready=%s busy=%s manual_assist=%s" % (
+            slam_runtime_ok = bool(slam_task_ready or active_task_runtime_healthy)
+            if active_task_runtime_healthy:
+                slam_runtime_summary = (
+                    "runtime healthy; occupied by active task; "
+                    "workflow=%s phase=%s task_running=true task_ready=%s busy=%s manual_assist=%s"
+                ) % (
                     str(getattr(slam_state, "workflow_state", "") or "-"),
                     str(getattr(slam_state, "workflow_phase", "") or "-"),
                     str(bool(slam_task_ready)).lower(),
-                    str(bool(getattr(slam_state, "busy", False))).lower(),
+                    str(bool(slam_busy)).lower(),
                     str(bool(getattr(slam_state, "manual_assist_required", False))).lower(),
-                ),
+                )
+            else:
+                slam_runtime_summary = "workflow=%s phase=%s task_ready=%s busy=%s manual_assist=%s" % (
+                    str(getattr(slam_state, "workflow_state", "") or "-"),
+                    str(getattr(slam_state, "workflow_phase", "") or "-"),
+                    str(bool(slam_task_ready)).lower(),
+                    str(bool(slam_busy)).lower(),
+                    str(bool(getattr(slam_state, "manual_assist_required", False))).lower(),
+                )
+            result.checks.append(self._make_readiness_check(
+                key="slam_runtime",
+                level="OK" if slam_runtime_ok else "ERROR",
+                ok=slam_runtime_ok,
+                fresh=True,
+                summary=slam_runtime_summary,
             ))
 
         return result
@@ -1398,7 +1740,12 @@ class TaskManager:
             summary="online" if mbf_ok else "move_base_flex is offline",
         ))
 
-        mcore_node_ok = self._node_online("/mcore_tcp_bridge")
+        mcore_node_name = getattr(
+            self,
+            "_mcore_node_name",
+            _infer_mcore_node_name(getattr(self, "_mcore_connected_topic", DEFAULT_MCORE_CONNECTED_TOPIC)),
+        )
+        mcore_node_ok = self._node_online(mcore_node_name)
         mcore_fresh = mcore_connected_ts > 0.0 and (now - mcore_connected_ts) <= self._connected_stale_timeout_s
         mcore_ready = bool(mcore_node_ok and mcore_connected is True and mcore_fresh)
         require_mcore = bool(getattr(self, "_require_mcore_bridge_for_readiness", False))
@@ -1671,6 +2018,7 @@ class TaskManager:
         checks: List[SubsystemReadiness] = []
         slam_gate = self._build_slam_runtime_gate(
             now=now,
+            task_active=str(mission_state or "").strip().upper() in ("RUNNING", "PAUSED"),
             refresh_map_identity=bool(refresh_map_identity),
             odometry_state=odometry_state,
             odometry_state_ts=odometry_state_ts,
@@ -1869,6 +2217,13 @@ class TaskManager:
         phase = str(self._phase or "IDLE").upper()
         active_run = str(self._active_run_id or "").strip()
         summary = self._exe_task_runtime_summary()
+        motion_start_commands = {
+            int(AppExeTaskRequest.START),
+            int(AppExeTaskRequest.CONTINUE),
+            int(AppExeTaskRequest.RETURN),
+        }
+        if command in motion_start_commands and self._executor_in_actuator_debug():
+            return False, "executor actuator debug lease is active: %s" % summary
 
         if command == int(AppExeTaskRequest.START):
             if (mission not in ("IDLE", "ESTOP")) or (phase != "IDLE") or active_run:
@@ -1973,6 +2328,10 @@ class TaskManager:
 
     def _publish_state(self, s: str):
         s = str(s)
+        if bool(getattr(self, "_slam_localization_lost_active", False)):
+            normalized = str(s or "").strip().upper()
+            if normalized not in _SLAM_LOSS_PUBLIC_TERMINAL_STATES:
+                s = "PAUSED_RECOVERY"
         self._public_state = s
         self._state_pub.publish(String(data=s))
         self._persist_if_changed()
@@ -2172,6 +2531,17 @@ class TaskManager:
                 self._health_fault_active = False
                 self._health_error_code = ""
                 self._health_error_msg = ""
+
+            # Confirmed SLAM loss is fail-closed and must not be cleared by an
+            # unrelated healthy watchdog sample. A later fresh localized
+            # SlamState clears this latch in _on_slam_state().
+            if bool(getattr(self, "_slam_localization_lost_active", False)):
+                self._health_fault_active = True
+                self._health_error_code = "SLAM_LOCALIZATION_LOST"
+                self._health_error_msg = str(
+                    getattr(self, "_slam_localization_lost_reason", "")
+                    or "cartographer confirmed localization lost"
+                )
 
             if (not self._health_error_code) and exec_err_code:
                 self._health_error_code = exec_err_code
@@ -2680,6 +3050,8 @@ class TaskManager:
             self._publish_state(self._public_state or "FAULT")
         elif self._phase == "AUTO_RESUMING":
             self._emit("RESTORE:RESUME")
+            if self._complete_auto_resuming_if_executor_done():
+                return
             ok, msg = self._prepare_runtime_for_execution(
                 run_id=self._active_run_id,
                 require_localized=True,
@@ -2719,7 +3091,13 @@ class TaskManager:
             return True
         return False
 
+    def _executor_in_actuator_debug(self) -> bool:
+        """True while the executor owns the exclusive engineering lease."""
+        return str(self._get_exec_state() or "").strip().upper() == "ACTUATOR_DEBUG"
+
     def _task_busy(self) -> bool:
+        if self._executor_in_actuator_debug():
+            return True
         if self._phase != "IDLE":
             return True
         if self._dock_supply_enable and str(self._dock_supply_state or "").upper() in ["READY_TO_EXIT", "EXIT_BACKING"]:
@@ -2729,6 +3107,11 @@ class TaskManager:
         return self._is_mission_running()
 
     def _should_trigger_auto_charge(self, soc: float) -> bool:
+        # Debug owns all actuator outputs and requires the chassis to remain
+        # stationary.  Low-SOC automation must never start docking underneath
+        # that lease, even when trigger_when_idle=true.
+        if self._executor_in_actuator_debug():
+            return False
         if not self.auto_charge_enable:
             return False
         if not self._armed:
@@ -2783,7 +3166,7 @@ class TaskManager:
         st = str(self._dock_supply_state or "").strip().upper()
         if st in ["RUNNING", "LOCK_DOCK_POSE", "SEARCH_DOCK_POSE", "PRECISE_DOCKING", "WAIT_STATION_IN_PLACE", "SEARCH_STATION_IN_PLACE", "MECHANICAL_CONNECT"]:
             return f"{prefix}_DOCKING_PRECISE"
-        if st == "DRAINING":
+        if st in ["DRAINING", "DRAIN_SETTLING"]:
             return f"{prefix}_SUPPLY_DRAIN"
         if st == "REFILLING":
             return f"{prefix}_SUPPLY_REFILL"
@@ -2957,6 +3340,24 @@ class TaskManager:
             return ok
         except Exception as e:
             self._emit_supply_command_failure("EXIT", str(e))
+            return False
+
+    def _dock_supply_recovery_retreat(self) -> bool:
+        if not self._dock_supply_enable or self._dock_supply_recovery_retreat_cli is None:
+            return False
+        try:
+            rospy.wait_for_service(self._dock_supply_recovery_retreat_service, timeout=1.0)
+            resp = self._dock_supply_recovery_retreat_cli()
+            ok = bool(getattr(resp, "success", False))
+            if ok:
+                self._emit("SUPPLY_RECOVERY_RETREAT_START")
+            else:
+                self._emit_supply_command_failure(
+                    "RECOVERY_RETREAT", str(getattr(resp, "message", "") or "")
+                )
+            return ok
+        except Exception as e:
+            self._emit_supply_command_failure("RECOVERY_RETREAT", str(e))
             return False
 
     def _clear_costmaps(self) -> Tuple[bool, str]:
@@ -3404,6 +3805,7 @@ class TaskManager:
         state_name = str(public_state or "ERROR").strip() or "ERROR"
         reason_s = str(reason or "").strip()
         self._emit(f"BLOCKING_FAULT:{state_name}:{reason_s}")
+        self._restore_dock_stage2_replanning(reason="blocking_fault")
         self.nav.cancel_all()
         self._dock_stage2_nav.cancel_all()
         self._clear_charge_monitor()
@@ -3438,6 +3840,84 @@ class TaskManager:
     def _reset_dock_retry_state(self):
         self._dock_retry_count = 0
 
+    def _mbf_planner_frequency_param_name(self) -> str:
+        return self._mbf_reconfigure_node.rstrip("/") + "/planner_frequency"
+
+    def _set_mbf_planner_frequency(self, value: float, *, reason: str) -> bool:
+        if Reconfigure is None or ReconfigureRequest is None or Config is None or DoubleParameter is None:
+            rospy.logwarn("[TASK] dynamic_reconfigure unavailable; cannot set MBF planner_frequency")
+            return False
+        try:
+            rospy.wait_for_service(self._mbf_reconfigure_service, timeout=1.0)
+            req = ReconfigureRequest()
+            req.config = Config()
+            param = DoubleParameter()
+            param.name = "planner_frequency"
+            param.value = float(value)
+            req.config.doubles.append(param)
+            client = rospy.ServiceProxy(self._mbf_reconfigure_service, Reconfigure)
+            client(req)
+            rospy.set_param(self._mbf_planner_frequency_param_name(), float(value))
+            rospy.loginfo(
+                "[TASK] MBF planner_frequency set to %.3f reason=%s",
+                float(value),
+                str(reason or "-"),
+            )
+            return True
+        except Exception as e:
+            rospy.logwarn(
+                "[TASK] failed to set MBF planner_frequency=%.3f via %s reason=%s err=%s",
+                float(value),
+                self._mbf_reconfigure_service,
+                str(reason or "-"),
+                str(e),
+            )
+            return False
+
+    def _suppress_dock_stage2_replanning(self) -> bool:
+        if not self._dock_stage2_disable_replanning:
+            return True
+        if self._dock_stage2_replanning_suppressed:
+            return True
+        current = None
+        try:
+            raw = rospy.get_param(self._mbf_planner_frequency_param_name(), None)
+            if raw is not None:
+                current = float(raw)
+        except Exception:
+            current = None
+        self._dock_stage2_saved_planner_frequency = current
+        if current is not None and abs(current) <= 1e-6:
+            self._dock_stage2_replanning_suppressed = True
+            self._emit("DOCK_STAGE2_REPLAN_ALREADY_DISABLED")
+            return True
+        ok = self._set_mbf_planner_frequency(0.0, reason="dock_stage2_start")
+        if ok:
+            self._dock_stage2_replanning_suppressed = True
+            old_text = "%.3f" % current if current is not None else "unknown"
+            self._emit("DOCK_STAGE2_REPLAN_SUPPRESS:old=%s new=0.000" % old_text)
+        else:
+            self._dock_stage2_saved_planner_frequency = None
+            self._emit("DOCK_STAGE2_REPLAN_SUPPRESS_FAILED")
+        return ok
+
+    def _restore_dock_stage2_replanning(self, *, reason: str) -> bool:
+        if not self._dock_stage2_replanning_suppressed:
+            return True
+        previous = self._dock_stage2_saved_planner_frequency
+        if previous is None:
+            self._dock_stage2_replanning_suppressed = False
+            self._dock_stage2_saved_planner_frequency = None
+            return True
+        ok = self._set_mbf_planner_frequency(float(previous), reason=reason or "dock_stage2_done")
+        if ok:
+            self._dock_stage2_replanning_suppressed = False
+            self._dock_stage2_saved_planner_frequency = None
+            self._emit("DOCK_STAGE2_REPLAN_RESTORE:%.3f reason=%s" % (float(previous), str(reason or "-")))
+        else:
+            self._emit("DOCK_STAGE2_REPLAN_RESTORE_FAILED:%.3f reason=%s" % (float(previous), str(reason or "-")))
+        return ok
+
     def _is_recoverable_dock_supply_failure(self, dock_supply_state: str) -> bool:
         return str(dock_supply_state or "").strip().upper() in self._dock_recoverable_supply_states
 
@@ -3449,6 +3929,7 @@ class TaskManager:
             "DOCK_RETRY:%d/%d reason=%s"
             % (self._dock_retry_count, self.dock_retry_limit, str(reason or "").strip() or "-")
         )
+        self._restore_dock_stage2_replanning(reason="dock_retry")
         self.nav.cancel_all()
         self._dock_stage2_nav.cancel_all()
         self._clear_charge_monitor()
@@ -3487,6 +3968,7 @@ class TaskManager:
         return True
 
     def _start_dock_stage2(self, *, manual: bool):
+        self._suppress_dock_stage2_replanning()
         self._phase = "MANUAL_DOCKING_STAGE2" if manual else "AUTO_DOCKING_STAGE2"
         self._dock_nav_started_ts = time.time()
         self._publish_state(self._dock_public_state(manual))
@@ -3603,6 +4085,8 @@ class TaskManager:
         schedule_id: str = "",
         trigger_source: str = "",
     ) -> Tuple[bool, str]:
+        if self._executor_in_actuator_debug():
+            return False, "executor actuator debug lease is active"
         if job is None:
             return False, "task not found"
 
@@ -3797,6 +4281,17 @@ class TaskManager:
         self._set_phase_and_publish("IDLE", public_state="RUNNING")
         return True
 
+    def _complete_auto_resuming_if_executor_done(self) -> bool:
+        st = self._get_exec_state()
+        if str(st or "").strip().upper() != "DONE":
+            return False
+        self._emit(f"AUTO_RESUME_EXECUTOR_DONE:run={self._active_run_id or '-'}")
+        self._phase = "IDLE"
+        self._mission_state = "RUNNING"
+        self._last_exec_state_seen = ""
+        self._tick_exec_terminal_and_loops()
+        return True
+
     def _handle_dock_supply_phase(self) -> bool:
         if not self._is_dock_supply_owner_phase():
             return False
@@ -3830,8 +4325,12 @@ class TaskManager:
                         manual=False,
                     )
             else:
-                self._reset_dock_retry_state()
-                self._return_manual_sequence_to_idle()
+                if not self._transition_to_undocking(manual=True):
+                    self._enter_charge_fault(
+                        "ERROR_UNDOCK_PREP",
+                        reason=self._supply_reason("exit_start_failed"),
+                        manual=True,
+                    )
             return False
         if st == "DONE":
             self._emit_supply_terminal_event(st)
@@ -3962,9 +4461,25 @@ class TaskManager:
                 self._enter_blocking_fault("ERROR_REDISPATCH", msg)
             return
         if self._phase == "AUTO_RESUMING":
+            if self._complete_auto_resuming_if_executor_done():
+                return
             self._complete_auto_resuming_if_executor_running()
 
     def _resume_current_task(self, *, run_id: str = "", map_name: str = "") -> Tuple[bool, str]:
+        if self._executor_in_actuator_debug():
+            return False, "executor actuator debug lease is active"
+        with self._lock:
+            slam_localization_lost = bool(
+                getattr(self, "_slam_localization_lost_active", False)
+            )
+            slam_lost_reason = str(
+                getattr(self, "_slam_localization_lost_reason", "") or ""
+            ).strip()
+        if slam_localization_lost:
+            return False, "SLAM_LOCALIZATION_LOST: explicit relocalization required%s" % (
+                ("; " + slam_lost_reason) if slam_lost_reason else ""
+            )
+
         run_tok = str(run_id or "").strip()
         if run_tok:
             self._active_run_id = run_tok
@@ -3995,6 +4510,7 @@ class TaskManager:
         return True, ""
 
     def _stop_current_task(self) -> Tuple[bool, str]:
+        self._restore_dock_stage2_replanning(reason="stop_current_task")
         if self._dock_supply_enable and (
             self._is_dock_supply_owner_phase()
             or self._dock_supply_managed_undocking()
@@ -4016,6 +4532,8 @@ class TaskManager:
         return True, ""
 
     def _start_manual_return(self) -> Tuple[bool, str]:
+        if self._executor_in_actuator_debug():
+            return False, "executor actuator debug lease is active"
         if self._phase != "IDLE":
             return False, "return requires idle phase"
         self._emit("MANUAL_DOCK")
@@ -5073,7 +5591,7 @@ class TaskManager:
                 return
         self._last_sched_tick = now_ts
 
-        if self._is_mission_running():
+        if self._task_busy():
             return
         if self._phase != "IDLE":
             return
@@ -5255,6 +5773,7 @@ class TaskManager:
             return
 
         if verb in ["estop", "e-stop", "emergency_stop"]:
+            self._restore_dock_stage2_replanning(reason="estop")
             if self._dock_supply_enable and (
                 self._is_dock_supply_owner_phase()
                 or self._dock_supply_managed_undocking()
@@ -5346,6 +5865,12 @@ class TaskManager:
 
     # ------------------- auto charge sequence -------------------
     def _start_dock_sequence(self, manual: bool = False, reset_retry_state: bool = True):
+        if self._executor_in_actuator_debug():
+            self._emit("DOCK_REJECT:ACTUATOR_DEBUG")
+            # Preserve low-SOC re-arming if the lease appeared in the narrow
+            # window between the auto-charge predicate and this dispatch.
+            self._armed = True
+            return False
         mission_was_running = self._is_mission_running()
         if self._is_mission_running():
             self._send_exec_cmd("suspend")
@@ -5387,6 +5912,193 @@ class TaskManager:
             self._emit_dock_goal_event(manual=manual, x=x, y=y, yaw=yaw)
             self.nav.send_goal(self._dock_pose())
         return True
+
+    def _sleep_auto_charge_redock_settle(self):
+        end_ts = time.time() + float(self._auto_charge_redock_settle_s)
+        while time.time() < end_ts and not rospy.is_shutdown():
+            with self._lock:
+                operation_running = bool(
+                    self._auto_charge_redock_running
+                    or self._auto_charge_recovery_exhausted_running
+                )
+                if not operation_running:
+                    raise RuntimeError("auto charge recovery operation canceled")
+            rospy.sleep(min(0.2, max(0.0, end_ts - time.time())))
+
+    def _cancel_supply_and_run_recovery_retreat(self):
+        self._dock_supply_cancel()
+
+        def _supply_quiesced():
+            st = str(self._dock_supply_state or "").strip().upper()
+            return st in ["IDLE", "DONE", "FAILED", "CANCELED"] or st.startswith("FAILED")
+
+        if not self._wait(10.0, _supply_quiesced, sleep_s=0.1):
+            raise RuntimeError("dock_supply cancel timeout before recovery retreat")
+
+        self._sleep_auto_charge_redock_settle()
+        if not self._dock_supply_recovery_retreat():
+            raise RuntimeError("dock_supply recovery retreat request failed")
+
+        retreat_started = False
+
+        def _retreat_finished():
+            nonlocal retreat_started
+            st = str(self._dock_supply_state or "").strip().upper()
+            if st in ["RECOVERY_BACKING", "RECOVERY_BACK_DONE"]:
+                retreat_started = True
+            return (
+                st == "RECOVERY_BACK_DONE"
+                or st.startswith("FAILED")
+                or (retreat_started and st == "CANCELED")
+            )
+
+        if not self._wait(
+            self._auto_charge_redock_retreat_timeout_s,
+            _retreat_finished,
+            sleep_s=0.1,
+        ):
+            self._dock_supply_cancel()
+            raise RuntimeError("dock_supply recovery retreat timeout")
+        retreat_state = str(self._dock_supply_state or "").strip().upper()
+        if retreat_state != "RECOVERY_BACK_DONE":
+            raise RuntimeError("dock_supply recovery retreat failed: %s" % (retreat_state or "-"))
+        self._sleep_auto_charge_redock_settle()
+
+        with self._lock:
+            self._dock_supply_state = "IDLE"
+            self._dock_supply_state_ts = time.time()
+            self._dock_supply_exit_inflight = False
+
+    def _on_auto_charge_redock(self, _req):
+        accepted_event = ""
+        with self._lock:
+            if self._auto_charge_redock_running or self._auto_charge_recovery_exhausted_running:
+                return TriggerResponse(success=False, message="auto charge recovery operation already running")
+            phase = str(self._phase or "").strip().upper()
+            dock_state = str(self._dock_supply_state or "").strip().upper()
+            if phase != "AUTO_SUPPLY":
+                return TriggerResponse(success=False, message=f"not in AUTO_SUPPLY phase: {phase or '-'}")
+            if dock_state not in ["CHARGE_CMD_SENT", "CHARGE_CONFIRMED"]:
+                return TriggerResponse(success=False, message=f"dock_supply not in charge state: {dock_state or '-'}")
+            if not self._active_run_id:
+                return TriggerResponse(success=False, message="missing active run id")
+            self._auto_charge_redock_running = True
+            self._phase = "AUTO_CHARGE_REDOCKING"
+            self._dock_supply_exit_inflight = False
+            accepted_event = "AUTO_CHARGE_REDOCK_ACCEPTED:state=%s retreat=dock_supply" % dock_state
+
+        try:
+            # ROS publication and persistence may acquire the task lock internally.
+            # Keep all external work outside the state-transition critical section.
+            self._emit(accepted_event)
+            self._publish_state("AUTO_CHARGE_REDOCKING")
+            thread = threading.Thread(
+                target=self._run_auto_charge_redock,
+                name="auto_charge_redock",
+                daemon=True,
+            )
+            thread.start()
+        except Exception as e:
+            with self._lock:
+                self._auto_charge_redock_running = False
+                if self._phase == "AUTO_CHARGE_REDOCKING":
+                    self._phase = "AUTO_SUPPLY"
+            rospy.logerr("[TASK] failed to start auto charge redock recovery: %s", str(e))
+            try:
+                self._publish_state(self._dock_supply_public_state(manual=False))
+            except Exception:
+                pass
+            return TriggerResponse(success=False, message="failed to start auto charge redock: %s" % str(e))
+        return TriggerResponse(success=True, message="auto charge redock accepted")
+
+    def _run_auto_charge_redock(self):
+        ok = False
+        error = ""
+        try:
+            rospy.logwarn("[TASK] auto charge redock recovery: cancel supply, request standard retreat, then restart full auto dock")
+            self._cancel_supply_and_run_recovery_retreat()
+
+            if not self._start_dock_sequence(manual=False, reset_retry_state=False):
+                raise RuntimeError("failed to restart auto dock sequence")
+            ok = True
+            self._emit("AUTO_CHARGE_REDOCK_RESTARTED")
+        except Exception as e:
+            error = str(e)
+            rospy.logerr("[TASK] auto charge redock recovery failed: %s", error)
+            self._dock_supply_cancel()
+            self._enter_charge_fault(
+                "ERROR_AUTO_CHARGE_REDOCK",
+                reason="auto_charge_redock_failed:%s" % error,
+                manual=False,
+            )
+        finally:
+            with self._lock:
+                self._auto_charge_redock_running = False
+            if ok:
+                rospy.logwarn("[TASK] auto charge redock recovery restarted full auto dock")
+
+    def _on_auto_charge_recovery_exhausted(self, _req):
+        accepted_event = ""
+        with self._lock:
+            if self._auto_charge_redock_running or self._auto_charge_recovery_exhausted_running:
+                return TriggerResponse(success=False, message="auto charge recovery operation already running")
+            phase = str(self._phase or "").strip().upper()
+            dock_state = str(self._dock_supply_state or "").strip().upper()
+            if phase != "AUTO_SUPPLY":
+                return TriggerResponse(success=False, message=f"not in AUTO_SUPPLY phase: {phase or '-'}")
+            if dock_state not in ["CHARGE_CMD_SENT", "CHARGE_CONFIRMED"]:
+                return TriggerResponse(success=False, message=f"dock_supply not in charge state: {dock_state or '-'}")
+            if not self._active_run_id:
+                return TriggerResponse(success=False, message="missing active run id")
+            self._auto_charge_recovery_exhausted_running = True
+            self._phase = "AUTO_CHARGE_FAILURE_RETREATING"
+            self._dock_supply_exit_inflight = False
+            accepted_event = "AUTO_CHARGE_RECOVERY_EXHAUSTED_ACCEPTED:state=%s" % dock_state
+
+        try:
+            self._emit(accepted_event)
+            self._publish_state("AUTO_CHARGE_FAILURE_RETREATING")
+            thread = threading.Thread(
+                target=self._run_auto_charge_recovery_exhausted,
+                name="auto_charge_recovery_exhausted",
+                daemon=True,
+            )
+            thread.start()
+        except Exception as e:
+            with self._lock:
+                self._auto_charge_recovery_exhausted_running = False
+                if self._phase == "AUTO_CHARGE_FAILURE_RETREATING":
+                    self._phase = "AUTO_SUPPLY"
+            rospy.logerr("[TASK] failed to start exhausted recovery handling: %s", str(e))
+            return TriggerResponse(success=False, message="failed to start exhausted handling: %s" % str(e))
+        return TriggerResponse(success=True, message="auto charge recovery exhausted handling accepted")
+
+    def _run_auto_charge_recovery_exhausted(self):
+        retreat_ok = False
+        error = ""
+        try:
+            rospy.logerr(
+                "[TASK] auto charge recovery exhausted: cancel supply, retreat from dock, then latch charge fault"
+            )
+            self._cancel_supply_and_run_recovery_retreat()
+            retreat_ok = True
+            self._emit("AUTO_CHARGE_RECOVERY_EXHAUSTED_RETREAT_DONE")
+        except Exception as e:
+            error = str(e)
+            rospy.logerr("[TASK] exhausted recovery retreat failed: %s", error)
+            self._dock_supply_cancel()
+            self._emit("AUTO_CHARGE_RECOVERY_EXHAUSTED_RETREAT_FAILED:%s" % error)
+        finally:
+            with self._lock:
+                self._auto_charge_recovery_exhausted_running = False
+            reason = "charge_recovery_exhausted"
+            if not retreat_ok:
+                reason += ":retreat_failed:%s" % (error or "unknown")
+            self._enter_charge_fault(
+                "ERROR_CHARGE_RECOVERY_EXHAUSTED",
+                reason=reason,
+                manual=False,
+            )
 
     # ------------------- dock supply integration -------------------
     def _on_dock_supply_state(self, msg: String):
@@ -5467,6 +6179,7 @@ class TaskManager:
         state_name = str(public_state or "ERROR_CHARGE").strip() or "ERROR_CHARGE"
         reason_s = str(reason or "").strip()
         self._emit(f"CHARGE_FAULT:{state_name}:{reason_s}")
+        self._restore_dock_stage2_replanning(reason="charge_fault")
         self.nav.cancel_all()
         self._dock_stage2_nav.cancel_all()
         self._clear_charge_monitor()
@@ -5577,6 +6290,8 @@ class TaskManager:
                 if self._dock_sequence_timed_out(self._dock_nav_started_ts):
                     self._dock_nav_client().cancel_all()
                     stage_reason = "predock_stage2_nav_timeout" if self._is_stage2_docking_phase() else "predock_stage1_nav_timeout"
+                    if self._is_stage2_docking_phase():
+                        self._restore_dock_stage2_replanning(reason=stage_reason)
                     self._enter_charge_fault(
                         "ERROR_DOCK_TIMEOUT",
                         reason=stage_reason,
@@ -5589,6 +6304,8 @@ class TaskManager:
                             self._emit_dock_stage1_succeeded()
                             self._start_dock_stage2(manual=self._phase.startswith("MANUAL"))
                         else:
+                            if self._is_stage2_docking_phase():
+                                self._restore_dock_stage2_replanning(reason="stage2_succeeded")
                             self._begin_supply_or_charge_after_dock(
                                 manual=self._phase.startswith("MANUAL"),
                                 soc=soc,
@@ -5598,6 +6315,8 @@ class TaskManager:
                         state = active_nav.get_state()
                         stage_reason = "predock_stage2_nav_failed" if self._is_stage2_docking_phase() else "predock_stage1_nav_failed"
                         self._emit_dock_nav_failed(stage=stage_reason, nav_state=state)
+                        if self._is_stage2_docking_phase():
+                            self._restore_dock_stage2_replanning(reason=stage_reason)
                         self._enter_charge_fault(
                             "ERROR_DOCK",
                             reason=f"{stage_reason}:{state}",

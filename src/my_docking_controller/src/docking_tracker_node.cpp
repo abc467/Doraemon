@@ -81,7 +81,7 @@ public:
         
         // 默认停车距离 (如 0.15m)
         pn.param("docking_distance", default_docking_distance_, 0.7); 
-        pn.param("xy_tolerance", xy_tolerance_, 0.02);   
+        pn.param("xy_tolerance", xy_tolerance_, 0.005);
         // 角度容差建议稍微放宽，或者保持您测试过的 0.02
         pn.param("yaw_tolerance", yaw_tolerance_, 0.02);  
         pn.param("pose_stale_timeout_s", pose_stale_timeout_s_, 0.25);
@@ -109,6 +109,9 @@ public:
     {
         ros::Rate r(30); // 30Hz 循环等待
         bool success = false;
+        ros::NodeHandle pn("~");
+        pn.param("docking_distance", default_docking_distance_, default_docking_distance_);
+        pn.param("xy_tolerance", xy_tolerance_, xy_tolerance_);
         
         // === 1. 确定目标距离 ===
         // 如果主控节点发了 0.0，就用 Launch 文件里的默认值
@@ -233,11 +236,14 @@ public:
         as_.publishFeedback(feedback_);
         
         // ==========================================================
-        // 【裁判逻辑】 到达检测 (复用您验证过的逻辑)
+        // 【裁判逻辑】 到达检测：距离到位即判定精对接成功。
+        // 角度偏差只作为诊断信息，不阻断后续充电流程。
         // ==========================================================
-        if (current_dist_to_wall <= current_target_dist_) {
-            ROS_INFO("Docking Reached! Wall Dist: %.3f m", current_dist_to_wall);
+        const double reach_threshold = current_target_dist_ + xy_tolerance_;
+        if (current_dist_to_wall <= reach_threshold) {
             stopRobot();
+            ROS_INFO("Docking Reached by distance. Wall Dist: %.3f m, Target: %.3f m, Threshold: %.3f m, Yaw: %.4f rad, YawTol: %.4f rad (diagnostic only)",
+                     current_dist_to_wall, current_target_dist_, reach_threshold, yaw, yaw_tolerance_);
             docking_completed_ = true; // 通知 executeCB 结束任务
             return;
         }
@@ -261,11 +267,6 @@ public:
         // 安全限速 (最后20cm)
         if (current_dist_to_wall < current_target_dist_ + 0.2) {
              cmd_vel.linear.x = std::min(cmd_vel.linear.x, 0.05); 
-        }
-
-        if (std::abs(yaw) <= yaw_tolerance_ && current_dist_to_wall <= current_target_dist_ + xy_tolerance_) {
-            cmd_vel.linear.x = 0.0;
-            cmd_vel.angular.z = 0.0;
         }
 
         cmd_vel_pub_.publish(cmd_vel);

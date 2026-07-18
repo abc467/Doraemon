@@ -23,7 +23,8 @@ options = {
   published_frame = "base_footprint",
   odom_frame = "odom",
   provide_odom_frame = false,
-  publish_frame_projected_to_2d = false,
+  -- Keep map/base_footprint planar for the 2D navigation stack and RViz overlays.
+  publish_frame_projected_to_2d = true,
   use_pose_extrapolator = false,
   publish_tracked_pose = true,
   use_odometry = false,

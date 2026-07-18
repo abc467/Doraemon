@@ -25,6 +25,8 @@ WITH_DEPTH=0
 WITH_HEAVY=0
 WITH_CARTO_DEBUG=0
 WITHOUT_MAP=0
+SYSTEM_METRICS="${BAG_SYSTEM_METRICS:-1}"
+METRICS_INTERVAL="${BAG_METRICS_INTERVAL:-1.0}"
 
 EXTRA_TOPICS=()
 EXCLUDED_TOPICS=()
@@ -55,6 +57,8 @@ Options:
   --with-depth           Include depth camera point clouds.
   --with-heavy           Include extra point clouds and docking debug clouds.
   --without-map          Do not record /map.
+  --no-system-metrics    Do not record CPU, memory, load, and disk I/O CSV.
+  --metrics-interval SEC System metrics sampling interval. Default: 1.0
   --topic TOPIC          Add an extra topic. Can be repeated.
   --exclude-topic TOPIC  Remove a topic from the final set. Can be repeated.
   --quiet                Pass --quiet to rosbag record.
@@ -139,6 +143,14 @@ while [[ $# -gt 0 ]]; do
       WITHOUT_MAP=1
       shift
       ;;
+    --no-system-metrics)
+      SYSTEM_METRICS=0
+      shift
+      ;;
+    --metrics-interval)
+      METRICS_INTERVAL="${2:?missing value for --metrics-interval}"
+      shift 2
+      ;;
     --topic)
       EXTRA_TOPICS+=("${2:?missing value for --topic}")
       shift 2
@@ -174,6 +186,16 @@ case "${PROFILE}" in
   core|analysis|full) ;;
   *) die "unsupported profile: ${PROFILE}" ;;
 esac
+
+case "${SYSTEM_METRICS}" in
+  0|1) ;;
+  *) die "BAG_SYSTEM_METRICS must be 0 or 1" ;;
+esac
+
+if ! [[ "${METRICS_INTERVAL}" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+   ! awk -v value="${METRICS_INTERVAL}" 'BEGIN { exit !(value > 0) }'; then
+  die "metrics interval must be greater than zero: ${METRICS_INTERVAL}"
+fi
 
 CORE_TOPICS=(
   /scan
@@ -263,6 +285,7 @@ mkdir -p "${OUT_DIR}"
 RUN_ID="${PREFIX}_$(date '+%Y%m%d_%H%M%S')"
 OUT_PREFIX="${OUT_DIR%/}/${RUN_ID}"
 META_DIR="${OUT_PREFIX}_metadata"
+SYSTEM_METRICS_FILE="${OUT_PREFIX}_system_metrics.csv"
 mkdir -p "${META_DIR}"
 
 TOPICS=("${CORE_TOPICS[@]}")
@@ -330,6 +353,9 @@ fi
   echo "buffsize_mb: ${BUFFSIZE_MB}"
   echo "with_carto_debug: ${WITH_CARTO_DEBUG}"
   echo "without_map: ${WITHOUT_MAP}"
+  echo "system_metrics: ${SYSTEM_METRICS}"
+  echo "metrics_interval_s: ${METRICS_INTERVAL}"
+  echo "system_metrics_file: ${SYSTEM_METRICS_FILE}"
 } > "${META_DIR}/recording_context.txt"
 printf '%s\n' "${DEDUPED_TOPICS[@]}" > "${META_DIR}/requested_topics.txt"
 printf '%s\n' "${EXCLUDED_TOPICS[@]}" > "${META_DIR}/excluded_topics.txt"
@@ -369,6 +395,9 @@ CMD+=("${DEDUPED_TOPICS[@]}")
 
 echo "[INFO] Metadata: ${META_DIR}"
 echo "[INFO] Bag prefix: ${OUT_PREFIX}"
+if [[ "${SYSTEM_METRICS}" == "1" ]]; then
+  echo "[INFO] System metrics: ${SYSTEM_METRICS_FILE}"
+fi
 echo "[INFO] Requested topics: ${#DEDUPED_TOPICS[@]}"
 if [[ -s "${META_DIR}/missing_topics_at_start.txt" ]]; then
   echo "[WARN] Some requested topics are not currently advertised; rosbag will wait for them:"
@@ -382,5 +411,48 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   exit 0
 fi
 
+METRICS_PID=""
+ROSBAG_PID=""
+
+stop_process() {
+  local pid="$1"
+  local signal_name="${2:-TERM}"
+  if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+    kill "-${signal_name}" "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  stop_process "${METRICS_PID}" TERM
+}
+
+handle_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  trap - INT TERM
+  stop_process "${ROSBAG_PID}" "${signal_name}"
+  exit "${exit_code}"
+}
+
+trap cleanup EXIT
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+
+if [[ "${SYSTEM_METRICS}" == "1" ]]; then
+  python3 "${SCRIPT_DIR}/record_system_metrics.py" \
+    --output "${SYSTEM_METRICS_FILE}" \
+    --interval "${METRICS_INTERVAL}" &
+  METRICS_PID=$!
+fi
+
 echo "[INFO] Recording. Press Ctrl-C to stop."
-exec "${CMD[@]}"
+"${CMD[@]}" &
+ROSBAG_PID=$!
+
+set +e
+wait "${ROSBAG_PID}"
+ROSBAG_STATUS=$?
+set -e
+ROSBAG_PID=""
+exit "${ROSBAG_STATUS}"

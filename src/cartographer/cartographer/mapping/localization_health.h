@@ -66,6 +66,35 @@ struct LocalizationHealthSnapshot {
   int latest_recovery_full_search_submap_count = 0;
   std::string recovery_state = "OK";
   std::string recovery_reason;
+  bool automatic_relocation_enabled = false;
+  bool localization_lost_confirmed = false;
+  std::int64_t localization_loss_episode = 0;
+
+  // Full-map distance-field lifecycle and performance diagnostics. Counts are
+  // process-lifetime totals and are reset by ResetLocalizationHealth().
+  std::string map_scan_distance_field_source = "unavailable";
+  int map_scan_distance_field_generation = 0;
+  std::uint64_t map_scan_distance_field_cells = 0;
+  std::uint64_t map_scan_distance_field_resident_bytes = 0;
+  std::int64_t map_scan_distance_field_load_count = 0;
+  std::int64_t map_scan_distance_field_load_failure_count = 0;
+  std::string map_scan_distance_field_last_load_source;
+  std::string map_scan_distance_field_last_load_result;
+  double map_scan_distance_field_last_load_duration_ms = 0.0;
+  std::int64_t map_scan_distance_field_build_count = 0;
+  std::int64_t map_scan_distance_field_build_failure_count = 0;
+  std::int64_t map_scan_distance_field_build_published_count = 0;
+  std::int64_t map_scan_distance_field_build_unpublished_count = 0;
+  std::string map_scan_distance_field_last_build_source;
+  std::string map_scan_distance_field_last_build_result;
+  bool map_scan_distance_field_last_build_published = false;
+  double map_scan_distance_field_last_build_duration_ms = 0.0;
+  std::int64_t map_scan_distance_field_invalidation_count = 0;
+  std::string map_scan_distance_field_last_invalidation_reason;
+  std::int64_t map_scan_distance_field_query_count = 0;
+  double map_scan_distance_field_last_query_duration_ms = 0.0;
+  double map_scan_distance_field_mean_query_duration_ms = 0.0;
+  double map_scan_distance_field_max_query_duration_ms = 0.0;
 
   int pure_localization_force_opt_count = 0;
   int latest_active_submaps = 0;
@@ -89,6 +118,7 @@ struct LocalizationHealthSnapshot {
   std::int64_t total_current_pose_scan_map_bad_count = 0;
   std::int64_t total_map_scan_bad_count = 0;
   std::int64_t total_recovery_full_search_count = 0;
+  std::int64_t total_localization_loss_count = 0;
   std::int64_t total_auto_relocation_trigger_count = 0;
   std::int64_t total_auto_relocation_success_count = 0;
 };
@@ -116,6 +146,11 @@ void RecordLocalizationHealthMapScanQuality(
     int checked_submaps, bool bad);
 void RecordLocalizationHealthRecoveryState(const std::string& state,
                                            const std::string& reason);
+// Clears the process-wide confirmed-loss latch. Ordinary constraints and
+// health samples cannot clear it; only a successful explicit relocalization
+// may call this function.
+void RecordLocalizationHealthExplicitRelocationSuccess(
+    const std::string& reason);
 void RecordLocalizationHealthRecoveryFullSearch(int checked_submaps,
                                                 const std::string& reason);
 void RecordLocalizationHealthActiveFrozenAmbiguousReject();
@@ -128,6 +163,16 @@ void RecordLocalizationHealthPureLocalizationForceOptimization(
 void RecordLocalizationHealthAutoRelocationTrigger(std::size_t queue_size);
 void RecordLocalizationHealthAutoRelocationResult(int return_code,
                                                   bool success);
+void RecordLocalizationHealthMapScanDistanceFieldInvalidation(
+    int generation, const std::string& reason);
+void RecordLocalizationHealthMapScanDistanceFieldLoad(
+    bool success, const std::string& source, int generation,
+    std::size_t cells, std::size_t resident_bytes, double duration_ms);
+void RecordLocalizationHealthMapScanDistanceFieldBuild(
+    bool success, bool published, const std::string& source, int generation,
+    std::size_t cells, std::size_t resident_bytes, double duration_ms,
+    const std::string& result);
+void RecordLocalizationHealthMapScanDistanceFieldQuery(double duration_ms);
 LocalizationHealthSnapshot GetLocalizationHealthSnapshot(
     double window_seconds = 60.0);
 

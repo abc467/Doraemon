@@ -3,6 +3,7 @@
 
 import importlib.util
 import pathlib
+from types import SimpleNamespace
 import unittest
 
 
@@ -70,6 +71,73 @@ class _FakeAlignmentStore(_FakeStore):
 
 
 class SiteEditorVerifiedMapGuardTest(unittest.TestCase):
+    def test_preview_paths_preserve_block_boundaries(self):
+        node = SITE_EDITOR_MODULE.SiteEditorServiceNode.__new__(
+            SITE_EDITOR_MODULE.SiteEditorServiceNode
+        )
+        result = SimpleNamespace(
+            blocks=[
+                SimpleNamespace(block_id=4, path_xy=[(10.0, 1.0), (11.0, 1.0)]),
+                SimpleNamespace(block_id=2, path_xy=[(0.0, 0.0), (1.0, 0.0)]),
+            ],
+            exec_order=[2, 4],
+        )
+
+        self.assertEqual(
+            node._ordered_preview_paths(result),
+            [[(0.0, 0.0), (1.0, 0.0)], [(10.0, 1.0), (11.0, 1.0)]],
+        )
+
+    def test_site_axis_plan_is_converted_back_to_raw_map(self):
+        node = SITE_EDITOR_MODULE.SiteEditorServiceNode.__new__(
+            SITE_EDITOR_MODULE.SiteEditorServiceNode
+        )
+        alignment = SITE_EDITOR_MODULE.MapAlignment(
+            map_name="demo",
+            map_id="map_demo",
+            map_version="md5_demo",
+            alignment_version="align_demo",
+            raw_frame="map",
+            aligned_frame="site_map",
+            yaw_offset_deg=2.6208646390320496,
+            pivot_x=4.01486795434428,
+            pivot_y=16.625935445164515,
+            source="test",
+            status="active",
+            active=True,
+        )
+        source = SimpleNamespace(
+            frame_id="site_map",
+            blocks=[
+                SimpleNamespace(
+                    block_id=0,
+                    path_xy=[(8.0, 5.0), (8.0, 15.0)],
+                    entry_xyyaw=(8.0, 5.0, 1.5707963267948966),
+                    exit_xyyaw=(8.0, 15.0, 1.5707963267948966),
+                    debug=SimpleNamespace(),
+                )
+            ],
+            exec_order=[0],
+            total_length_m=10.0,
+        )
+
+        mapped = node._plan_result_aligned_to_map(source, alignment)
+        expected_start = SITE_EDITOR_MODULE.aligned_to_map_point(8.0, 5.0, alignment)
+        expected_end = SITE_EDITOR_MODULE.aligned_to_map_point(8.0, 15.0, alignment)
+
+        self.assertEqual(mapped.frame_id, "map")
+        self.assertAlmostEqual(mapped.blocks[0].path_xy[0][0], expected_start[0], places=9)
+        self.assertAlmostEqual(mapped.blocks[0].path_xy[0][1], expected_start[1], places=9)
+        self.assertAlmostEqual(mapped.blocks[0].path_xy[1][0], expected_end[0], places=9)
+        self.assertAlmostEqual(mapped.blocks[0].path_xy[1][1], expected_end[1], places=9)
+        self.assertAlmostEqual(
+            mapped.blocks[0].entry_xyyaw[2],
+            1.5707963267948966 + alignment.yaw_offset_rad,
+            places=9,
+        )
+        self.assertIsNone(mapped.blocks[0].debug)
+        self.assertEqual(source.frame_id, "site_map", "source result must remain immutable")
+
     def test_rejects_pending_map_asset(self):
         node = SITE_EDITOR_MODULE.SiteEditorServiceNode.__new__(SITE_EDITOR_MODULE.SiteEditorServiceNode)
         node.robot_id = "robot_a"

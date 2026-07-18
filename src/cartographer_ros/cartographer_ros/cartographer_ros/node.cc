@@ -311,13 +311,15 @@ void Node::PublishLocalTrajectoryData(const ::ros::TimerEvent& timer_event) {
         node_options_.use_pose_extrapolator
             ? extrapolator.ExtrapolatePose(now)
             : trajectory_data.local_slam_data->local_pose;
-    const Rigid3d tracking_to_local = [&] {
+    const auto project_to_2d_if_configured = [&](const Rigid3d& transform) {
       if (trajectory_data.trajectory_options.publish_frame_projected_to_2d) {
         return carto::transform::Embed3D(
-            carto::transform::Project2D(tracking_to_local_3d));
+            carto::transform::Project2D(transform));
       }
-      return tracking_to_local_3d;
-    }();
+      return transform;
+    };
+    const Rigid3d tracking_to_local =
+        project_to_2d_if_configured(tracking_to_local_3d);
 
     const Rigid3d tracking_to_map =
         trajectory_data.local_to_map * tracking_to_local;
@@ -331,15 +333,18 @@ void Node::PublishLocalTrajectoryData(const ::ros::TimerEvent& timer_event) {
           stamped_transform.child_frame_id =
               trajectory_data.trajectory_options.odom_frame;
           stamped_transform.transform =
-              ToGeometryMsgTransform(trajectory_data.local_to_map);
+              ToGeometryMsgTransform(project_to_2d_if_configured(
+                  trajectory_data.local_to_map));
           stamped_transforms.push_back(stamped_transform);
 
           stamped_transform.header.frame_id =
               trajectory_data.trajectory_options.odom_frame;
           stamped_transform.child_frame_id =
               trajectory_data.trajectory_options.published_frame;
-          stamped_transform.transform = ToGeometryMsgTransform(
-              tracking_to_local * (*trajectory_data.published_to_tracking));
+          stamped_transform.transform =
+              ToGeometryMsgTransform(project_to_2d_if_configured(
+                  tracking_to_local *
+                  (*trajectory_data.published_to_tracking)));
           stamped_transforms.push_back(stamped_transform);
 
           tf_broadcaster_.sendTransform(stamped_transforms);
@@ -347,8 +352,9 @@ void Node::PublishLocalTrajectoryData(const ::ros::TimerEvent& timer_event) {
           stamped_transform.header.frame_id = node_options_.map_frame;
           stamped_transform.child_frame_id =
               trajectory_data.trajectory_options.published_frame;
-          stamped_transform.transform = ToGeometryMsgTransform(
-              tracking_to_map * (*trajectory_data.published_to_tracking));
+          stamped_transform.transform =
+              ToGeometryMsgTransform(project_to_2d_if_configured(
+                  tracking_to_map * (*trajectory_data.published_to_tracking)));
           tf_broadcaster_.sendTransform(stamped_transform);
         }
       }

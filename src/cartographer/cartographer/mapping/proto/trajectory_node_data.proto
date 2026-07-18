@@ -22,6 +22,11 @@ import "cartographer/mapping/proto/flirt_data.proto";
 
 // Serialized state of a mapping::TrajectoryNode::Data.
 message TrajectoryNodeData {
+  enum InterestPointFrame {
+    UNSPECIFIED = 0;
+    NODE_GRAVITY_ALIGNED = 1;
+  }
+
   int64 timestamp = 1;
   transform.proto.Quaterniond gravity_alignment = 2;
   sensor.proto.CompressedPointCloud
@@ -31,4 +36,9 @@ message TrajectoryNodeData {
   repeated float rotational_scan_matcher_histogram = 6;
   transform.proto.Rigid3d local_pose = 7;
   repeated InterestPoint interest_points = 8;
+  InterestPointFrame interest_point_frame = 9;
+  // New node gravity-aligned features use a distinct wire field so binaries
+  // predating interest_point_frame cannot reinterpret them as legacy
+  // global-like tag-8 features.
+  repeated InterestPoint gravity_aligned_interest_points = 10;
 }

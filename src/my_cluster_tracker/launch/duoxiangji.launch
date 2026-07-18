@@ -13,8 +13,8 @@
   <arg name="cam1_x_max" default="2.0"/>
   <arg name="cam1_y_min" default="-2.0"/>
   <arg name="cam1_y_max" default="1.6"/>
-  <arg name="cam1_z_min" default="-5.0"/>
-  <arg name="cam1_z_max" default="5.0"/>
+  <arg name="cam1_z_min" default="-0.10"/>
+  <arg name="cam1_z_max" default="0.60"/>
 
 <!-- 
   <arg name="cam1_x_min" default="-1.0"/>
@@ -28,24 +28,29 @@
   <arg name="cam1_eps_angle_deg"   default="20.0"/>
   <arg name="cam1_dist_thresh"     default="0.02"/>
   <arg name="cam1_ransac_max_iter" default="300"/>
-  <arg name="cam1_ror_r"           default="0.1"/>
-  <arg name="cam1_ror_n"           default="10"/>
+  <arg name="cam1_ror_r"           default="0.15"/>
+  <arg name="cam1_ror_n"           default="5"/>
  
   <arg name="mean_k"  default="50"/>
-  <arg name="std_mul" default="1.0"/>
+  <arg name="std_mul" default="1.5"/>
   <arg name="plane_alpha" default="0.05"/>
-  <arg name="dist_lo" default="0.04"/>
-  <arg name="dist_hi" default="0.15"/>
+  <!-- Aggressive field-test setting: keep obstacles from about 10 cm above floor. -->
+  <arg name="dist_lo" default="0.07"/>
+  <arg name="dist_hi" default="0.10"/>
+  <arg name="height_fallback_enabled" default="true"/>
   <arg name="self_filter_enabled" default="true"/>
-  <arg name="self_x_min" default="-0.65"/>
-  <arg name="self_x_max" default="0.65"/>
-  <arg name="self_y_min" default="-0.55"/>
-  <arg name="self_y_max" default="0.55"/>
+  <arg name="self_x_min" default="-0.27"/>
+  <arg name="self_x_max" default="0.69"/>
+  <arg name="self_y_min" default="-0.38"/>
+  <arg name="self_y_max" default="0.38"/>
   <arg name="cluster_filter_enabled" default="true"/>
-  <arg name="cluster_tolerance" default="0.10"/>
-  <arg name="min_cluster_size" default="18"/>
+  <arg name="cluster_tolerance" default="0.20"/>
+  <arg name="min_cluster_size" default="10"/>
   <arg name="max_cluster_size" default="10000"/>
-  <arg name="min_obstacle_points" default="18"/>
+  <arg name="min_obstacle_points" default="10"/>
+  <arg name="obstacle_expand_enabled" default="true"/>
+  <arg name="obstacle_expand_radius" default="0.25"/>
+  <arg name="obstacle_expand_resolution" default="0.05"/>
 
   <arg name="cam2_ns"            default="right"/>
   <arg name="cam2_input_topic"   default="/gemini_nj/depth/points"/>
@@ -57,8 +62,8 @@
   <arg name="cam2_x_max" default="2.0"/>
   <arg name="cam2_y_min" default="-1.6"/>
   <arg name="cam2_y_max" default="1.0"/>
-  <arg name="cam2_z_min" default="-5.0"/>
-  <arg name="cam2_z_max" default="5.0"/>
+  <arg name="cam2_z_min" default="-0.10"/>
+  <arg name="cam2_z_max" default="0.60"/>
 
 
   <!-- <arg name="cam2_x_min" default="-1.0"/>
@@ -72,21 +77,21 @@
   <arg name="cam2_eps_angle_deg"   default="20.0"/>
   <arg name="cam2_dist_thresh"     default="0.02"/>
   <arg name="cam2_ransac_max_iter" default="300"/>
-  <arg name="cam2_ror_r"           default="0.1"/>
-  <arg name="cam2_ror_n"           default="10"/>
+  <arg name="cam2_ror_r"           default="0.15"/>
+  <arg name="cam2_ror_n"           default="5"/>
 
   <arg name="cam3_ns"            default="up"/>
-  <arg name="cam3_input_topic"   default="/cam_3/depth/color/points"/>
+  <arg name="cam3_input_topic"   default="/gemini_front/depth/points"/>
   <arg name="cam3_output_topic"  default="obstacle_2d"/>
   <arg name="cam3_target_frame"  default="base_link"/>
   <arg name="cam3_queue_size"    default="5"/>
-  
-  <arg name="cam3_x_min" default="-2.0"/>
-  <arg name="cam3_x_max" default="2.0"/>
-  <arg name="cam3_y_min" default="-2"/>
-  <arg name="cam3_y_max" default="2"/>
-  <arg name="cam3_z_min" default="-5.0"/>
-  <arg name="cam3_z_max" default="5.0"/>
+
+  <arg name="cam3_x_min" default="0.65"/>
+  <arg name="cam3_x_max" default="3.0"/>
+  <arg name="cam3_y_min" default="-1.2"/>
+  <arg name="cam3_y_max" default="1.2"/>
+  <arg name="cam3_z_min" default="-0.10"/>
+  <arg name="cam3_z_max" default="0.60"/>
 
   <arg name="cam3_leaf"            default="0.015"/>
   <arg name="cam3_eps_angle_deg"   default="20.0"/>
@@ -126,6 +131,7 @@
       <param name="plane_alpha" value="$(arg plane_alpha)"/>
       <param name="dist_lo" value="$(arg dist_lo)"/>
       <param name="dist_hi" value="$(arg dist_hi)"/>
+      <param name="height_fallback_enabled" value="$(arg height_fallback_enabled)"/>
       <param name="self_filter_enabled" value="$(arg self_filter_enabled)"/>
       <param name="self_x_min" value="$(arg self_x_min)"/>
       <param name="self_x_max" value="$(arg self_x_max)"/>
@@ -136,6 +142,9 @@
       <param name="min_cluster_size" value="$(arg min_cluster_size)"/>
       <param name="max_cluster_size" value="$(arg max_cluster_size)"/>
       <param name="min_obstacle_points" value="$(arg min_obstacle_points)"/>
+      <param name="obstacle_expand_enabled" value="$(arg obstacle_expand_enabled)"/>
+      <param name="obstacle_expand_radius" value="$(arg obstacle_expand_radius)"/>
+      <param name="obstacle_expand_resolution" value="$(arg obstacle_expand_resolution)"/>
     </node>
   </group>
 
@@ -170,6 +179,7 @@
       <param name="plane_alpha" value="$(arg plane_alpha)"/>
       <param name="dist_lo" value="$(arg dist_lo)"/>
       <param name="dist_hi" value="$(arg dist_hi)"/>
+      <param name="height_fallback_enabled" value="$(arg height_fallback_enabled)"/>
       <param name="self_filter_enabled" value="$(arg self_filter_enabled)"/>
       <param name="self_x_min" value="$(arg self_x_min)"/>
       <param name="self_x_max" value="$(arg self_x_max)"/>
@@ -180,6 +190,9 @@
       <param name="min_cluster_size" value="$(arg min_cluster_size)"/>
       <param name="max_cluster_size" value="$(arg max_cluster_size)"/>
       <param name="min_obstacle_points" value="$(arg min_obstacle_points)"/>
+      <param name="obstacle_expand_enabled" value="$(arg obstacle_expand_enabled)"/>
+      <param name="obstacle_expand_radius" value="$(arg obstacle_expand_radius)"/>
+      <param name="obstacle_expand_resolution" value="$(arg obstacle_expand_resolution)"/>
     </node>
   </group>
 
@@ -215,6 +228,7 @@
       <param name="plane_alpha" value="$(arg plane_alpha)"/>
       <param name="dist_lo" value="$(arg dist_lo)"/>
       <param name="dist_hi" value="$(arg dist_hi)"/>
+      <param name="height_fallback_enabled" value="$(arg height_fallback_enabled)"/>
       <param name="self_filter_enabled" value="$(arg self_filter_enabled)"/>
       <param name="self_x_min" value="$(arg self_x_min)"/>
       <param name="self_x_max" value="$(arg self_x_max)"/>
@@ -225,6 +239,9 @@
       <param name="min_cluster_size" value="$(arg min_cluster_size)"/>
       <param name="max_cluster_size" value="$(arg max_cluster_size)"/>
       <param name="min_obstacle_points" value="$(arg min_obstacle_points)"/>
+      <param name="obstacle_expand_enabled" value="$(arg obstacle_expand_enabled)"/>
+      <param name="obstacle_expand_radius" value="$(arg obstacle_expand_radius)"/>
+      <param name="obstacle_expand_resolution" value="$(arg obstacle_expand_resolution)"/>
     </node>
   </group>
   

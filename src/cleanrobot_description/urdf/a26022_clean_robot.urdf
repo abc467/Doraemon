@@ -261,4 +261,211 @@
     <axis
       xyz="0 0 0" />
   </joint>
+  <link
+    name="left_camera">
+    <inertial>
+      <origin
+        xyz="-0.00037591 -0.00051252 -0.0094233"
+        rpy="0 0 0" />
+      <mass
+        value="0.046" />
+      <inertia
+        ixx="2.1183E-05"
+        ixy="-6.4838E-07"
+        ixz="1.156E-07"
+        iyy="4.5653E-05"
+        iyz="-1.6564E-08"
+        izz="6.5065E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/left_camera.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/left_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_camera_joint"
+    type="fixed">
+    <origin
+      xyz="-0.13292 0.32478 0.8656"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_camera" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="gemini_cf_link" />
+  <!-- Calibrated from the observed floor plane.
+       Roll/pitch/height follow the corrected 2026-06-19 serial mapping;
+       yaw stays with the CAD left-side mounting direction. -->
+  <joint
+    name="gemini_cf_mount"
+    type="fixed">
+    <origin
+      xyz="-0.13292 0.32478 0.910841616448"
+      rpy="-1.10771564304 0.70386486547 0.807282164799" />
+    <parent
+      link="base_link" />
+    <child
+      link="gemini_cf_link" />
+  </joint>
+  <link
+    name="right_camera">
+    <inertial>
+      <origin
+        xyz="-0.00037591 0.00051252 -0.0094233"
+        rpy="0 0 0" />
+      <mass
+        value="0.046" />
+      <inertia
+        ixx="2.1183E-05"
+        ixy="6.4838E-07"
+        ixz="1.156E-07"
+        iyy="4.5653E-05"
+        iyz="1.6564E-08"
+        izz="6.5065E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/right_camera.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/right_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_camera_joint"
+    type="fixed">
+    <origin
+      xyz="-0.13292 -0.32478 0.8656"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_camera" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="gemini_nj_link" />
+  <!-- Calibrated from the observed floor plane.
+       Roll/pitch/height follow the corrected 2026-06-19 serial mapping;
+       yaw stays with the CAD right-side mounting direction. -->
+  <joint
+    name="gemini_nj_mount"
+    type="fixed">
+    <origin
+      xyz="-0.13292 -0.32478 0.949244255794"
+      rpy="1.10708972437 0.665196470572 -0.814678120843" />
+    <parent
+      link="base_link" />
+    <child
+      link="gemini_nj_link" />
+  </joint>
+  <link
+    name="up_camera">
+    <inertial>
+      <origin
+        xyz="-7.8063E-18 0 -1.0042E-15"
+        rpy="0 0 0" />
+      <mass
+        value="0.17239" />
+      <inertia
+        ixx="6.0873E-05"
+        ixy="-1.0164E-19"
+        ixz="-2.4657E-20"
+        iyy="0.00040027"
+        iyz="1.6777E-19"
+        izz="0.00044366" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/up_camera.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://cleanrobot_description/meshes/up_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="up_camera_joint"
+    type="fixed">
+    <origin
+      xyz="0.57945 0 0.97641"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="up_camera" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="gemini_front_link" />
+  <!-- Front Gemini 2 L depth optical mount calibrated from the observed floor
+       plane on 2026-07-08. With base_link at the wheel axle, the fitted floor
+       is z=-0.080 m; keep CAD height and correct only roll/pitch. -->
+  <joint
+    name="gemini_front_mount"
+    type="fixed">
+    <origin
+      xyz="0.57945 0 0.97641"
+      rpy="0.0038898 0.8874465 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="gemini_front_link" />
+  </joint>
 </robot>

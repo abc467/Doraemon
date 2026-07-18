@@ -2,3 +2,7 @@ string profile_name
 uint8 vel_water_pump
 uint8 vel_water_suction
 uint8 height_scrub
+uint8 main_brush_speed
+uint8 side_brush_speed
+uint16 brush_down_distance
+bool side_brush_enable

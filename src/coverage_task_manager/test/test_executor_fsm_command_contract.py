@@ -10,6 +10,9 @@ class ExecutorFsmCommandContractTest(unittest.TestCase):
     def _fsm(self):
         fsm = ExecutorFSM.__new__(ExecutorFSM)
         fsm._lock = threading.RLock()
+        fsm._actuator_debug_control_lock = threading.RLock()
+        fsm._actuator_debug_active = False
+        fsm._actuator_debug_transition = False
         fsm._zone_id = ""
         fsm._run_id = ""
         fsm._pause_req = False

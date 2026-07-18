@@ -204,8 +204,8 @@ void OBCameraNodeDriver::init() {
   sigaction(SIGABRT, &sa, nullptr);
   sigaction(SIGFPE, &sa, nullptr);
   sigaction(SIGILL, &sa, nullptr);
-  sigaction(SIGINT, &sa, nullptr);
-  sigaction(SIGTERM, &sa, nullptr);
+  // Leave normal shutdown signals to roscpp. Calling ros::shutdown() from this handler can run
+  // inside a ROS helper thread and make roscpp try to join that same thread during teardown.
 
   auto log_level = nh_private_.param<std::string>("log_level", "info");
   g_camera_name = nh_private_.param<std::string>("camera_name", "camera");

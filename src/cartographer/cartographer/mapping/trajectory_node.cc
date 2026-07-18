@@ -20,6 +20,7 @@
 #include "cartographer/common/time.h"
 #include "cartographer/sensor/compressed_point_cloud.h"
 #include "cartographer/transform/transform.h"
+#include "glog/logging.h"
 
 namespace cartographer {
 namespace mapping {
@@ -46,63 +47,50 @@ proto::TrajectoryNodeData ToProto(const TrajectoryNode::Data& constant_data) {
   }
   *proto.mutable_local_pose() = transform::ToProto(constant_data.local_pose);
 
-  // FLIRT
-  proto.mutable_interest_points()->Reserve(
-      constant_data.interest_points.size());
-  for (std::size_t i = 0; i < constant_data.interest_points.size(); i++) {
-    const auto& p = constant_data.interest_points.at(i);
-    auto interest_point = proto.mutable_interest_points()->Add();
-    // position
-    auto pos = p->getPosition();
-    interest_point->mutable_position()->mutable_position()->set_x(pos.x);
-    interest_point->mutable_position()->mutable_position()->set_y(pos.y);
-    interest_point->mutable_position()->set_theta(pos.theta);
-    // support points
-    interest_point->mutable_support_points()->Reserve(p->getSupport().size());
-    for (auto&& sp : p->getSupport()) {
-      auto _sp = interest_point->mutable_support_points()->Add();
-      _sp->set_x(sp.x);
-      _sp->set_y(sp.y);
-    }
-    // scale
-    interest_point->set_scale(p->getScale());
-    // scale level
-    interest_point->set_scalelevel(p->getScaleLevel());
-    // descriptor
-    auto descriptor = dynamic_cast<ShapeContext*>(p->getDescriptor());
-    auto desc = interest_point->mutable_desc();
-    // descriptor - Histogramn
-    desc->mutable_histogram()->Reserve(descriptor->getHistogram().size());
-    for (auto&& j : descriptor->getHistogram()) {
-      auto m = desc->mutable_histogram()->Add();
-      for (auto&& k : j) {
-        m->add_values(k);
+  // FLIRT. A null FeatureSet is deliberately not serialized as the new frame:
+  // it means the features have not been computed (or legacy features need to
+  // be rebuilt). A non-null empty FeatureSet is serialized with the frame so
+  // it remains distinguishable after a round trip.
+  const auto features = constant_data.GetFlirtFeatures();
+  if (features != nullptr) {
+    proto.set_interest_point_frame(
+        proto::TrajectoryNodeData::NODE_GRAVITY_ALIGNED);
+    proto.mutable_gravity_aligned_interest_points()->Reserve(features->size());
+    for (const InterestPoint* const p : features->raw()) {
+      auto interest_point =
+          proto.mutable_gravity_aligned_interest_points()->Add();
+      // position
+      auto pos = p->getPosition();
+      interest_point->mutable_position()->mutable_position()->set_x(pos.x);
+      interest_point->mutable_position()->mutable_position()->set_y(pos.y);
+      interest_point->mutable_position()->set_theta(pos.theta);
+      // support points
+      interest_point->mutable_support_points()->Reserve(p->getSupport().size());
+      for (const auto& sp : p->getSupport()) {
+        auto serialized_support =
+            interest_point->mutable_support_points()->Add();
+        serialized_support->set_x(sp.x);
+        serialized_support->set_y(sp.y);
+      }
+      // scale
+      interest_point->set_scale(p->getScale());
+      // scale level
+      interest_point->set_scalelevel(p->getScaleLevel());
+      // descriptor
+      const auto* descriptor =
+          dynamic_cast<const ShapeContext*>(p->getDescriptor());
+      CHECK(descriptor != nullptr)
+          << "Only ShapeContext FLIRT descriptors can be serialized";
+      auto desc = interest_point->mutable_desc();
+      // descriptor - Histogram
+      desc->mutable_histogram()->Reserve(descriptor->getHistogram().size());
+      for (const auto& row : descriptor->getHistogram()) {
+        auto serialized_row = desc->mutable_histogram()->Add();
+        for (const double value : row) {
+          serialized_row->add_values(value);
+        }
       }
     }
-    // descriptor - Variance
-    // desc->mutable_variance()->Reserve(descriptor->getVariance().size());
-    // for (auto&& j : descriptor->getVariance()) {
-    //   auto m = desc->mutable_variance()->Add();
-    //   for (auto&& k : j) {
-    //     m->add_values(k);
-    //   }
-    // }
-    // // descriptor - Hit
-    // desc->mutable_hit()->Reserve(descriptor->getHit().size());
-    // for (auto&& j : descriptor->getHit()) {
-    //   auto m = desc->mutable_hit()->Add();
-    //   for (auto&& k : j) {
-    //     m->add_values(k);
-    //   }
-    // }
-    // // descriptor - Miss
-    // desc->mutable_miss()->Reserve(descriptor->getMiss().size());
-    // for (auto&& j : descriptor->getMiss()) {
-    //   auto m = desc->mutable_miss()->Add();
-    //   for (auto&& k : j) {
-    //     m->add_values(k);
-    //   }
-    // }
   }
   return proto;
 }
@@ -114,78 +102,59 @@ TrajectoryNode::Data FromProto(const proto::TrajectoryNodeData& proto) {
     rotational_scan_matcher_histogram(i) =
         proto.rotational_scan_matcher_histogram(i);
   }
-  // FLIRT
-  std::vector<InterestPoint*> interest_points;
-  interest_points.reserve(proto.interest_points().size());
-  for (auto&& pp : proto.interest_points()) {
-    auto p = new InterestPoint;
-    interest_points.emplace_back(p);
+  // Legacy streams have no frame tag. Their interest points were generated in
+  // ambiguous/global coordinates and must not be reused. Only the explicitly
+  // tagged gravity-aligned representation is loaded.
+  std::shared_ptr<const flirt::FeatureSet> flirt_features;
+  if (proto.interest_point_frame() ==
+      proto::TrajectoryNodeData::NODE_GRAVITY_ALIGNED) {
+    // New writers use tag 10. Reading tagged tag-8 data is retained only for
+    // PBStreams produced by the short-lived, not-deployed transition format.
+    const auto& serialized_interest_points =
+        proto.gravity_aligned_interest_points_size() > 0
+            ? proto.gravity_aligned_interest_points()
+            : proto.interest_points();
+    flirt::FeatureSet::OwnedPoints interest_points;
+    interest_points.reserve(serialized_interest_points.size());
+    for (const auto& pp : serialized_interest_points) {
+      auto p = std::make_unique<InterestPoint>();
 
-    // Position
-    p->setPosition({
-        pp.position().position().x(),
-        pp.position().position().y(),
-        pp.position().theta(),
-    });
-    // support point
-    std::vector<Point2D> support_points;
-    support_points.reserve(pp.support_points().size());
-    for (auto&& sp : pp.support_points()) {
-      support_points.push_back({sp.x(), sp.y()});
-    }
-    p->setSupport(support_points);
-    // scale
-    p->setScale(pp.scale());
-    // scale level
-    p->setScaleLevel(pp.scalelevel());
-    // descriptor
-    // auto desc = new BetaGrid;
-    auto desc = new ShapeContext;
-    // descriptor - histogram
-    auto& histogram = desc->getHistogram();
-    histogram.reserve(pp.desc().histogram().size());
-    for (auto&& j : pp.desc().histogram()) {
-      std::vector<double> v;
-      v.reserve(j.values().size());
-      for (auto&& m : j.values()) {
-        v.emplace_back(m);
+      // Position
+      p->setPosition({
+          pp.position().position().x(),
+          pp.position().position().y(),
+          pp.position().theta(),
+      });
+      // support point
+      std::vector<Point2D> support_points;
+      support_points.reserve(pp.support_points().size());
+      for (const auto& sp : pp.support_points()) {
+        support_points.push_back({sp.x(), sp.y()});
       }
-      histogram.emplace_back(std::move(v));
+      p->setSupport(support_points);
+      // scale
+      p->setScale(pp.scale());
+      // scale level
+      p->setScaleLevel(pp.scalelevel());
+      // descriptor
+      auto desc = std::make_unique<ShapeContext>();
+      // descriptor - histogram
+      auto& histogram = desc->getHistogram();
+      histogram.reserve(pp.desc().histogram().size());
+      for (const auto& j : pp.desc().histogram()) {
+        std::vector<double> v;
+        v.reserve(j.values().size());
+        for (const auto& m : j.values()) {
+          v.emplace_back(m);
+        }
+        histogram.emplace_back(std::move(v));
+      }
+      // descriptor - function
+      desc->setDistanceFunction(flirt::get_distance_function());
+      p->setDescriptor(desc.get());
+      interest_points.emplace_back(std::move(p));
     }
-    // descriptor - hit
-    // desc->m_hit.reserve(pp.desc().hit().size());
-    // for (auto&& j : pp.desc().hit()) {
-    //   std::vector<double> v;
-    //   v.reserve(j.values().size());
-    //   for (auto&& m : j.values()) {
-    //     v.emplace_back(m);
-    //   }
-    //   desc->m_hit.emplace_back(std::move(v));
-    // }
-    // // descriptor - miss
-    // desc->m_miss.reserve(pp.desc().miss().size());
-    // for (auto&& j : pp.desc().miss()) {
-    //   std::vector<double> v;
-    //   v.reserve(j.values().size());
-    //   for (auto&& m : j.values()) {
-    //     v.emplace_back(m);
-    //   }
-    //   desc->m_miss.emplace_back(std::move(v));
-    // }
-    // // descriptor - variance
-    // desc->m_variance.reserve(pp.desc().variance().size());
-    // for (auto&& j : pp.desc().variance()) {
-    //   std::vector<double> v;
-    //   v.reserve(j.values().size());
-    //   for (auto&& m : j.values()) {
-    //     v.emplace_back(m);
-    //   }
-    //   desc->m_variance.emplace_back(std::move(v));
-    // }
-    // descriptor - function
-    desc->setDistanceFunction(flirt::get_distance_function());
-    p->setDescriptor(dynamic_cast<Descriptor*>(desc));
-    delete desc;
+    flirt_features = flirt::AdoptFeatureSet(std::move(interest_points));
   }
 
   return TrajectoryNode::Data{
@@ -199,7 +168,7 @@ TrajectoryNode::Data FromProto(const proto::TrajectoryNodeData& proto) {
           .Decompress(),
       rotational_scan_matcher_histogram,
       transform::ToRigid3(proto.local_pose()),
-      interest_points};
+      std::move(flirt_features)};
 }
 
 }  // namespace mapping

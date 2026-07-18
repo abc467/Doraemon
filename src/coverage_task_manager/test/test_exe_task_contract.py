@@ -1,3 +1,4 @@
+import threading
 import unittest
 
 from cleanrobot_app_msgs.srv import ExeTaskRequest as AppExeTaskRequest, ExeTaskResponse as AppExeTaskResponse
@@ -8,6 +9,8 @@ from coverage_task_manager.task_manager import TaskManager
 class TaskManagerExeTaskContractTest(unittest.TestCase):
     def _manager(self, *, mission_state="IDLE", phase="IDLE", public_state="IDLE", active_run_id="", active_job_id=""):
         mgr = TaskManager.__new__(TaskManager)
+        mgr._lock = threading.Lock()
+        mgr._executor_state = "IDLE"
         mgr._mission_state = mission_state
         mgr._phase = phase
         mgr._public_state = public_state

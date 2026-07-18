@@ -64,7 +64,7 @@ def main():
     combined_status_stale_timeout_s = rospy.get_param("~combined_status_stale_timeout_s", 5.0)
     station_status_topic = rospy.get_param("~station_status_topic", "/station_status")
     station_status_stale_timeout_s = rospy.get_param("~station_status_stale_timeout_s", 5.0)
-    mcore_connected_topic = rospy.get_param("~mcore_connected_topic", "/mcore_tcp_bridge/connected")
+    mcore_connected_topic = rospy.get_param("~mcore_connected_topic", "/mcore_velocity_sender/connected")
     station_connected_topic = rospy.get_param("~station_connected_topic", "/station_tcp_bridge/connected")
     connected_stale_timeout_s = rospy.get_param("~connected_stale_timeout_s", 5.0)
     require_mcore_bridge_for_readiness = rospy.get_param("~require_mcore_bridge_for_readiness", False)
@@ -104,8 +104,8 @@ def main():
 
     auto_charge_enable = rospy.get_param("~auto_charge_enable", True)
     trigger_when_idle = rospy.get_param("~trigger_when_idle", False)
-    low_soc = rospy.get_param("~low_soc", 0.20)
-    resume_soc = rospy.get_param("~resume_soc", 0.80)
+    low_soc = rospy.get_param("~low_soc", 0.15)
+    resume_soc = rospy.get_param("~resume_soc", 0.95)
     rearm_soc = rospy.get_param("~rearm_soc", 0.30)
 
     dock_xyyaw_raw = rospy.get_param("~dock_xyyaw", [0.0, 0.0, 0.0])
@@ -114,6 +114,7 @@ def main():
     dock_stage1_xyyaw = _parse_xyyaw(dock_stage1_xyyaw_raw, default=dock_xyyaw)
     dock_two_stage_enable = rospy.get_param("~dock_two_stage_enable", False)
     dock_stage2_controller = rospy.get_param("~dock_stage2_controller", "MyPlanner")
+    dock_stage2_disable_replanning = rospy.get_param("~dock_stage2_disable_replanning", True)
     dock_retry_limit = rospy.get_param("~dock_retry_limit", 2)
     undock_forward_m = rospy.get_param("~undock_forward_m", 0.6)
     dock_timeout_s = rospy.get_param("~dock_timeout_s", 600.0)
@@ -130,6 +131,18 @@ def main():
         "~dock_supply_set_defer_exit_service", "/dock_supply/set_defer_exit"
     )
     dock_supply_exit_service = rospy.get_param("~dock_supply_exit_service", "/dock_supply/exit")
+    dock_supply_recovery_retreat_service = rospy.get_param(
+        "~dock_supply_recovery_retreat_service", "/dock_supply/recovery_retreat"
+    )
+    auto_charge_redock_service_name = rospy.get_param(
+        "~auto_charge_redock_service_name", "/coverage_task_manager/auto_charge_redock"
+    )
+    auto_charge_recovery_exhausted_service_name = rospy.get_param(
+        "~auto_charge_recovery_exhausted_service_name",
+        "/coverage_task_manager/auto_charge_recovery_exhausted",
+    )
+    auto_charge_redock_settle_s = rospy.get_param("~auto_charge_redock_settle_s", 2.0)
+    auto_charge_redock_retreat_timeout_s = rospy.get_param("~auto_charge_redock_retreat_timeout_s", 60.0)
     app_restart_localization_service = rospy.get_param(
         "~app_restart_localization_service", "/cartographer/runtime/app/restart_localization"
     )
@@ -247,6 +260,7 @@ def main():
         dock_stage1_xyyaw=dock_stage1_xyyaw,
         dock_two_stage_enable=bool(dock_two_stage_enable),
         dock_stage2_controller=str(dock_stage2_controller),
+        dock_stage2_disable_replanning=bool(dock_stage2_disable_replanning),
         dock_retry_limit=int(dock_retry_limit),
         undock_forward_m=float(undock_forward_m),
         dock_timeout_s=float(dock_timeout_s),
@@ -260,6 +274,11 @@ def main():
         dock_supply_state_topic=str(dock_supply_state_topic),
         dock_supply_set_defer_exit_service=str(dock_supply_set_defer_exit_service),
         dock_supply_exit_service=str(dock_supply_exit_service),
+        dock_supply_recovery_retreat_service=str(dock_supply_recovery_retreat_service),
+        auto_charge_redock_service_name=str(auto_charge_redock_service_name),
+        auto_charge_recovery_exhausted_service_name=str(auto_charge_recovery_exhausted_service_name),
+        auto_charge_redock_settle_s=float(auto_charge_redock_settle_s),
+        auto_charge_redock_retreat_timeout_s=float(auto_charge_redock_retreat_timeout_s),
         app_restart_localization_service=str(app_restart_localization_service),
         app_slam_submit_command_service=str(app_slam_submit_command_service),
         app_slam_get_job_service=str(app_slam_get_job_service),

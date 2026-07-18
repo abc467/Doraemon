@@ -45,6 +45,56 @@ namespace cartographer
 
       using mapping::proto::SerializedData;
 
+      class ScopedFlirtFeatureBackfill
+      {
+      public:
+        explicit ScopedFlirtFeatureBackfill(PoseGraph *const pose_graph)
+            : pose_graph_(pose_graph)
+        {
+          pose_graph_->SetFlirtFeatureBackfillState(
+              PoseGraph::FlirtFeatureBackfillState::kPending);
+        }
+
+        ~ScopedFlirtFeatureBackfill()
+        {
+          if (!completed_)
+          {
+            pose_graph_->SetFlirtFeatureBackfillState(
+                PoseGraph::FlirtFeatureBackfillState::kFailed);
+          }
+        }
+
+        void Complete(const bool success)
+        {
+          pose_graph_->SetFlirtFeatureBackfillState(
+              success ? PoseGraph::FlirtFeatureBackfillState::kReady
+                      : PoseGraph::FlirtFeatureBackfillState::kFailed);
+          completed_ = true;
+        }
+
+      private:
+        PoseGraph *pose_graph_;
+        bool completed_ = false;
+      };
+
+      class ScopedFlirtFeatureSerialization
+      {
+      public:
+        explicit ScopedFlirtFeatureSerialization(PoseGraph *const pose_graph)
+            : pose_graph_(pose_graph)
+        {
+          pose_graph_->LockFlirtFeatureSerialization();
+        }
+
+        ~ScopedFlirtFeatureSerialization()
+        {
+          pose_graph_->UnlockFlirtFeatureSerialization();
+        }
+
+      private:
+        PoseGraph *pose_graph_;
+      };
+
       std::vector<std::string> SelectRangeSensorIds(
           const std::set<MapBuilder::SensorId> &expected_sensor_ids)
       {
@@ -252,7 +302,13 @@ namespace cartographer
     void MapBuilder::SerializeState(bool include_unfinished_submaps,
                                     io::ProtoStreamWriterInterface *const writer)
     {
-      pose_graph_->ComputeFlirtFeaturesForAllNodes();
+      ScopedFlirtFeatureSerialization serialization_lock(pose_graph_.get());
+      if (!pose_graph_->ComputeFlirtFeaturesForAllNodes())
+      {
+        LOG(ERROR) << "[FLIRT]Refusing to serialize a PBStream with incomplete "
+                      "node feature migration.";
+        return;
+      }
       io::WritePbStream(*pose_graph_, all_trajectory_builder_options_, writer,
                         include_unfinished_submaps);
     }
@@ -260,7 +316,13 @@ namespace cartographer
     bool MapBuilder::SerializeStateToFile(bool include_unfinished_submaps,
                                           const std::string &filename)
     {
-      pose_graph_->ComputeFlirtFeaturesForAllNodes();
+      ScopedFlirtFeatureSerialization serialization_lock(pose_graph_.get());
+      if (!pose_graph_->ComputeFlirtFeaturesForAllNodes())
+      {
+        LOG(ERROR) << "[FLIRT]Refusing to serialize a PBStream with incomplete "
+                      "node feature migration.";
+        return false;
+      }
       io::ProtoStreamWriter writer(filename);
       io::WritePbStream(*pose_graph_, all_trajectory_builder_options_, &writer,
                         include_unfinished_submaps);
@@ -270,6 +332,7 @@ namespace cartographer
     std::map<int, int> MapBuilder::LoadState(
         io::ProtoStreamReaderInterface *const reader, bool load_frozen_state)
     {
+      ScopedFlirtFeatureBackfill flirt_feature_backfill(pose_graph_.get());
       io::ProtoStreamDeserializer deserializer(reader);
 
       // Create a copy of the pose_graph_proto, such that we can re-write the
@@ -463,6 +526,19 @@ namespace cartographer
         // submap.
         pose_graph_->AddSerializedConstraints(
             FromProto(pose_graph_proto.constraint()));
+      }
+      // Legacy PBStreams stored FLIRT points in an ambiguous global-like
+      // frame. FromProto intentionally discards those points. Rebuild every
+      // missing feature set synchronously in the node gravity-aligned frame
+      // before a localization trajectory or explicit relocation can use it.
+      const bool flirt_backfill_success =
+          pose_graph_->ComputeFlirtFeaturesForAllNodes();
+      flirt_feature_backfill.Complete(flirt_backfill_success);
+      if (!flirt_backfill_success)
+      {
+        LOG(ERROR) << "[FLIRT]PBStream feature backfill failed. Explicit "
+                      "FLIRT relocation will remain disabled; ordinary "
+                      "Cartographer localization is still available.";
       }
       CHECK(reader->eof());
       return trajectory_remapping;

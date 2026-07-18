@@ -15,6 +15,11 @@ wheel_speed_odom_debug.csv
 {c}:
 
 map/
+test_bag/
+frontend-src/
+frames.gv
+frames.pdf
+.~lock.*#
 
 *.pyc
 __pycache__/

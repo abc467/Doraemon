@@ -1,0 +1,47 @@
+<launch>
+  <arg name="state_path" default="/data/coverage/auto_charge_monitor_state.json"/>
+  <arg name="event_log_path" default="/data/coverage/auto_charge_monitor_events.jsonl"/>
+  <arg name="reset_on_start" default="false"/>
+  <arg name="count_auto_only" default="true"/>
+
+  <arg name="recovery_enable" default="true"/>
+  <arg name="recovery_strategy" default="redock"/>
+  <arg name="recovery_timeout_s" default="180.0"/>
+  <arg name="recovery_min_soc_delta" default="0.001"/>
+  <arg name="recovery_max_attempts" default="2"/>
+  <arg name="recovery_back_distance_m" default="0.20"/>
+  <arg name="recovery_forward_distance_m" default="0.205"/>
+  <arg name="recovery_speed_mps" default="0.03"/>
+  <arg name="recovery_toggle_charge" default="false"/>
+  <arg name="recovery_redock_service" default="/coverage_task_manager/auto_charge_redock"/>
+  <arg name="recovery_exhausted_service" default="/coverage_task_manager/auto_charge_recovery_exhausted"/>
+
+  <node pkg="coverage_task_manager"
+        type="auto_charge_monitor_node.py"
+        name="auto_charge_monitor"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <param name="dock_supply_state_topic" value="/dock_supply/state"/>
+    <param name="task_state_topic" value="/coverage_task_manager/state"/>
+    <param name="task_event_topic" value="/coverage_task_manager/event"/>
+    <param name="executor_state_topic" value="/coverage_executor/state"/>
+    <param name="executor_progress_topic" value="/coverage_executor/run_progress"/>
+    <param name="battery_topic" value="/battery_state"/>
+    <param name="state_path" value="$(arg state_path)"/>
+    <param name="event_log_path" value="$(arg event_log_path)"/>
+    <param name="reset_on_start" value="$(arg reset_on_start)"/>
+    <param name="count_auto_only" value="$(arg count_auto_only)"/>
+    <param name="recovery_enable" value="$(arg recovery_enable)"/>
+    <param name="recovery_strategy" value="$(arg recovery_strategy)"/>
+    <param name="recovery_no_soc_change_timeout_s" value="$(arg recovery_timeout_s)"/>
+    <param name="recovery_min_soc_delta" value="$(arg recovery_min_soc_delta)"/>
+    <param name="recovery_max_attempts_per_cycle" value="$(arg recovery_max_attempts)"/>
+    <param name="recovery_back_distance_m" value="$(arg recovery_back_distance_m)"/>
+    <param name="recovery_forward_distance_m" value="$(arg recovery_forward_distance_m)"/>
+    <param name="recovery_linear_speed_mps" value="$(arg recovery_speed_mps)"/>
+    <param name="recovery_toggle_charge" value="$(arg recovery_toggle_charge)"/>
+    <param name="recovery_redock_service" value="$(arg recovery_redock_service)"/>
+    <param name="recovery_exhausted_service" value="$(arg recovery_exhausted_service)"/>
+  </node>
+</launch>

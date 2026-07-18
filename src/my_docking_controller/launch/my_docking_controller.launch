@@ -8,7 +8,9 @@
 
     <arg name="dock_backwards" default="false" />
 
-    <arg name="target_dist" default="0.71" />
+    <arg name="target_dist" default="0.780" />
+    <arg name="xy_tolerance" default="0.005" />
+    <arg name="yaw_tolerance" default="0.04" />
     <arg name="dock_pose_score_thresh" default="0.00012" />
     <arg name="pose_stale_timeout_s" default="0.25" />
     <arg name="pose_lost_timeout_s" default="1.0" />
@@ -35,10 +37,10 @@
         <param name="pose_stale_timeout_s" value="$(arg pose_stale_timeout_s)" />
         <param name="pose_lost_timeout_s" value="$(arg pose_lost_timeout_s)" />
 
-        <param name="xy_tolerance" value="0.02" />  
-        <param name="yaw_tolerance" value="0.01" /> 
+        <param name="xy_tolerance" value="$(arg xy_tolerance)" />
+        <param name="yaw_tolerance" value="$(arg yaw_tolerance)" /> 
         <param name="k_phi" value="2.0" />   
-        <param name="k_delta" value="2.0" /> 
+        <param name="k_delta" value="3.0" /> 
         <param name="beta" value="2.5" />   
         <param name="lambda" value="2.0" />   
         

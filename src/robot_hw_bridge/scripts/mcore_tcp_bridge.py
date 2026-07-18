@@ -131,7 +131,11 @@ class MCoreTCPBridge:
         self._cleaning_params.profile_name = str(rospy.get_param('~profile_name', 'default'))
         self._cleaning_params.vel_water_pump = clamp_u8(rospy.get_param('~vel_water_pump', 0), 0, MCORE_ACTUATOR_MAX)
         self._cleaning_params.vel_water_suction = clamp_u8(rospy.get_param('~vel_water_suction', 0), 0, MCORE_ACTUATOR_MAX)
-        self._cleaning_params.height_scrub = clamp_u8(rospy.get_param('~height_scrub', 38))
+        self._cleaning_params.height_scrub = clamp_u8(rospy.get_param('~height_scrub', 0))
+        self._cleaning_params.main_brush_speed = clamp_u8(rospy.get_param('~main_brush_speed', 0), 0, MCORE_ACTUATOR_MAX)
+        self._cleaning_params.side_brush_speed = clamp_u8(rospy.get_param('~side_brush_speed', 0), 0, MCORE_ACTUATOR_MAX)
+        self._cleaning_params.brush_down_distance = clamp_u8(rospy.get_param('~brush_down_distance', 0), 0, 1800)
+        self._cleaning_params.side_brush_enable = bool(rospy.get_param('~side_brush_enable', False))
 
         self.cmd_vel_sub = None
         if self.enable_cmd_vel:
@@ -263,10 +267,18 @@ class MCoreTCPBridge:
         self._cleaning_params.vel_water_pump = clamp_u8(msg.vel_water_pump, 0, MCORE_ACTUATOR_MAX)
         self._cleaning_params.vel_water_suction = clamp_u8(msg.vel_water_suction, 0, MCORE_ACTUATOR_MAX)
         self._cleaning_params.height_scrub = clamp_u8(msg.height_scrub)
+        self._cleaning_params.main_brush_speed = clamp_u8(msg.main_brush_speed, 0, MCORE_ACTUATOR_MAX)
+        self._cleaning_params.side_brush_speed = clamp_u8(msg.side_brush_speed, 0, MCORE_ACTUATOR_MAX)
+        self._cleaning_params.brush_down_distance = clamp_u8(msg.brush_down_distance, 0, 1800)
+        self._cleaning_params.side_brush_enable = bool(msg.side_brush_enable)
 
         rospy.loginfo(
-            '[MCORE] cleaning params updated: profile=%s pump=%d suction=%d height_scrub=%d (stored only, no direct protocol mapping)',
+            '[MCORE] cleaning params updated: profile=%s main_brush=%d side_brush=%d brush_down=%d side_brush_enable=%s pump=%d suction=%d height_scrub=%d (stored only, no direct protocol mapping)',
             self._cleaning_params.profile_name,
+            int(self._cleaning_params.main_brush_speed),
+            int(self._cleaning_params.side_brush_speed),
+            int(self._cleaning_params.brush_down_distance),
+            str(bool(self._cleaning_params.side_brush_enable)),
             int(self._cleaning_params.vel_water_pump),
             int(self._cleaning_params.vel_water_suction),
             int(self._cleaning_params.height_scrub),

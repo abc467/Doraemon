@@ -9,6 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_geometry_msgs
   geometry_msgs
   nav_msgs
+  diagnostic_msgs
   sensor_msgs
   visualization_msgs
   actionlib
@@ -23,7 +24,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 catkin_package(
   CATKIN_DEPENDS
-    rospy std_msgs std_srvs tf2_ros tf2_geometry_msgs geometry_msgs nav_msgs sensor_msgs visualization_msgs actionlib actionlib_msgs cartographer_ros_msgs robot_runtime_flags robot_runtime_flags_msgs cleanrobot_app_msgs cleanrobot_site_msgs coverage_msgs
+    rospy std_msgs std_srvs tf2_ros tf2_geometry_msgs geometry_msgs nav_msgs diagnostic_msgs sensor_msgs visualization_msgs actionlib actionlib_msgs cartographer_ros_msgs robot_runtime_flags robot_runtime_flags_msgs cleanrobot_app_msgs cleanrobot_site_msgs coverage_msgs
 )
 
 include_directories(

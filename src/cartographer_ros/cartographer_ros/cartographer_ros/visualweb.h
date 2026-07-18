@@ -58,6 +58,7 @@ public:
     std::string slam_root;
     std::string config_root;
     std::string map_root;
+    std::mutex visual_command_lock;
 
     visualweb() = default;
     ~visualweb() = default;
@@ -658,13 +659,43 @@ public:
             return make_result(-1, "尚未加载配置，请加载配置", result_data);
         }
 
+        const auto feature_backfill_state =
+            this->node->map_builder_bridge_.buider()
+                ->pose_graph()
+                ->GetFlirtFeatureBackfillState();
+        const char *feature_backfill_state_name = "FAILED";
+        if (feature_backfill_state ==
+            cartographer::mapping::PoseGraph::FlirtFeatureBackfillState::kPending)
+        {
+            feature_backfill_state_name = "PENDING";
+        }
+        else if (feature_backfill_state ==
+                 cartographer::mapping::PoseGraph::FlirtFeatureBackfillState::kReady)
+        {
+            feature_backfill_state_name = "READY";
+        }
+        result_data["flirt_feature_backfill_state"] =
+            feature_backfill_state_name;
+        if (!flirt::use_flirt.load() ||
+            feature_backfill_state !=
+                cartographer::mapping::PoseGraph::FlirtFeatureBackfillState::kReady)
+        {
+            set_global_relocated(false);
+            result_data["return_code"] =
+                flirt::kRelocationFeaturesNotReady;
+            return make_result(
+                flirt::kRelocationFeaturesNotReady,
+                "FLIRT 特征尚未完成安全回填，当前拒绝显式重定位。",
+                result_data);
+        }
+
         {
             std::lock_guard<std::mutex> lock(flirt::flirt_busy_lock);
             if (flirt::need_flirt.load() || flirt::flirt_working.load())
             {
                 return make_result(-5, "全局重定位正在执行，请稍后重试。", result_data);
             }
-            flirt::flirt_return_code = flirt::kRelocationIdle;
+            flirt::flirt_return_code.store(flirt::kRelocationIdle);
             flirt::need_flirt.store(true);
         }
 
@@ -696,37 +727,46 @@ public:
         bool relocation_success = false;
         CommandResult result;
 
-        if (flirt::flirt_return_code == flirt::kRelocationSuccess)
+        const int relocation_return_code = flirt::flirt_return_code.load();
+        if (relocation_return_code == flirt::kRelocationSuccess)
         {
             result = make_result(0, "", result_data);
             relocation_success = true;
         }
-        else if (flirt::flirt_return_code == flirt::kRelocationNeedMoreTrajectories)
+        else if (relocation_return_code == flirt::kRelocationNeedMoreTrajectories)
         {
             result = make_result(-2, "重定位需要至少2个Trajectories(轨迹)", result_data);
         }
-        else if (flirt::flirt_return_code == flirt::kRelocationNoInterestPoints)
+        else if (relocation_return_code == flirt::kRelocationNoInterestPoints)
         {
             result = make_result(-3, "当前机器人位置没有关键特征，无法重定位，请改变机器人位置。", result_data);
         }
-        else if (flirt::flirt_return_code == flirt::kRelocationSubmapNotFound)
+        else if (relocation_return_code == flirt::kRelocationSubmapNotFound)
         {
             result = make_result(-4, "匹配到的Node中，无法找到对应Submap!", result_data);
         }
-        else if (flirt::flirt_return_code == flirt::kRelocationNoCandidatePose)
+        else if (relocation_return_code == flirt::kRelocationNoCandidatePose)
         {
             result = make_result(-8, "未在历史轨迹中找到可用的重定位候选位姿。", result_data);
         }
-        else if (flirt::flirt_return_code == flirt::kRelocationLowConstraintScore)
+        else if (relocation_return_code == flirt::kRelocationLowConstraintScore)
         {
             result = make_result(-9, "候选位姿存在，但精匹配分数不足，未生成有效重定位约束。", result_data);
         }
+        else if (relocation_return_code ==
+                 flirt::kRelocationFeaturesNotReady)
+        {
+            result = make_result(
+                flirt::kRelocationFeaturesNotReady,
+                "FLIRT 特征尚未完成安全回填，当前拒绝显式重定位。",
+                result_data);
+        }
         else
         {
-            result = make_result(-7, "全局重定位失败，返回了未知状态码: " + std::to_string(flirt::flirt_return_code), result_data);
+            result = make_result(-7, "全局重定位失败，返回了未知状态码: " + std::to_string(relocation_return_code), result_data);
         }
 
-        result.data["return_code"] = flirt::flirt_return_code;
+        result.data["return_code"] = relocation_return_code;
 
         if (relocation_success)
         {
@@ -809,6 +849,7 @@ public:
     bool ros_visual_command_handler(cartographer_ros_msgs::VisualCommand::Request &req,
                                     cartographer_ros_msgs::VisualCommand::Response &res)
     {
+        std::lock_guard<std::mutex> command_lock(visual_command_lock);
         int code = -500;
         std::string msg;
         nlohmann::json data = nlohmann::json::object();

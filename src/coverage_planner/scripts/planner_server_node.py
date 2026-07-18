@@ -274,6 +274,14 @@ class CoveragePlannerActionServer:
                 ),
                 PlannerParams.min_plannable_span_m,
             ),
+            min_swath_length_m=_finite_float(
+                self._cfg_value(
+                    cfg,
+                    "min_swath_length_m",
+                    self._private_param("min_swath_length_m", PlannerParams.min_swath_length_m),
+                ),
+                PlannerParams.min_swath_length_m,
+            ),
             edge_corner_radius_m=_finite_float(
                 self._cfg_value(
                     cfg,
@@ -349,6 +357,7 @@ class CoveragePlannerActionServer:
             wall_margin_m=goal_float(goal.wall_margin_m, defaults.wall_margin_m),
             turn_margin_m=goal_float(goal.turn_margin_m, defaults.turn_margin_m),
             min_plannable_span_m=float(defaults.min_plannable_span_m),
+            min_swath_length_m=float(defaults.min_swath_length_m),
             edge_corner_radius_m=goal_float(goal.edge_corner_radius_m, defaults.edge_corner_radius_m),
             edge_corner_pull=goal_float(goal.edge_corner_pull, defaults.edge_corner_pull),
             edge_corner_min_pts=goal_int(goal.edge_corner_min_pts, defaults.edge_corner_min_pts, positive=True),

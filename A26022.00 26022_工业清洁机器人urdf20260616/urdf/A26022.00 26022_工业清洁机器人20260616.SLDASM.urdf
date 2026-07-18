@@ -1,0 +1,418 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.5.1-0-g916b5db  Build Version: 1.5.7152.31018
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="A26022.00 26022_工业清洁机器人20260616.SLDASM">
+  <link
+    name="base_link">
+    <inertial>
+      <origin
+        xyz="0.196490826186498 -9.35553781750466E-06 0.280052603248387"
+        rpy="0 0 0" />
+      <mass
+        value="25.3088663609194" />
+      <inertia
+        ixx="1.00046416956501"
+        ixy="7.10447792618944E-05"
+        ixz="-0.105698131930891"
+        iyy="1.45058994792139"
+        iyz="1.97984884068282E-05"
+        izz="1.76363762646327" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/base_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.752941176470588 0.752941176470588 0.752941176470588 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="left_wheel_link">
+    <inertial>
+      <origin
+        xyz="-0.000177496445367825 -0.0319229440974292 0.00042597529981947"
+        rpy="0 0 0" />
+      <mass
+        value="1.06112992059334" />
+      <inertia
+        ixx="0.00375826267480664"
+        ixy="-1.2403491187038E-05"
+        ixz="-4.77579136173962E-06"
+        iyy="0.00360047804476035"
+        iyz="1.96023667465607E-05"
+        izz="0.00390777880952228" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/left_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/left_wheel_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_wheel_link"
+    type="continuous">
+    <origin
+      xyz="0 0.23 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_wheel_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_wheel_link">
+    <inertial>
+      <origin
+        xyz="0.000177496449434544 0.0319229440709369 0.000425975292963454"
+        rpy="0 0 0" />
+      <mass
+        value="1.06112992026123" />
+      <inertia
+        ixx="0.00375826267218946"
+        ixy="-1.24034915524183E-05"
+        ixz="4.77579123538121E-06"
+        iyy="0.00360047804436064"
+        iyz="-1.96023661304891E-05"
+        izz="0.00390777880698008" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/right_wheel_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/right_wheel_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_wheel_link"
+    type="continuous">
+    <origin
+      xyz="0 -0.23 0"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_wheel_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="gyro_link">
+    <inertial>
+      <origin
+        xyz="-5.55111512312578E-17 -1.64045986140449E-17 -0.000733507653597906"
+        rpy="0 0 0" />
+      <mass
+        value="0.140620716682058" />
+      <inertia
+        ixx="7.21282900021027E-05"
+        ixy="6.64032925611099E-21"
+        ixz="-2.28582560792751E-21"
+        iyy="5.56598991748656E-05"
+        iyz="5.48112804763488E-21"
+        izz="9.75103372952217E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/gyro_link.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/gyro_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="gyro_link"
+    type="fixed">
+    <origin
+      xyz="0.502 0 0.385"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="gyro_link" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="laser">
+    <inertial>
+      <origin
+        xyz="2.95092711307121E-05 -1.74498448169723E-07 -0.0156131409395794"
+        rpy="0 0 0" />
+      <mass
+        value="0.108631598127293" />
+      <inertia
+        ixx="4.26587363028908E-05"
+        ixy="1.21745038868245E-10"
+        ixz="-2.09117590861874E-08"
+        iyy="4.26596479187505E-05"
+        iyz="4.87004859337307E-10"
+        izz="4.01202971317793E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/laser.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/laser.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="laser"
+    type="fixed">
+    <origin
+      xyz="0.50195 0 1.0503"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="laser" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="left_camera">
+    <inertial>
+      <origin
+        xyz="-0.00346243958739395 -0.0111478899135408 0.00346243958739401"
+        rpy="0 0 0" />
+      <mass
+        value="0.0469408360324594" />
+      <inertia
+        ixx="1.55568959825687E-05"
+        ixy="2.12333258214801E-06"
+        ixz="-5.39746214565422E-06"
+        iyy="1.6741160413183E-05"
+        iyz="-2.12333258214798E-06"
+        izz="1.55568959825685E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/left_camera.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/left_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="left_camera"
+    type="fixed">
+    <origin
+      xyz="-0.13292 0.32478 0.8656"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="left_camera" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="right_camera">
+    <inertial>
+      <origin
+        xyz="-0.00346243958739406 0.0111478899135408 0.0034624395873939"
+        rpy="0 0 0" />
+      <mass
+        value="0.0469408360324594" />
+      <inertia
+        ixx="1.55568959825686E-05"
+        ixy="-2.123332582148E-06"
+        ixz="-5.3974621456542E-06"
+        iyy="1.6741160413183E-05"
+        iyz="2.12333258214799E-06"
+        izz="1.55568959825685E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/right_camera.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/right_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="right_camera"
+    type="fixed">
+    <origin
+      xyz="-0.13292 -0.32478 0.8656"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="right_camera" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+  <link
+    name="up_camera">
+    <inertial>
+      <origin
+        xyz="-0.00343154539691015 -0.00036144806033356 0.00447651747075895"
+        rpy="0 0 0" />
+      <mass
+        value="0.0181980866823471" />
+      <inertia
+        ixx="2.39589585532028E-05"
+        ixy="-4.0468766013781E-08"
+        ixz="-3.484862749332E-07"
+        iyy="2.61882272913595E-06"
+        iyz="8.53317022734052E-08"
+        izz="2.40232357358775E-05" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/up_camera.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://A26022.00 26022_工业清洁机器人20260616.SLDASM/meshes/up_camera.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="up_camera"
+    type="fixed">
+    <origin
+      xyz="0.57945 0 0.97641"
+      rpy="0 0 0" />
+    <parent
+      link="base_link" />
+    <child
+      link="up_camera" />
+    <axis
+      xyz="0 0 0" />
+  </joint>
+</robot>

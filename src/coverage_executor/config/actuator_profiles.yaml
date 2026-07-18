@@ -1,47 +1,75 @@
 # 执行机构参数配置
 # 说明：
 # - standard / heavy / eco：三套执行机构档位
+# - main_brush_speed：主刷电机强度，范围 0-100
+# - side_brush_speed：边刷电机强度，范围 0-100；0 表示关闭
+# - brush_down_distance：刷盘升降机构下降距离，范围 0-1800
 # - water_pump_pwm：清水泵 PWM，范围通常为 0-100
 # - suction_machine_pwm：吸水机力度，范围通常为 0-100
 # - vacuum_motor_pwm：真空电机力度，范围通常为 0-100
-# - height_scrub：预留的刷盘高度参数，当前协议里主要作为配置记录，不一定直接下发到底盘
+# - height_scrub：旧字段，保留给上层显示/兼容；新 M 核实际下发 brush_down_distance
 # - height_scrub_active：是否启用刷盘高度参数，当前通常保持 false
+# - side_brush_enable：清扫时是否让边刷跟随刷盘通道打开/关闭
 actuator_profiles:
   # 标准清扫档：常规日常清洁
   standard:
-    # 清水泵力度
-    water_pump_pwm: 15
-    # 吸水机力度
+    # 主刷电机强度，范围 0-100；0 表示关闭
+    main_brush_speed: 40
+    # 边刷电机强度，范围 0-100；0 表示关闭
+    side_brush_speed: 10
+    # 刷盘升降机构下降距离，范围 0-1800
+    brush_down_distance: 1000
+    # 清水泵强度，范围 0-100；0 表示关闭
+    water_pump_pwm: 12
+    # 吸水风机/吸水机强度，范围 0-100；0 表示关闭
     suction_machine_pwm: 70
-    # 真空电机力度
+    # 真空电机强度，范围 0-100；0 表示关闭
     vacuum_motor_pwm: 70
     # 刷盘高度参数（预留）
     height_scrub: 10
     # 是否启用刷盘高度控制
     height_scrub_active: false
+    # 边刷跟随刷盘通道
+    side_brush_enable: true
 
   # 强力清扫档：出水更大，适合较脏区域
   heavy:
-    # 清水泵力度
+    # 主刷电机强度，范围 0-100；0 表示关闭
+    main_brush_speed: 60
+    # 边刷电机强度，范围 0-100；0 表示关闭
+    side_brush_speed: 20
+    # 刷盘升降机构下降距离，范围 0-1800
+    brush_down_distance: 80
+    # 清水泵强度，范围 0-100；0 表示关闭
     water_pump_pwm: 40
-    # 吸水机力度
+    # 吸水风机/吸水机强度，范围 0-100；0 表示关闭
     suction_machine_pwm: 50
-    # 真空电机力度
+    # 真空电机强度，范围 0-100；0 表示关闭
     vacuum_motor_pwm: 50
     # 刷盘高度参数（预留）
     height_scrub: 42
     # 是否启用刷盘高度控制
     height_scrub_active: false
+    # 边刷跟随刷盘通道
+    side_brush_enable: true
 
   # 节能档：关闭出水和吸风，适合空载或测试
   eco:
-    # 清水泵力度
+    # 主刷电机强度，范围 0-100；0 表示关闭
+    main_brush_speed: 0
+    # 边刷电机强度，范围 0-100；0 表示关闭
+    side_brush_speed: 0
+    # 刷盘升降机构下降距离，范围 0-1800
+    brush_down_distance: 50
+    # 清水泵强度，范围 0-100；0 表示关闭
     water_pump_pwm: 00
-    # 吸水机力度
+    # 吸水风机/吸水机强度，范围 0-100；0 表示关闭
     suction_machine_pwm: 00
-    # 真空电机力度
+    # 真空电机强度，范围 0-100；0 表示关闭
     vacuum_motor_pwm: 00
     # 刷盘高度参数（预留）
     height_scrub: 05
     # 是否启用刷盘高度控制
     height_scrub_active: false
+    # 节能/空载测试默认不启用边刷
+    side_brush_enable: false

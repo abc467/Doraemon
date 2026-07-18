@@ -12,7 +12,7 @@
       roslaunch coverage_task_manager task_system.launch task_auto_charge_enable:=false executor_auto_charge_enable:=true
   -->
 
-  <arg name="task_auto_charge_enable" default="false"/>
+  <arg name="task_auto_charge_enable" default="true"/>
   <arg name="executor_auto_charge_enable" default="false"/>
   <arg name="default_return_to_dock_on_finish" default="false"/>
   <arg name="scheduler_enable" default="true"/>
@@ -29,11 +29,13 @@
   <arg name="dock_supply_enable" default="true"/>
   <arg name="dock_supply_set_defer_exit_service" default="/dock_supply/set_defer_exit"/>
   <arg name="dock_supply_exit_service" default="/dock_supply/exit"/>
+  <arg name="dock_supply_recovery_retreat_service" default="/dock_supply/recovery_retreat"/>
   <arg name="enable_dock_calibration_service" default="true"/>
   <arg name="dock_calibration_score_topic" default="/dock_pose_score"/>
   <arg name="dock_calibration_storage_path" default="/data/coverage/dock_calibration.yaml"/>
   <arg name="dock_calibration_score_threshold" default="0.00012"/>
-  <arg name="dock_calibration_target_dist" default="0.607"/>
+  <arg name="dock_calibration_target_dist" default="0.780"/>
+  <arg name="dock_calibration_xy_tolerance" default="0.005"/>
   <arg name="app_restart_localization_service" default="/cartographer/runtime/app/restart_localization"/>
   <arg name="app_slam_submit_command_service" default="/clean_robot_server/app/submit_slam_command"/>
   <arg name="app_slam_get_job_service" default="/clean_robot_server/app/get_slam_job"/>
@@ -45,8 +47,8 @@
   <arg name="tracked_pose_topic" default="/tracked_pose"/>
   <arg name="restart_localization_timeout_s" default="180.0"/>
   <arg name="clear_costmaps_service" default="/move_base_flex/clear_costmaps"/>
-  <arg name="low_soc" default="0.80"/>
-  <arg name="resume_soc" default="0.99"/>
+  <arg name="low_soc" default="0.15"/>
+  <arg name="resume_soc" default="0.95"/>
   <arg name="rearm_soc" default="0.95"/>
   <arg name="plan_db_path" default="/data/coverage/planning.db"/>
   <arg name="ops_db_path" default="/data/coverage/operations.db"/>
@@ -64,6 +66,14 @@
   <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
   <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
   <arg name="require_mcore_bridge_for_readiness" default="false"/>
+  <arg name="mcore_connected_topic" default="/mcore_velocity_sender/connected"/>
+  <arg name="mcore_safety_status_bits_topic" default="/mcore_velocity_sender/safety_status_bits"/>
+  <arg name="mcore_telemetry_heartbeat_topic" default="/mcore_velocity_sender/telemetry_heartbeat"/>
+  <arg name="actuator_debug_telemetry_stale_s" default="2.0"/>
+  <arg name="actuator_debug_safety_status_stale_s" default="2.0"/>
+  <arg name="actuator_debug_require_safety_status" default="true"/>
+  <arg name="actuator_debug_unreadable_estop_ack_s" default="15.0"/>
+  <arg name="actuator_debug_post_off_status_wait_s" default="3.0"/>
   <arg name="odometry_status_app_service_name" default="/clean_robot_server/app/get_odometry_status"/>
   <arg name="odometry_status_app_contract_param_ns" default="/clean_robot_server/contracts/app/get_odometry_status"/>
   <arg name="app_readiness_service_name" default="/coverage_task_manager/app/get_system_readiness"/>
@@ -77,6 +87,22 @@
   <arg name="app_clean_schedule_contract_param_ns" default="/database_server/contracts/app/clean_schedule_service"/>
   <arg name="task_restore_enable" default="false"/>
   <arg name="run_map_migration" default="false"/>
+  <arg name="auto_charge_monitor_enable" default="true"/>
+  <arg name="auto_charge_monitor_state_path" default="/data/coverage/auto_charge_monitor_state.json"/>
+  <arg name="auto_charge_monitor_event_log_path" default="/data/coverage/auto_charge_monitor_events.jsonl"/>
+  <arg name="auto_charge_monitor_reset_on_start" default="false"/>
+  <arg name="auto_charge_monitor_count_auto_only" default="true"/>
+  <arg name="auto_charge_monitor_recovery_enable" default="true"/>
+  <arg name="auto_charge_monitor_recovery_strategy" default="redock"/>
+  <arg name="auto_charge_monitor_recovery_timeout_s" default="180.0"/>
+  <arg name="auto_charge_monitor_recovery_min_soc_delta" default="0.001"/>
+  <arg name="auto_charge_monitor_recovery_max_attempts" default="2"/>
+  <arg name="auto_charge_monitor_recovery_back_distance_m" default="0.20"/>
+  <arg name="auto_charge_monitor_recovery_forward_distance_m" default="0.205"/>
+  <arg name="auto_charge_monitor_recovery_speed_mps" default="0.03"/>
+  <arg name="auto_charge_monitor_recovery_toggle_charge" default="false"/>
+  <arg name="auto_charge_monitor_recovery_redock_service" default="/coverage_task_manager/auto_charge_redock"/>
+  <arg name="auto_charge_monitor_recovery_exhausted_service" default="/coverage_task_manager/auto_charge_recovery_exhausted"/>
 
   <group if="$(arg run_map_migration)">
     <node pkg="coverage_planner" type="migrate_map_assets.py" name="map_asset_migration" output="screen"
@@ -123,12 +149,23 @@
 
   <include file="$(find coverage_executor)/launch/executor.launch">
     <arg name="auto_charge_enable" value="$(arg executor_auto_charge_enable)"/>
+    <arg name="low_soc" value="$(arg low_soc)"/>
+    <arg name="resume_soc" value="$(arg resume_soc)"/>
+    <arg name="rearm_soc" value="$(arg rearm_soc)"/>
     <arg name="load_mode_profiles_yaml" value="$(arg load_mode_profiles_yaml)"/>
     <arg name="load_actuator_profiles_yaml" value="$(arg load_actuator_profiles_yaml)"/>
     <arg name="plan_db_path" value="$(arg plan_db_path)"/>
     <arg name="ops_db_path" value="$(arg ops_db_path)"/>
     <arg name="strict_map_check" value="false"/>
     <arg name="strict_resume_map_check" value="false"/>
+    <arg name="mcore_connected_topic" value="$(arg mcore_connected_topic)"/>
+    <arg name="mcore_safety_status_bits_topic" value="$(arg mcore_safety_status_bits_topic)"/>
+    <arg name="mcore_telemetry_heartbeat_topic" value="$(arg mcore_telemetry_heartbeat_topic)"/>
+    <arg name="actuator_debug_telemetry_stale_s" value="$(arg actuator_debug_telemetry_stale_s)"/>
+    <arg name="actuator_debug_safety_status_stale_s" value="$(arg actuator_debug_safety_status_stale_s)"/>
+    <arg name="actuator_debug_require_safety_status" value="$(arg actuator_debug_require_safety_status)"/>
+    <arg name="actuator_debug_unreadable_estop_ack_s" value="$(arg actuator_debug_unreadable_estop_ack_s)"/>
+    <arg name="actuator_debug_post_off_status_wait_s" value="$(arg actuator_debug_post_off_status_wait_s)"/>
   </include>
 
   <include file="$(find coverage_task_manager)/launch/task_manager.launch">
@@ -137,11 +174,15 @@
     <arg name="dock_supply_enable" value="$(arg dock_supply_enable)"/>
     <arg name="dock_supply_set_defer_exit_service" value="$(arg dock_supply_set_defer_exit_service)"/>
     <arg name="dock_supply_exit_service" value="$(arg dock_supply_exit_service)"/>
+    <arg name="dock_supply_recovery_retreat_service" value="$(arg dock_supply_recovery_retreat_service)"/>
+    <arg name="auto_charge_redock_service_name" value="$(arg auto_charge_monitor_recovery_redock_service)"/>
+    <arg name="auto_charge_recovery_exhausted_service_name" value="$(arg auto_charge_monitor_recovery_exhausted_service)"/>
     <arg name="enable_dock_calibration_service" value="$(arg enable_dock_calibration_service)"/>
     <arg name="dock_calibration_score_topic" value="$(arg dock_calibration_score_topic)"/>
     <arg name="dock_calibration_storage_path" value="$(arg dock_calibration_storage_path)"/>
     <arg name="dock_calibration_score_threshold" value="$(arg dock_calibration_score_threshold)"/>
     <arg name="dock_calibration_target_dist" value="$(arg dock_calibration_target_dist)"/>
+    <arg name="dock_calibration_xy_tolerance" value="$(arg dock_calibration_xy_tolerance)"/>
     <arg name="scheduler_enable" value="$(arg scheduler_enable)"/>
     <arg name="load_schedules_yaml" value="$(arg load_schedules_yaml)"/>
     <arg name="schedules_yaml" value="$(arg schedules_yaml)"/>
@@ -173,6 +214,7 @@
     <arg name="slam_state_topic" value="$(arg slam_state_topic)"/>
     <arg name="slam_state_stale_timeout_s" value="$(arg slam_state_stale_timeout_s)"/>
     <arg name="require_mcore_bridge_for_readiness" value="$(arg require_mcore_bridge_for_readiness)"/>
+    <arg name="mcore_connected_topic" value="$(arg mcore_connected_topic)"/>
     <arg name="app_readiness_service_name" value="$(arg app_readiness_service_name)"/>
     <arg name="app_readiness_contract_param_ns" value="$(arg app_readiness_contract_param_ns)"/>
     <arg name="readiness_timeout_s" value="$(arg readiness_timeout_s)"/>
@@ -184,4 +226,34 @@
     <arg name="app_clean_schedule_contract_param_ns" value="$(arg app_clean_schedule_contract_param_ns)"/>
     <arg name="task_restore_enable" value="$(arg task_restore_enable)"/>
   </include>
+
+  <node if="$(arg auto_charge_monitor_enable)"
+        pkg="coverage_task_manager"
+        type="auto_charge_monitor_node.py"
+        name="auto_charge_monitor"
+        output="screen"
+        respawn="true"
+        respawn_delay="2.0">
+    <param name="dock_supply_state_topic" value="/dock_supply/state"/>
+    <param name="task_state_topic" value="/coverage_task_manager/state"/>
+    <param name="task_event_topic" value="/coverage_task_manager/event"/>
+    <param name="executor_state_topic" value="/coverage_executor/state"/>
+    <param name="executor_progress_topic" value="/coverage_executor/run_progress"/>
+    <param name="battery_topic" value="/battery_state"/>
+    <param name="state_path" value="$(arg auto_charge_monitor_state_path)"/>
+    <param name="event_log_path" value="$(arg auto_charge_monitor_event_log_path)"/>
+    <param name="reset_on_start" value="$(arg auto_charge_monitor_reset_on_start)"/>
+    <param name="count_auto_only" value="$(arg auto_charge_monitor_count_auto_only)"/>
+    <param name="recovery_enable" value="$(arg auto_charge_monitor_recovery_enable)"/>
+    <param name="recovery_strategy" value="$(arg auto_charge_monitor_recovery_strategy)"/>
+    <param name="recovery_no_soc_change_timeout_s" value="$(arg auto_charge_monitor_recovery_timeout_s)"/>
+    <param name="recovery_min_soc_delta" value="$(arg auto_charge_monitor_recovery_min_soc_delta)"/>
+    <param name="recovery_max_attempts_per_cycle" value="$(arg auto_charge_monitor_recovery_max_attempts)"/>
+    <param name="recovery_back_distance_m" value="$(arg auto_charge_monitor_recovery_back_distance_m)"/>
+    <param name="recovery_forward_distance_m" value="$(arg auto_charge_monitor_recovery_forward_distance_m)"/>
+    <param name="recovery_linear_speed_mps" value="$(arg auto_charge_monitor_recovery_speed_mps)"/>
+    <param name="recovery_toggle_charge" value="$(arg auto_charge_monitor_recovery_toggle_charge)"/>
+    <param name="recovery_redock_service" value="$(arg auto_charge_monitor_recovery_redock_service)"/>
+    <param name="recovery_exhausted_service" value="$(arg auto_charge_monitor_recovery_exhausted_service)"/>
+  </node>
 </launch>

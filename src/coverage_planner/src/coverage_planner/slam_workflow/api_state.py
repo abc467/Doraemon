@@ -249,6 +249,18 @@ class SlamApiStateController:
                 bool(runtime.localization_valid),
             )
         )
+        localization_stamp = float(
+            rospy.get_param(runtime_state.runtime_param("localization_stamp"), 0.0) or 0.0
+        )
+        localization_lost_episode = str(
+            rospy.get_param(runtime_state.runtime_param("localization_lost_episode"), "") or ""
+        ).strip()
+        localization_lost_reason = str(
+            rospy.get_param(runtime_state.runtime_param("localization_lost_reason"), "") or ""
+        ).strip()
+        localization_lost_stamp = float(
+            rospy.get_param(runtime_state.runtime_param("localization_lost_stamp"), 0.0) or 0.0
+        )
         runtime_map_ready = bool(runtime_revision_id or runtime_map_name or runtime_map_id or runtime_map_md5)
         active_map_match = False
         if (active_map_name or active_revision_id) and runtime_map_ready:
@@ -586,7 +598,22 @@ class SlamApiStateController:
         msg.task_ready = bool(projection.task_ready)
         msg.manual_assist_required = bool(projection.manual_assist_required)
         msg.progress_text = projection.progress_text
-        msg.blocking_reason = projection.blocking_reason
+        loss_marker_is_current = bool(
+            projection.manual_assist_required
+            and localization_lost_episode
+            and (
+                localization_lost_stamp <= 0.0
+                or localization_stamp <= 0.0
+                or localization_lost_stamp + 1e-6 >= localization_stamp
+            )
+        )
+        if loss_marker_is_current:
+            msg.blocking_reason = "SLAM_LOCALIZATION_LOST episode=%s reason=%s" % (
+                localization_lost_episode,
+                localization_lost_reason or "cartographer confirmed localization lost",
+            )
+        else:
+            msg.blocking_reason = projection.blocking_reason
         msg.last_error_message = str(runtime.last_error_msg or "")
         msg.manual_assist_map_name = str(manual_assist_info.get("map_name") or "")
         msg.manual_assist_map_revision_id = str(manual_assist_info.get("map_revision_id") or "")

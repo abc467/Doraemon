@@ -4,9 +4,9 @@ import time
 from dataclasses import dataclass
 
 import rospy
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, UInt64, UInt8
 
-from robot_platform_msgs.msg import CombinedStatus
+from robot_platform_msgs.msg import CombinedStatus, ControlStation
 
 
 @dataclass
@@ -82,6 +82,15 @@ class CleaningSubsystem:
         self._mcore_connected: bool = False
         self._mcore_connected_seen: bool = False
         self._reapply_on_reconnect: bool = False
+        self._physical_estop_active: bool = False
+        self._telemetry_seen: bool = False
+        self._telemetry_ts: float = 0.0
+        self._telemetry_generation: int = 0
+        self._safety_status_seen: bool = False
+        self._safety_status_ts: float = 0.0
+        self._safety_status_generation: int = 0
+        self._safety_status_bits: int = 0
+        self._reconcile_paused: bool = False
 
         self._cmd_ts = {
             "brush": 0.0,
@@ -102,12 +111,41 @@ class CleaningSubsystem:
             "water": 0.0,
         }
 
-        self._mcore_connected_topic = str(rospy.get_param("~mcore_connected_topic", "/mcore_tcp_bridge/connected") or "/mcore_tcp_bridge/connected")
+        self._mcore_connected_topic = str(rospy.get_param("~mcore_connected_topic", "/mcore_velocity_sender/connected") or "/mcore_velocity_sender/connected")
         self._combined_status_topic = str(rospy.get_param("~combined_status_topic", "/combined_status") or "/combined_status")
+        self._safety_status_bits_topic = str(
+            rospy.get_param(
+                "~mcore_safety_status_bits_topic",
+                "/mcore_velocity_sender/safety_status_bits",
+            )
+            or "/mcore_velocity_sender/safety_status_bits"
+        )
+        self._telemetry_heartbeat_topic = str(
+            rospy.get_param(
+                "~mcore_telemetry_heartbeat_topic",
+                "/mcore_velocity_sender/telemetry_heartbeat",
+            )
+            or "/mcore_velocity_sender/telemetry_heartbeat"
+        )
+        self._charge_enable_topic = str(
+            rospy.get_param("~charge_enable_topic", "/mcore/charge_enable")
+            or "/mcore/charge_enable"
+        )
+        self._station_control_topic = str(
+            rospy.get_param("~station_control_topic", "/station/control")
+            or "/station/control"
+        )
         self._actuator_reconcile_hz = max(0.2, float(rospy.get_param("~actuator_reconcile_hz", 2.0)))
         self._actuator_active_refresh_s = max(0.2, float(rospy.get_param("~actuator_active_refresh_s", 1.0)))
         self._actuator_transition_retry_window_s = max(0.0, float(rospy.get_param("~actuator_transition_retry_window_s", 1.0)))
         self._actuator_retry_interval_s = max(0.1, float(rospy.get_param("~actuator_retry_interval_s", 0.35)))
+        self._actuator_retry_on_transition = bool(rospy.get_param("~actuator_retry_on_transition", True))
+        self._actuator_retry_off_transition = bool(rospy.get_param("~actuator_retry_off_transition", True))
+        self._actuator_force_off_repeat = max(1, int(rospy.get_param("~actuator_force_off_repeat", 2)))
+        self._actuator_force_off_repeat_interval_s = max(
+            0.0,
+            float(rospy.get_param("~actuator_force_off_repeat_interval_s", 0.2)),
+        )
         self._actuator_feedback_retry_timeout_s = max(
             self._actuator_retry_interval_s,
             float(rospy.get_param("~actuator_feedback_retry_timeout_s", 0.6)),
@@ -125,18 +163,60 @@ class CleaningSubsystem:
             rospy.Subscriber(self._combined_status_topic, CombinedStatus, self._on_combined_status, queue_size=10)
         except Exception as exc:
             rospy.logwarn("[CLEAN] subscribe combined_status failed: topic=%s err=%s", self._combined_status_topic, str(exc))
+        try:
+            rospy.Subscriber(
+                self._safety_status_bits_topic,
+                UInt8,
+                self._on_safety_status_bits,
+                queue_size=1,
+            )
+        except Exception as exc:
+            rospy.logwarn(
+                "[CLEAN] subscribe M-core safety status failed: topic=%s err=%s",
+                self._safety_status_bits_topic,
+                str(exc),
+            )
+        try:
+            rospy.Subscriber(
+                self._telemetry_heartbeat_topic,
+                UInt64,
+                self._on_telemetry_heartbeat,
+                queue_size=1,
+            )
+        except Exception as exc:
+            rospy.logwarn(
+                "[CLEAN] subscribe M-core telemetry heartbeat failed: topic=%s err=%s",
+                self._telemetry_heartbeat_topic,
+                str(exc),
+            )
+
+        # The engineering console also has short, lease-bound station I/O
+        # checks.  Keep their OFF path in the executor watchdog rather than in
+        # the browser/gateway process only, so a gateway crash, e-stop, stale
+        # telemetry or unexpected motion still removes both vehicle and station
+        # enables when the debug lease ends.
+        self._charge_enable_pub = rospy.Publisher(
+            self._charge_enable_topic, Bool, queue_size=10
+        )
+        self._station_control_pub = rospy.Publisher(
+            self._station_control_topic, ControlStation, queue_size=10
+        )
 
         self._stop_evt = threading.Event()
         self._reconcile_thread = threading.Thread(target=self._reconcile_loop, daemon=True)
         self._reconcile_thread.start()
         rospy.loginfo(
-            "[CLEAN] reliability enabled connected_topic=%s status_topic=%s hz=%.2f active_refresh=%.2fs retry_interval=%.2fs retry_window=%.2fs",
+            "[CLEAN] reliability enabled connected_topic=%s status_topic=%s safety_topic=%s telemetry_topic=%s hz=%.2f active_refresh=%.2fs retry_interval=%.2fs retry_window=%.2fs retry_on=%s retry_off=%s",
             self._mcore_connected_topic,
             self._combined_status_topic,
+            self._safety_status_bits_topic,
+            self._telemetry_heartbeat_topic,
             self._actuator_reconcile_hz,
             self._actuator_active_refresh_s,
             self._actuator_retry_interval_s,
             self._actuator_transition_retry_window_s,
+            str(self._actuator_retry_on_transition),
+            str(self._actuator_retry_off_transition),
         )
 
     # ---------- profile / mode ----------
@@ -191,6 +271,45 @@ class CleaningSubsystem:
         with self._lock:
             return bool(self._interlock_active), str(self._interlock_reason or ""), float(self._motion.v_mps), float(self._motion.w_rps)
 
+    def set_reconcile_paused(self, paused: bool, *, reason: str = ""):
+        """Pause automatic actuator replay while an exclusive debug lease is active."""
+        paused = bool(paused)
+        changed = False
+        with self._lock:
+            changed = bool(self._reconcile_paused) != paused
+            self._reconcile_paused = paused
+        if changed:
+            rospy.logwarn(
+                "[CLEAN] reconcile %s reason=%s",
+                "paused" if paused else "resumed",
+                str(reason or ""),
+            )
+
+    def get_platform_safety_snapshot(self, *, now_s: float = 0.0):
+        """Return M-core liveness and optional full 0x4070 safety facts."""
+        now = float(now_s) if now_s > 0.0 else time.time()
+        with self._lock:
+            telemetry_ts = float(self._telemetry_ts or 0.0)
+            safety_ts = float(self._safety_status_ts or 0.0)
+            return {
+                "mcore_connected_seen": bool(self._mcore_connected_seen),
+                "mcore_connected": bool(self._mcore_connected),
+                "telemetry_seen": bool(self._telemetry_seen),
+                "telemetry_age_s": (
+                    max(0.0, now - telemetry_ts)
+                    if telemetry_ts > 0.0
+                    else float("inf")
+                ),
+                "telemetry_generation": int(self._telemetry_generation),
+                "safety_status_seen": bool(self._safety_status_seen),
+                "safety_status_age_s": (
+                    max(0.0, now - safety_ts) if safety_ts > 0.0 else float("inf")
+                ),
+                "safety_status_generation": int(self._safety_status_generation),
+                "safety_status_bits": int(self._safety_status_bits),
+                "emergency_stop_active": bool(self._physical_estop_active),
+            }
+
     def shutdown(self):
         self._stop_evt.set()
         t = getattr(self, "_reconcile_thread", None)
@@ -206,6 +325,17 @@ class CleaningSubsystem:
             prev = bool(self._mcore_connected) if self._mcore_connected_seen else False
             self._mcore_connected_seen = True
             self._mcore_connected = connected
+            if first or connected != prev:
+                # A non-latched safety sample belongs to one transport epoch.
+                # Reconnect must receive a new full 0x4070 frame before debug
+                # can be enabled; the generation remains monotonic so an old
+                # frame can never satisfy the post-all-off confirmation.
+                self._safety_status_seen = False
+                self._safety_status_ts = 0.0
+                self._safety_status_bits = 0
+                self._physical_estop_active = False
+                self._telemetry_seen = False
+                self._telemetry_ts = 0.0
             if connected and (first or not prev):
                 self._reapply_on_reconnect = True
         if connected and (first or not prev):
@@ -218,6 +348,21 @@ class CleaningSubsystem:
             self._feedback.brush_position = int(msg.brush_position)
             self._feedback.scraper_position = int(msg.scraper_position)
             self._feedback.ts = time.time()
+
+    def _on_safety_status_bits(self, msg: UInt8):
+        bits = int(getattr(msg, "data", 0) or 0) & 0xFF
+        with self._lock:
+            self._safety_status_seen = True
+            self._safety_status_ts = time.time()
+            self._safety_status_generation += 1
+            self._safety_status_bits = bits
+            self._physical_estop_active = bool(bits & 0xC0)
+
+    def _on_telemetry_heartbeat(self, _msg: UInt64):
+        with self._lock:
+            self._telemetry_seen = True
+            self._telemetry_ts = time.time()
+            self._telemetry_generation += 1
 
     def _eval_interlock(self, brush_on: bool, scraper_on: bool, vacuum_on: bool, water_on: bool):
         with self._lock:
@@ -357,6 +502,8 @@ class CleaningSubsystem:
 
     def _reconcile_once(self):
         with self._lock:
+            if self._reconcile_paused:
+                return
             connected = bool(self._mcore_connected)
             replay = bool(self._reapply_on_reconnect)
             if replay:
@@ -400,6 +547,9 @@ class CleaningSubsystem:
                         continue
                 if channel in ("vacuum", "water") and age >= self._actuator_active_refresh_s:
                     reapply.append((channel, True, "active_refresh"))
+                    continue
+                if self._actuator_retry_on_transition and retry_until > now and age >= self._actuator_retry_interval_s:
+                    reapply.append((channel, True, "transition_retry"))
             else:
                 if last_state is not False:
                     reapply.append((channel, False, "state_desync"))
@@ -408,7 +558,7 @@ class CleaningSubsystem:
                     if age >= self._actuator_feedback_retry_timeout_s:
                         reapply.append((channel, False, "feedback_mismatch"))
                         continue
-                if retry_until > now and age >= self._actuator_retry_interval_s:
+                if self._actuator_retry_off_transition and retry_until > now and age >= self._actuator_retry_interval_s:
                     reapply.append((channel, False, "transition_retry"))
 
         if not reapply:
@@ -434,13 +584,7 @@ class CleaningSubsystem:
 
     # ---------- high-level entry points ----------
     def zone_end(self):
-        with self._lock:
-            self.des.brush_on = False
-            self.des.scraper_on = False
-            self.des.vacuum_on = False
-            self.des.water_on = False
-            self.des.water_off_latched = False
-        self.apply_full()
+        self.force_all_off(reason="zone_end", water_off_latched=False)
 
     def latch_water_off(self):
         with self._lock:
@@ -448,7 +592,10 @@ class CleaningSubsystem:
             self.des.water_on = False
         self.apply_full()
 
-    def enter_transit_off(self, *, water_off_latched: bool):
+    def enter_transit_off(self, *, water_off_latched: bool, force: bool = False, reason: str = "transit_off"):
+        if force:
+            self.force_all_off(reason=reason, water_off_latched=bool(water_off_latched))
+            return
         with self._lock:
             self.des.brush_on = False
             self.des.scraper_on = False
@@ -580,54 +727,100 @@ class CleaningSubsystem:
                 except Exception:
                     pass
 
-    # ---------- stop policies ----------
-    def pause_stop(self, vacuum_delay_s: float):
-        with self._lock:
-            self.des.water_on = False
-            self.des.brush_on = False
-            self.des.scraper_on = False
-            self._vacuum_job_id += 1
-            job_id = self._vacuum_job_id
+    def force_all_off(self, *, reason: str, water_off_latched: bool = False, repeats: int = None):
+        """Send a physical all-off sequence regardless of cached channel state."""
+        repeat_count = self._actuator_force_off_repeat if repeats is None else int(repeats)
+        repeat_count = max(1, int(repeat_count))
 
-        self.apply_full()
-
-        def _late_vacuum_off():
-            if vacuum_delay_s and vacuum_delay_s > 1e-3:
-                time.sleep(float(vacuum_delay_s))
-            with self._lock:
-                if job_id != self._vacuum_job_id:
-                    return
-                self.des.vacuum_on = False
-            self.apply_full()
-
-        threading.Thread(target=_late_vacuum_off, daemon=True).start()
-
-    def cancel_stop(self, vacuum_delay_s: float):
-        with self._lock:
-            self.des.water_on = False
-            self.des.brush_on = False
-            self.des.scraper_on = False
-            self._vacuum_job_id += 1
-            job_id = self._vacuum_job_id
-
-        self.apply_full()
-
-        def _late_vacuum_off():
-            if vacuum_delay_s and vacuum_delay_s > 1e-3:
-                time.sleep(float(vacuum_delay_s))
-            with self._lock:
-                if job_id != self._vacuum_job_id:
-                    return
-                self.des.vacuum_on = False
-            self.apply_full()
-
-        threading.Thread(target=_late_vacuum_off, daemon=True).start()
-
-    def fail_stop(self):
         with self._lock:
             self._vacuum_job_id += 1
             self.des.brush_on = False
             self.des.scraper_on = False
             self.des.vacuum_on = False
             self.des.water_on = False
-        self.apply_full()
+            self.des.water_off_latched = bool(water_off_latched)
+            self._last_brush = False
+            self._last_scraper = False
+            self._last_vac = False
+            self._last_water = False
+
+        rospy.logwarn(
+            "[CLEAN] force_all_off reason=%s repeats=%d water_off_latched=%s",
+            str(reason),
+            repeat_count,
+            str(bool(water_off_latched)),
+        )
+
+        order = ("water", "brush", "scraper", "vacuum")
+        with self._dispatch_lock:
+            for idx in range(repeat_count):
+                # Side brush may be driven directly by the engineering UI and
+                # must be stopped even when normal "follows brush" mode is off.
+                try:
+                    self.act.side_brush_off()
+                except Exception as exc:
+                    rospy.logwarn(
+                        "[CLEAN] force_all_off side-brush failed repeat=%d/%d err=%s",
+                        idx + 1,
+                        repeat_count,
+                        str(exc),
+                    )
+                try:
+                    self.act.sewage_valve_off()
+                except Exception as exc:
+                    rospy.logwarn(
+                        "[CLEAN] force_all_off sewage-valve failed repeat=%d/%d err=%s",
+                        idx + 1,
+                        repeat_count,
+                        str(exc),
+                    )
+                for channel in order:
+                    try:
+                        self._dispatch_channel(channel, False, transition=True)
+                    except Exception as exc:
+                        rospy.logwarn(
+                            "[CLEAN] force_all_off dispatch failed channel=%s repeat=%d/%d err=%s",
+                            channel,
+                            idx + 1,
+                            repeat_count,
+                            str(exc),
+                        )
+
+                # Debug station I/O shares this lease.  These are deliberately
+                # OFF-only commands: no mechanical rod movement is attempted by
+                # the watchdog.
+                try:
+                    self._charge_enable_pub.publish(Bool(data=False))
+                except Exception as exc:
+                    rospy.logwarn(
+                        "[CLEAN] force_all_off vehicle charge failed repeat=%d/%d err=%s",
+                        idx + 1,
+                        repeat_count,
+                        str(exc),
+                    )
+                for operation, label in ((1, "charge"), (11, "refill"), (3, "drain")):
+                    try:
+                        station_msg = ControlStation()
+                        station_msg.operation = int(operation)
+                        station_msg.status = False
+                        self._station_control_pub.publish(station_msg)
+                    except Exception as exc:
+                        rospy.logwarn(
+                            "[CLEAN] force_all_off station %s failed repeat=%d/%d err=%s",
+                            label,
+                            idx + 1,
+                            repeat_count,
+                            str(exc),
+                        )
+                if idx + 1 < repeat_count and self._actuator_force_off_repeat_interval_s > 1e-3:
+                    rospy.sleep(self._actuator_force_off_repeat_interval_s)
+
+    # ---------- stop policies ----------
+    def pause_stop(self, vacuum_delay_s: float):
+        self.force_all_off(reason="pause_stop", water_off_latched=self.des.water_off_latched)
+
+    def cancel_stop(self, vacuum_delay_s: float):
+        self.force_all_off(reason="cancel_stop", water_off_latched=self.des.water_off_latched)
+
+    def fail_stop(self):
+        self.force_all_off(reason="fail_stop", water_off_latched=self.des.water_off_latched)

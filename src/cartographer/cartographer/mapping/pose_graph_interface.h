@@ -84,6 +84,12 @@ class PoseGraphInterface {
 
   enum class TrajectoryState { ACTIVE, FINISHED, FROZEN, DELETED };
 
+  enum class FlirtFeatureBackfillState {
+    kPending,
+    kReady,
+    kFailed,
+  };
+
   using GlobalSlamOptimizationCallback =
       std::function<void(const std::map<int /* trajectory_id */, SubmapId>&,
                          const std::map<int /* trajectory_id */, NodeId>&)>;
@@ -106,6 +112,14 @@ class PoseGraphInterface {
   virtual bool BuildAndSaveMapScanDistanceFieldCache(
       const std::string& cache_filename, const std::string& cache_key) {
     return true;
+  }
+
+  // Explicit FLIRT relocation must be rejected unless this state is kReady.
+  // Ordinary Cartographer localization does not depend on this gate.
+  virtual void SetFlirtFeatureBackfillState(
+      FlirtFeatureBackfillState /* state */) {}
+  virtual FlirtFeatureBackfillState GetFlirtFeatureBackfillState() const {
+    return FlirtFeatureBackfillState::kReady;
   }
 
   // Returns data for all submaps.

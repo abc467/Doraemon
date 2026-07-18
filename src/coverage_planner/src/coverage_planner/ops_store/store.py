@@ -111,11 +111,15 @@ class SysProfileRecord:
 @dataclass
 class ActuatorProfileRecord:
     actuator_profile_name: str
+    main_brush_speed: int = 0
+    side_brush_speed: int = 0
+    brush_down_distance: int = 0
     water_pump_pwm: int = 0
     suction_machine_pwm: int = 0
     vacuum_motor_pwm: int = 0
-    height_scrub: int = 38
+    height_scrub: int = 0
     height_scrub_active: bool = False
+    side_brush_enable: bool = False
     updated_ts: float = 0.0
 
 
@@ -363,15 +367,27 @@ class OperationsStore:
             """
             CREATE TABLE IF NOT EXISTS actuator_profiles(
               actuator_profile_name TEXT PRIMARY KEY,
+              main_brush_speed INTEGER NOT NULL DEFAULT 0,
+              side_brush_speed INTEGER NOT NULL DEFAULT 0,
+              brush_down_distance INTEGER NOT NULL DEFAULT 0,
               water_pump_pwm INTEGER NOT NULL DEFAULT 0,
               suction_machine_pwm INTEGER NOT NULL DEFAULT 0,
               vacuum_motor_pwm INTEGER NOT NULL DEFAULT 0,
-              height_scrub INTEGER NOT NULL DEFAULT 38,
+              height_scrub INTEGER NOT NULL DEFAULT 0,
               height_scrub_active INTEGER NOT NULL DEFAULT 0,
+              side_brush_enable INTEGER NOT NULL DEFAULT 0,
               updated_ts REAL NOT NULL
             );
             """
         )
+        if "main_brush_speed" not in self._table_columns(conn, "actuator_profiles"):
+            cur.execute("ALTER TABLE actuator_profiles ADD COLUMN main_brush_speed INTEGER NOT NULL DEFAULT 0;")
+        if "side_brush_speed" not in self._table_columns(conn, "actuator_profiles"):
+            cur.execute("ALTER TABLE actuator_profiles ADD COLUMN side_brush_speed INTEGER NOT NULL DEFAULT 0;")
+        if "brush_down_distance" not in self._table_columns(conn, "actuator_profiles"):
+            cur.execute("ALTER TABLE actuator_profiles ADD COLUMN brush_down_distance INTEGER NOT NULL DEFAULT 0;")
+        if "side_brush_enable" not in self._table_columns(conn, "actuator_profiles"):
+            cur.execute("ALTER TABLE actuator_profiles ADD COLUMN side_brush_enable INTEGER NOT NULL DEFAULT 0;")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs(
@@ -634,19 +650,29 @@ class OperationsStore:
                     ),
                 )
             for row in actuator_profiles:
+                def _int_field(key, default):
+                    value = row.get(key, default)
+                    if value is None or value == "":
+                        value = default
+                    return int(value)
+
                 cur.execute(
                     """
                     INSERT OR REPLACE INTO actuator_profiles(
-                      actuator_profile_name, water_pump_pwm, suction_machine_pwm, vacuum_motor_pwm, height_scrub, height_scrub_active, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?);
+                      actuator_profile_name, main_brush_speed, side_brush_speed, brush_down_distance, water_pump_pwm, suction_machine_pwm, vacuum_motor_pwm, height_scrub, height_scrub_active, side_brush_enable, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("actuator_profile_name") or ""),
-                        int(row.get("water_pump_pwm") or 0),
-                        int(row.get("suction_machine_pwm") or 0),
-                        int(row.get("vacuum_motor_pwm") or 0),
-                        int(row.get("height_scrub") or 38),
-                        int(row.get("height_scrub_active", 0) or 0),
+                        _int_field("main_brush_speed", 0),
+                        _int_field("side_brush_speed", 0),
+                        _int_field("brush_down_distance", 0),
+                        _int_field("water_pump_pwm", 0),
+                        _int_field("suction_machine_pwm", 0),
+                        _int_field("vacuum_motor_pwm", 0),
+                        _int_field("height_scrub", 0),
+                        _int_field("height_scrub_active", 0),
+                        _int_field("side_brush_enable", 0),
                         float(row.get("updated_ts") or _now_ts()),
                     ),
                 )
@@ -960,11 +986,15 @@ class OperationsStore:
         self,
         *,
         actuator_profile_name: str,
-        water_pump_pwm: int,
-        suction_machine_pwm: int,
-        vacuum_motor_pwm: int,
-        height_scrub: int,
+        main_brush_speed: int = 0,
+        side_brush_speed: int = 0,
+        brush_down_distance: int = 0,
+        water_pump_pwm: int = 0,
+        suction_machine_pwm: int = 0,
+        vacuum_motor_pwm: int = 0,
+        height_scrub: int = 0,
         height_scrub_active: bool = False,
+        side_brush_enable: bool = False,
     ):
         now = _now_ts()
         conn = self._connect()
@@ -972,23 +1002,31 @@ class OperationsStore:
             conn.execute(
                 """
                 INSERT INTO actuator_profiles(
-                  actuator_profile_name, water_pump_pwm, suction_machine_pwm, vacuum_motor_pwm, height_scrub, height_scrub_active, updated_ts
-                ) VALUES(?,?,?,?,?,?,?)
+                  actuator_profile_name, main_brush_speed, side_brush_speed, brush_down_distance, water_pump_pwm, suction_machine_pwm, vacuum_motor_pwm, height_scrub, height_scrub_active, side_brush_enable, updated_ts
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(actuator_profile_name) DO UPDATE SET
+                  main_brush_speed=excluded.main_brush_speed,
+                  side_brush_speed=excluded.side_brush_speed,
+                  brush_down_distance=excluded.brush_down_distance,
                   water_pump_pwm=excluded.water_pump_pwm,
                   suction_machine_pwm=excluded.suction_machine_pwm,
                   vacuum_motor_pwm=excluded.vacuum_motor_pwm,
                   height_scrub=excluded.height_scrub,
                   height_scrub_active=excluded.height_scrub_active,
+                  side_brush_enable=excluded.side_brush_enable,
                   updated_ts=excluded.updated_ts;
                 """,
                 (
                     str(actuator_profile_name or "").strip(),
+                    int(main_brush_speed),
+                    int(side_brush_speed),
+                    int(brush_down_distance),
                     int(water_pump_pwm),
                     int(suction_machine_pwm),
                     int(vacuum_motor_pwm),
                     int(height_scrub),
                     _bool_int(height_scrub_active),
+                    _bool_int(side_brush_enable),
                     now,
                 ),
             )
@@ -1007,11 +1045,15 @@ class OperationsStore:
                 return None
             return ActuatorProfileRecord(
                 actuator_profile_name=str(row["actuator_profile_name"] or ""),
+                main_brush_speed=int(row["main_brush_speed"] if "main_brush_speed" in row.keys() else 0),
+                side_brush_speed=int(row["side_brush_speed"] if "side_brush_speed" in row.keys() else 0),
+                brush_down_distance=int(row["brush_down_distance"] if "brush_down_distance" in row.keys() else 0),
                 water_pump_pwm=int(row["water_pump_pwm"] or 0),
                 suction_machine_pwm=int(row["suction_machine_pwm"] or 0),
                 vacuum_motor_pwm=int(row["vacuum_motor_pwm"] or 0),
-                height_scrub=int(row["height_scrub"] or 38),
+                height_scrub=int(row["height_scrub"] or 0),
                 height_scrub_active=bool(int(row["height_scrub_active"] or 0)),
+                side_brush_enable=bool(int(row["side_brush_enable"] if "side_brush_enable" in row.keys() else 0)),
                 updated_ts=float(row["updated_ts"] or 0.0),
             )
         finally:
@@ -2040,6 +2082,13 @@ def _clamp_u8(val: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _clamp_int(val: Any, lo: int, hi: int, default: int) -> int:
+    try:
+        return max(int(lo), min(int(hi), int(val)))
+    except Exception:
+        return int(default)
+
+
 def seed_actuator_profiles_from_param(store: OperationsStore, raw_profiles: Any):
     if not isinstance(raw_profiles, dict):
         return
@@ -2049,18 +2098,26 @@ def seed_actuator_profiles_from_param(store: OperationsStore, raw_profiles: Any)
         name = str(key or "").strip()
         if not name:
             continue
-        water_pump_pwm = _clamp_u8(val.get("water_pump_pwm", val.get("vel_water_pump", 0)))
-        suction_machine_pwm = _clamp_u8(val.get("suction_machine_pwm", val.get("vel_water_suction", 0)))
-        vacuum_motor_pwm = _clamp_u8(val.get("vacuum_motor_pwm", val.get("vel_water_suction", suction_machine_pwm)))
-        height_scrub = _clamp_u8(val.get("height_scrub", 38), default=38)
+        main_brush_speed = _clamp_int(val.get("main_brush_speed", val.get("main_brush_pwm", 0)), 0, 100, 0)
+        side_brush_speed = _clamp_int(val.get("side_brush_speed", val.get("side_brush_on_value", 0)), 0, 100, 0)
+        brush_down_distance = _clamp_int(val.get("brush_down_distance", 0), 0, 1800, 0)
+        water_pump_pwm = _clamp_u8(val.get("water_pump_pwm", val.get("vel_water_pump", 0)), default=0)
+        suction_machine_pwm = _clamp_u8(val.get("suction_machine_pwm", val.get("vel_water_suction", 0)), default=0)
+        vacuum_motor_pwm = _clamp_u8(val.get("vacuum_motor_pwm", val.get("vel_water_suction", suction_machine_pwm)), default=0)
+        height_scrub = _clamp_u8(val.get("height_scrub", 0), default=0)
         height_scrub_active = bool(val.get("height_scrub_active", False))
+        side_brush_enable = bool(val.get("side_brush_enable", False))
         store.upsert_actuator_profile(
             actuator_profile_name=name,
+            main_brush_speed=main_brush_speed,
+            side_brush_speed=side_brush_speed,
+            brush_down_distance=brush_down_distance,
             water_pump_pwm=water_pump_pwm,
             suction_machine_pwm=suction_machine_pwm,
             vacuum_motor_pwm=vacuum_motor_pwm,
             height_scrub=height_scrub,
             height_scrub_active=height_scrub_active,
+            side_brush_enable=side_brush_enable,
         )
 
 

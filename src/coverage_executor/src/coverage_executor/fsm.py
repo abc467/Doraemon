@@ -8,6 +8,7 @@ from typing import Optional, Tuple, List, Dict, Any
 import rospy
 import tf2_ros
 from std_msgs.msg import String, Bool, Float32
+from std_srvs.srv import SetBool, SetBoolResponse, Trigger, TriggerResponse
 
 from nav_msgs.msg import Odometry
 
@@ -17,6 +18,13 @@ from .plan_loader import PlanLoader, LoadedPlan, LoadedBlock
 from .mbf_adapter import MBFAdapter
 from .cleaning_actuator import CleaningActuator
 from .cleaning_subsystem import CleaningSubsystem
+from .actuator_debug_lease import (
+    ActuatorDebugSafetyLimits,
+    ActuatorDebugSafetySnapshot,
+    WallClockLease,
+    entry_safety_violation,
+    runtime_safety_violation,
+)
 from .progress import build_arclen, project_along_segments, index_from_s
 from .sys_profile_catalog import SysProfileCatalog
 
@@ -89,7 +97,7 @@ class ExecutorFSM:
         resume_backtrack_m: float = 0.5,
         resume_accept_dist: float = 1.0,
         resume_finish_thresh_m: float = 0.3,
-        water_off_distance: float = 2.0,
+        water_off_distance: float = 6.0,
 
         # 防止“向前跳进度”导致漏扫（仅在 need_connect=False 时允许小幅前进）
         resume_forward_allow_m: float = 0.3,
@@ -128,6 +136,18 @@ class ExecutorFSM:
         # optional interface for controller speed limiting (publish scale)
         speed_limit_scale_enable: bool = True,
         speed_limit_scale_when_actuating: float = 1.0,
+
+        # exclusive, fail-safe actuator debug lease
+        actuator_debug_lease_s: float = 30.0,
+        actuator_debug_watchdog_hz: float = 5.0,
+        actuator_debug_max_lin_mps: float = 0.03,
+        actuator_debug_max_ang_rps: float = 0.05,
+        actuator_debug_odom_stale_s: float = 1.0,
+        actuator_debug_telemetry_stale_s: float = 2.0,
+        actuator_debug_safety_status_stale_s: float = 2.0,
+        actuator_debug_require_safety_status: bool = False,
+        actuator_debug_unreadable_estop_ack_s: float = 15.0,
+        actuator_debug_post_off_status_wait_s: float = 3.0,
 
         connect_retry_max: int = 2,
         follow_retry_max: int = 2,
@@ -233,6 +253,7 @@ class ExecutorFSM:
         # --- motion / interlock ---
         self._odom_topic = str(odom_topic or '/odom')
         self._v_mps = 0.0
+        self._debug_linear_speed_mps = 0.0
         self._w_rps = 0.0
         self._vw_ts = 0.0
         self._interlock_prev = False
@@ -268,6 +289,59 @@ class ExecutorFSM:
             rospy.Subscriber(self._odom_topic, Odometry, self._on_odom, queue_size=50)
         except Exception as e:
             rospy.logwarn('[EXEC] odom subscribe failed: %s', str(e))
+
+        # Exclusive actuator-debug lease. The frontend may publish low-level
+        # actuator commands only while this lease is active. The executor keeps
+        # ownership of safety shutdown and task/debug mutual exclusion.
+        self._actuator_debug_control_lock = threading.RLock()
+        self._actuator_debug_transition = False
+        self._actuator_debug_active = False
+        self._actuator_debug_lease = WallClockLease(actuator_debug_lease_s)
+        self._actuator_debug_limits = ActuatorDebugSafetyLimits(
+            max_linear_mps=max(0.0, float(actuator_debug_max_lin_mps)),
+            max_angular_rps=max(0.0, float(actuator_debug_max_ang_rps)),
+            odom_stale_s=max(0.1, float(actuator_debug_odom_stale_s)),
+            telemetry_stale_s=max(0.1, float(actuator_debug_telemetry_stale_s)),
+            safety_status_stale_s=max(0.1, float(actuator_debug_safety_status_stale_s)),
+            require_authoritative_safety_status=bool(
+                actuator_debug_require_safety_status
+            ),
+        )
+        self._actuator_debug_watchdog_hz = max(1.0, float(actuator_debug_watchdog_hz))
+        self._actuator_debug_unreadable_estop_ack_s = max(
+            1.0, float(actuator_debug_unreadable_estop_ack_s)
+        )
+        self._actuator_debug_unreadable_estop_ack_deadline = 0.0
+        self._actuator_debug_post_off_status_wait_s = max(
+            0.0, float(actuator_debug_post_off_status_wait_s)
+        )
+        self._actuator_debug_stop_evt = threading.Event()
+        self._actuator_debug_pub = rospy.Publisher(
+            '~actuator_debug_active', Bool, queue_size=10, latch=True
+        )
+        self._actuator_debug_pub.publish(Bool(data=False))
+        self._actuator_debug_service = rospy.Service(
+            '~set_actuator_debug_mode', SetBool, self._handle_set_actuator_debug_mode
+        )
+        self._actuator_debug_unreadable_estop_ack_service = rospy.Service(
+            '~acknowledge_actuator_debug_unreadable_estop',
+            Trigger,
+            self._handle_acknowledge_actuator_debug_unreadable_estop,
+        )
+        self._actuator_debug_thread = threading.Thread(
+            target=self._actuator_debug_watchdog_loop,
+            name='actuator-debug-watchdog',
+            daemon=True,
+        )
+        self._actuator_debug_thread.start()
+        rospy.loginfo(
+            '[EXEC][ACT_DEBUG] ready service=%s lease=%.1fs watchdog=%.1fHz speed_limits=(%.3fm/s,%.3frad/s)',
+            rospy.resolve_name('~set_actuator_debug_mode'),
+            float(self._actuator_debug_lease.duration_s),
+            float(self._actuator_debug_watchdog_hz),
+            float(self._actuator_debug_limits.max_linear_mps),
+            float(self._actuator_debug_limits.max_angular_rps),
+        )
 
         self._pause_timer: Optional[rospy.Timer] = None
 
@@ -630,15 +704,410 @@ class ExecutorFSM:
             self._clear_ai_spot("transit")
         except Exception:
             pass
-        try:
-            self.clean.enter_transit_off(water_off_latched=self._water_off_latched)
-        except Exception:
-            pass
+        self._force_cleaning_all_off("request_transit_cleaning_off")
 
     def set_force_resume_transit_once(self, enabled: bool):
         """Force next CONNECT to be treated as transit (no cleaning) until first FOLLOW."""
         with self._lock:
             self._force_transit_for_next_connect = bool(enabled)
+
+    # ---------- exclusive actuator debug lease ----------
+    def is_actuator_debug_active(self) -> bool:
+        with self._lock:
+            return bool(self._actuator_debug_active)
+
+    def _actuator_debug_blocks_run(self) -> bool:
+        with self._lock:
+            return bool(self._actuator_debug_active or self._actuator_debug_transition)
+
+    def _actuator_debug_safety_snapshot(self, *, now_s: float = 0.0) -> ActuatorDebugSafetySnapshot:
+        now = float(now_s) if now_s > 0.0 else time.time()
+        platform = self.clean.get_platform_safety_snapshot(now_s=now)
+        with self._lock:
+            thread = self._running_thread
+            odom_ts = float(self._vw_ts or 0.0)
+            return ActuatorDebugSafetySnapshot(
+                executor_state=str(self._state or ""),
+                run_thread_active=bool(thread and thread.is_alive()),
+                linear_speed_mps=float(self._debug_linear_speed_mps),
+                angular_speed_rps=float(self._w_rps),
+                odom_age_s=(max(0.0, now - odom_ts) if odom_ts > 0.0 else float("inf")),
+                mcore_connected_seen=bool(platform.get("mcore_connected_seen", False)),
+                mcore_connected=bool(platform.get("mcore_connected", False)),
+                telemetry_seen=bool(platform.get("telemetry_seen", False)),
+                telemetry_age_s=float(platform.get("telemetry_age_s", float("inf"))),
+                telemetry_generation=int(platform.get("telemetry_generation", 0)),
+                safety_status_seen=bool(platform.get("safety_status_seen", False)),
+                safety_status_age_s=float(platform.get("safety_status_age_s", float("inf"))),
+                safety_status_generation=int(platform.get("safety_status_generation", 0)),
+                emergency_stop_active=bool(
+                    self._estop or platform.get("emergency_stop_active", False)
+                ),
+            )
+
+    def _publish_actuator_debug_active(self, active: bool):
+        try:
+            self._actuator_debug_pub.publish(Bool(data=bool(active)))
+        except Exception as exc:
+            rospy.logwarn_throttle(2.0, "[EXEC][ACT_DEBUG] publish active failed: %s", str(exc))
+
+    @staticmethod
+    def _actuator_debug_response(success: bool, message: str) -> SetBoolResponse:
+        response = SetBoolResponse()
+        response.success = bool(success)
+        response.message = str(message or "")
+        return response
+
+    def _normalize_completed_state_for_actuator_debug(self) -> bool:
+        """Retire a successful terminal state once its run thread has exited.
+
+        ``DONE`` is kept long enough for TaskManager to persist the terminal
+        result, so the executor topic can still contain ``DONE`` after the live
+        task state has returned to IDLE.  Actuator debugging may safely retire
+        that successful terminal marker, but it must never do the same for a
+        running thread, PAUSED, FAILED, ERROR or ESTOP.
+
+        The caller holds ``_actuator_debug_control_lock``.  Task start/resume
+        also take that lock, making the DONE -> IDLE transition atomic with
+        respect to acquiring the debug lease.
+        """
+        with self._lock:
+            thread = self._running_thread
+            run_thread_active = bool(thread and thread.is_alive())
+            if str(self._state or "").strip().upper() != "DONE" or run_thread_active:
+                return False
+            self._publish_state("IDLE")
+
+        self._emit("ACTUATOR_DEBUG_ENTRY_READY:from=DONE")
+        rospy.loginfo("[EXEC][ACT_DEBUG] retired completed DONE state before debug entry")
+        return True
+
+    def _wait_for_actuator_debug_post_off_safety(
+        self,
+        *,
+        after_safety_generation: int,
+        after_telemetry_generation: int,
+        require_safety_confirmation: bool,
+    ) -> Optional[str]:
+        """Wait for a trusted M-core response after the final all-off command.
+
+        Firmware with the optional full 0x4070 status byte must refresh that
+        authoritative safety generation. Compatibility firmware must at least
+        return a checksum-valid telemetry heartbeat from the current transport
+        epoch. Disconnect, motion, emergency stop and stale odometry still fail
+        immediately in either mode.
+        """
+        stale_status_reasons = {
+            "M-core telemetry unavailable",
+            "M-core telemetry unavailable or stale",
+            "M-core safety status unavailable",
+            "M-core safety status unavailable or stale",
+        }
+        deadline = time.monotonic() + self._actuator_debug_post_off_status_wait_s
+
+        while True:
+            snapshot = self._actuator_debug_safety_snapshot(now_s=time.time())
+            violation = runtime_safety_violation(snapshot, self._actuator_debug_limits)
+            if violation and violation not in stale_status_reasons:
+                return violation
+            safety_refreshed = int(snapshot.safety_status_generation) > int(
+                after_safety_generation
+            )
+            telemetry_refreshed = int(snapshot.telemetry_generation) > int(
+                after_telemetry_generation
+            )
+            confirmation_refreshed = (
+                safety_refreshed if require_safety_confirmation else telemetry_refreshed
+            )
+            if not violation and confirmation_refreshed:
+                return None
+
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                if violation:
+                    return violation
+                if require_safety_confirmation:
+                    return "M-core safety status did not refresh after all-off"
+                return "M-core telemetry did not refresh after all-off"
+            if self._actuator_debug_stop_evt.is_set() or rospy.is_shutdown():
+                return "executor shutting down"
+            self._actuator_debug_stop_evt.wait(min(0.05, remaining_s))
+
+    def _handle_set_actuator_debug_mode(self, req):
+        if bool(getattr(req, "data", False)):
+            return self._enable_or_renew_actuator_debug()
+        ended = self._end_actuator_debug(reason="operator_disable", publish_idle=True)
+        if ended:
+            return self._actuator_debug_response(True, "actuator debug disabled; all outputs forced off")
+        self._publish_actuator_debug_active(False)
+        return self._actuator_debug_response(True, "actuator debug already disabled")
+
+    def _handle_acknowledge_actuator_debug_unreadable_estop(self, _req):
+        """Create a short, one-shot operator acknowledgement for compat firmware."""
+        with self._actuator_debug_control_lock:
+            if self._actuator_debug_limits.require_authoritative_safety_status:
+                return TriggerResponse(
+                    success=False,
+                    message="authoritative physical emergency-stop status is required",
+                )
+            if self.is_actuator_debug_active():
+                return TriggerResponse(
+                    success=False,
+                    message="actuator debug is already active",
+                )
+
+            self._normalize_completed_state_for_actuator_debug()
+            snapshot = self._actuator_debug_safety_snapshot(now_s=time.time())
+            violation = entry_safety_violation(snapshot, self._actuator_debug_limits)
+            if violation:
+                return TriggerResponse(
+                    success=False,
+                    message="cannot acknowledge actuator debug: %s" % violation,
+                )
+            if snapshot.safety_status_seen:
+                return TriggerResponse(
+                    success=True,
+                    message="physical emergency-stop status is readable; acknowledgement not needed",
+                )
+
+            self._actuator_debug_unreadable_estop_ack_deadline = (
+                time.monotonic() + self._actuator_debug_unreadable_estop_ack_s
+            )
+            self._emit(
+                "ACTUATOR_DEBUG_UNREADABLE_ESTOP_ACK:window=%.1fs"
+                % self._actuator_debug_unreadable_estop_ack_s
+            )
+            rospy.logwarn(
+                "[EXEC][ACT_DEBUG] operator acknowledged unreadable physical "
+                "e-stop; one-shot window=%.1fs",
+                self._actuator_debug_unreadable_estop_ack_s,
+            )
+            return TriggerResponse(
+                success=True,
+                message=(
+                    "operator acknowledgement accepted for %.1fs; "
+                    "physical emergency-stop state remains unreadable"
+                    % self._actuator_debug_unreadable_estop_ack_s
+                ),
+            )
+
+    def _enable_or_renew_actuator_debug(self) -> SetBoolResponse:
+        with self._actuator_debug_control_lock:
+            now_wall = time.time()
+            now_lease = time.monotonic()
+
+            if self.is_actuator_debug_active():
+                snapshot = self._actuator_debug_safety_snapshot(now_s=now_wall)
+                violation = runtime_safety_violation(snapshot, self._actuator_debug_limits)
+                if snapshot.run_thread_active:
+                    violation = "executor run thread became active"
+                elif str(snapshot.executor_state or "").upper() != "ACTUATOR_DEBUG":
+                    violation = "executor left ACTUATOR_DEBUG state"
+                if violation:
+                    self._end_actuator_debug_locked(
+                        reason="renew_rejected:%s" % violation,
+                        publish_idle=True,
+                    )
+                    return self._actuator_debug_response(False, "debug lease ended: %s" % violation)
+
+                self._actuator_debug_lease.enable_or_renew(now_lease)
+                self._publish_actuator_debug_active(True)
+                self._emit("ACTUATOR_DEBUG_RENEW:lease=%.1fs" % self._actuator_debug_lease.duration_s)
+                return self._actuator_debug_response(
+                    True,
+                    "actuator debug lease renewed for %.1fs" % self._actuator_debug_lease.duration_s,
+                )
+
+            # A successful run intentionally leaves a short-lived/persisted
+            # DONE marker for TaskManager.  Once its worker has exited, retire
+            # that marker before applying the otherwise strict IDLE-only gate.
+            self._normalize_completed_state_for_actuator_debug()
+            snapshot = self._actuator_debug_safety_snapshot(now_s=now_wall)
+            violation = entry_safety_violation(snapshot, self._actuator_debug_limits)
+            if violation:
+                return self._actuator_debug_response(False, "cannot enable actuator debug: %s" % violation)
+            if (
+                not snapshot.safety_status_seen
+                and not self._actuator_debug_limits.require_authoritative_safety_status
+            ):
+                if now_lease >= float(
+                    self._actuator_debug_unreadable_estop_ack_deadline or 0.0
+                ):
+                    return self._actuator_debug_response(
+                        False,
+                        "cannot enable actuator debug: physical emergency-stop "
+                        "status unavailable; explicit operator acknowledgement required",
+                    )
+                # One acknowledgement authorizes one transition attempt only.
+                self._actuator_debug_unreadable_estop_ack_deadline = 0.0
+                self._emit("ACTUATOR_DEBUG_UNREADABLE_ESTOP_ACK_CONSUMED")
+            # Atomically reserve the IDLE executor before doing physical I/O.
+            with self._lock:
+                thread = self._running_thread
+                if str(self._state or "").upper() != "IDLE":
+                    return self._actuator_debug_response(False, "cannot enable actuator debug: executor must be IDLE")
+                if thread and thread.is_alive():
+                    return self._actuator_debug_response(False, "cannot enable actuator debug: run thread active")
+                if self._actuator_debug_active or self._actuator_debug_transition:
+                    return self._actuator_debug_response(False, "cannot enable actuator debug: transition busy")
+                self._actuator_debug_transition = True
+
+            try:
+                # Stop automatic replay before transferring the actuator command
+                # window to the debug client, then establish a known all-off base.
+                self.clean.set_reconcile_paused(True, reason="actuator_debug_enable")
+                self.clean.force_all_off(
+                    reason="actuator_debug_enable",
+                    water_off_latched=False,
+                )
+
+                # Health can change while the physical all-off sequence is sent;
+                # establish the confirmation baseline only after that sequence
+                # has returned.  A status frame received during all-off must not
+                # be mistaken for proof of the final commanded state.
+                post_off_snapshot = self._actuator_debug_safety_snapshot(
+                    now_s=time.time()
+                )
+                require_safety_confirmation = bool(
+                    self._actuator_debug_limits.require_authoritative_safety_status
+                    or post_off_snapshot.safety_status_seen
+                )
+                violation = self._wait_for_actuator_debug_post_off_safety(
+                    after_safety_generation=int(
+                        post_off_snapshot.safety_status_generation
+                    ),
+                    after_telemetry_generation=int(
+                        post_off_snapshot.telemetry_generation
+                    ),
+                    require_safety_confirmation=require_safety_confirmation,
+                )
+                if violation:
+                    raise RuntimeError(violation)
+
+                with self._lock:
+                    thread = self._running_thread
+                    if str(self._state or "").upper() != "IDLE" or (thread and thread.is_alive()):
+                        raise RuntimeError("executor is no longer idle")
+                    self._actuator_debug_lease.enable_or_renew(time.monotonic())
+                    self._actuator_debug_active = True
+                    # RLock makes this state transition atomic with the final
+                    # idle/thread check while still publishing the latched state.
+                    self._publish_state("ACTUATOR_DEBUG")
+                    self._actuator_debug_transition = False
+                self._publish_actuator_debug_active(True)
+                self._emit("ACTUATOR_DEBUG_ON:lease=%.1fs" % self._actuator_debug_lease.duration_s)
+                rospy.logwarn(
+                    "[EXEC][ACT_DEBUG] enabled lease=%.1fs; task start/resume blocked",
+                    float(self._actuator_debug_lease.duration_s),
+                )
+                final_snapshot = self._actuator_debug_safety_snapshot(now_s=time.time())
+                message = "actuator debug enabled for %.1fs" % (
+                    self._actuator_debug_lease.duration_s
+                )
+                if not final_snapshot.safety_status_seen:
+                    message += (
+                        "; physical emergency-stop status is unavailable on this "
+                        "firmware; operator confirmation is required"
+                    )
+                return self._actuator_debug_response(True, message)
+            except Exception as exc:
+                with self._lock:
+                    self._actuator_debug_active = False
+                    self._actuator_debug_transition = True
+                self._actuator_debug_lease.disable()
+                try:
+                    self.clean.force_all_off(
+                        reason="actuator_debug_enable_failed",
+                        water_off_latched=False,
+                    )
+                except Exception:
+                    pass
+                try:
+                    self.clean.set_reconcile_paused(False, reason="actuator_debug_enable_failed")
+                except Exception:
+                    pass
+                self._publish_actuator_debug_active(False)
+                if self.get_state().upper() == "ACTUATOR_DEBUG":
+                    self._publish_state("IDLE")
+                with self._lock:
+                    self._actuator_debug_transition = False
+                return self._actuator_debug_response(False, "cannot enable actuator debug: %s" % str(exc))
+
+    def _end_actuator_debug(self, *, reason: str, publish_idle: bool) -> bool:
+        with self._actuator_debug_control_lock:
+            return self._end_actuator_debug_locked(reason=reason, publish_idle=publish_idle)
+
+    def _end_actuator_debug_locked(self, *, reason: str, publish_idle: bool) -> bool:
+        self._actuator_debug_unreadable_estop_ack_deadline = 0.0
+        with self._lock:
+            was_active = bool(self._actuator_debug_active or self._actuator_debug_transition)
+            if not was_active:
+                return False
+            # Keep the transition guard raised until all physical outputs are off
+            # and ACTUATOR_DEBUG has been retired, preventing a start race.
+            self._actuator_debug_active = False
+            self._actuator_debug_transition = True
+        self._actuator_debug_lease.disable()
+
+        try:
+            self.clean.force_all_off(
+                reason="actuator_debug_end:%s" % str(reason or "unknown"),
+                water_off_latched=False,
+            )
+        except Exception as exc:
+            rospy.logerr("[EXEC][ACT_DEBUG] force_all_off failed: %s", str(exc))
+        finally:
+            try:
+                self.clean.set_reconcile_paused(False, reason="actuator_debug_end:%s" % str(reason or "unknown"))
+            except Exception:
+                pass
+
+        self._publish_actuator_debug_active(False)
+        current_state = self.get_state().upper()
+        if publish_idle and current_state not in ("IDLE", "ESTOP"):
+            self._publish_state("IDLE")
+        with self._lock:
+            self._actuator_debug_transition = False
+        self._emit("ACTUATOR_DEBUG_OFF:%s" % str(reason or "unknown"))
+        rospy.logwarn("[EXEC][ACT_DEBUG] ended reason=%s", str(reason or "unknown"))
+        return True
+
+    def _actuator_debug_watchdog_loop(self):
+        period_s = 1.0 / max(1.0, float(self._actuator_debug_watchdog_hz))
+        while (not rospy.is_shutdown()) and (not self._actuator_debug_stop_evt.is_set()):
+            try:
+                # Serialize expiry evaluation with renewal so a renewal arriving
+                # on the deadline cannot be undone by a stale watchdog decision.
+                with self._actuator_debug_control_lock:
+                    if self.is_actuator_debug_active():
+                        reason = ""
+                        if self._actuator_debug_lease.expired(time.monotonic()):
+                            reason = "lease_expired"
+                        else:
+                            snapshot = self._actuator_debug_safety_snapshot(now_s=time.time())
+                            if snapshot.run_thread_active:
+                                reason = "run_thread_active"
+                            elif str(snapshot.executor_state or "").upper() != "ACTUATOR_DEBUG":
+                                reason = "executor_state_changed:%s" % str(snapshot.executor_state or "unknown")
+                            else:
+                                violation = runtime_safety_violation(snapshot, self._actuator_debug_limits)
+                                if violation:
+                                    reason = "safety:%s" % violation
+                        if reason:
+                            self._end_actuator_debug_locked(reason=reason, publish_idle=True)
+                        else:
+                            # Repeated publication is a wall-time heartbeat; latch lets
+                            # late subscribers immediately discover the current state.
+                            self._publish_actuator_debug_active(True)
+                    else:
+                        self._publish_actuator_debug_active(False)
+            except Exception as exc:
+                rospy.logerr_throttle(2.0, "[EXEC][ACT_DEBUG] watchdog failed: %s", str(exc))
+                try:
+                    self._end_actuator_debug(reason="watchdog_exception", publish_idle=True)
+                except Exception:
+                    pass
+            self._actuator_debug_stop_evt.wait(period_s)
 
     def shutdown(self):
         """
@@ -649,6 +1118,14 @@ class ExecutorFSM:
         """
         try:
             rospy.logerr("[EXEC] shutdown() -> cancel_all + fail_stop + hard_stop")
+        except Exception:
+            pass
+        try:
+            self._actuator_debug_stop_evt.set()
+            self._end_actuator_debug(reason="shutdown", publish_idle=True)
+            t = getattr(self, "_actuator_debug_thread", None)
+            if t is not None and t.is_alive() and t is not threading.current_thread():
+                t.join(timeout=0.3)
         except Exception:
             pass
         # stop progress publish loop/timer (important for clean shutdown)
@@ -795,10 +1272,12 @@ class ExecutorFSM:
     def _on_odom(self, msg: Odometry):
         try:
             v = float(getattr(msg.twist.twist.linear, 'x', 0.0))
+            vy = float(getattr(msg.twist.twist.linear, 'y', 0.0))
             w = float(getattr(msg.twist.twist.angular, 'z', 0.0))
             ts = time.time()
             with self._lock:
                 self._v_mps = v
+                self._debug_linear_speed_mps = math.hypot(v, vy)
                 self._w_rps = w
                 self._vw_ts = ts
             # feed to cleaning subsystem (may trigger immediate safety masking)
@@ -1082,44 +1561,62 @@ class ExecutorFSM:
 
 
         if verb == "start":
-            kv = self._parse_kv_tokens(parts[1:])
-            zone = (kv.get("zone_id") or "").strip() if kv else ""
-            # canonical: start zone_id=... plan_profile=... sys_profile=... mode=... run_id=...
-            if not zone:
-                rospy.logwarn("[EXEC] start requires zone_id")
-                return
-            self._apply_intent_from_kv(kv)
-            req_run = (kv.get("run_id") or "").strip() if kv else ""
-            with self._lock:
-                self._zone_id = zone
-                # always create/use a run_id for this execution
-                self._run_id = req_run or uuid.uuid4().hex
-                self._pause_req = False
-                self._cancel_req = False
-            rospy.loginfo("[EXEC] start zone_id=%s", self._zone_id)
-            self._publish_state("START_REQ")
-            self._start_thread(mode="start")
+            with self._actuator_debug_control_lock:
+                if self._actuator_debug_blocks_run():
+                    rospy.logwarn("[EXEC] reject start: actuator debug lease active")
+                    self._emit("CMD_REJECTED:start:ACTUATOR_DEBUG")
+                    return
+                kv = self._parse_kv_tokens(parts[1:])
+                zone = (kv.get("zone_id") or "").strip() if kv else ""
+                # canonical: start zone_id=... plan_profile=... sys_profile=... mode=... run_id=...
+                if not zone:
+                    rospy.logwarn("[EXEC] start requires zone_id")
+                    return
+                self._apply_intent_from_kv(kv)
+                req_run = (kv.get("run_id") or "").strip() if kv else ""
+                with self._lock:
+                    if self._actuator_debug_active or self._actuator_debug_transition:
+                        rospy.logwarn("[EXEC] reject start: actuator debug transition active")
+                        self._emit("CMD_REJECTED:start:ACTUATOR_DEBUG")
+                        return
+                    self._zone_id = zone
+                    # always create/use a run_id for this execution
+                    self._run_id = req_run or uuid.uuid4().hex
+                    self._pause_req = False
+                    self._cancel_req = False
+                rospy.loginfo("[EXEC] start zone_id=%s", self._zone_id)
+                self._publish_state("START_REQ")
+                self._start_thread(mode="start")
             return
 
         if verb == "resume":
-            kv = self._parse_kv_tokens(parts[1:])
-            zone = (kv.get("zone_id") or "").strip() if kv else ""
-            # canonical: resume run_id=... [zone_id=...] [plan_profile=...] [sys_profile=...] [mode=...]
-            self._apply_intent_from_kv(kv)
-            req_run = (kv.get("run_id") or "").strip() if kv else ""
-            if not req_run:
-                rospy.logwarn("[EXEC] resume requires run_id")
-                return
-            with self._lock:
-                if zone:
-                    self._zone_id = zone
-                self._run_id = req_run
-                self._pause_req = False
-                self._cancel_req = False
-            rospy.logwarn("[EXEC] RESUME zone_id=%s", self._zone_id)
-            self._stop_pause_hold()
-            self._publish_state("RESUME_REQ")
-            self._start_thread(mode="resume")
+            with self._actuator_debug_control_lock:
+                if self._actuator_debug_blocks_run():
+                    rospy.logwarn("[EXEC] reject resume: actuator debug lease active")
+                    self._emit("CMD_REJECTED:resume:ACTUATOR_DEBUG")
+                    return
+                kv = self._parse_kv_tokens(parts[1:])
+                zone = (kv.get("zone_id") or "").strip() if kv else ""
+                # canonical: resume run_id=... [zone_id=...] [plan_profile=...] [sys_profile=...] [mode=...]
+                self._apply_intent_from_kv(kv)
+                req_run = (kv.get("run_id") or "").strip() if kv else ""
+                if not req_run:
+                    rospy.logwarn("[EXEC] resume requires run_id")
+                    return
+                with self._lock:
+                    if self._actuator_debug_active or self._actuator_debug_transition:
+                        rospy.logwarn("[EXEC] reject resume: actuator debug transition active")
+                        self._emit("CMD_REJECTED:resume:ACTUATOR_DEBUG")
+                        return
+                    if zone:
+                        self._zone_id = zone
+                    self._run_id = req_run
+                    self._pause_req = False
+                    self._cancel_req = False
+                rospy.logwarn("[EXEC] RESUME zone_id=%s", self._zone_id)
+                self._stop_pause_hold()
+                self._publish_state("RESUME_REQ")
+                self._start_thread(mode="resume")
             return
 
         if verb == "pause":
@@ -1191,6 +1688,7 @@ class ExecutorFSM:
         if verb in ["estop", "e-stop", "emergency_stop"]:
             with self._lock:
                 self._estop = True
+            self._end_actuator_debug(reason="estop_command", publish_idle=True)
             rospy.logerr("[EXEC] E-STOP")
             self._publish_state("ESTOP")
             try:
@@ -1527,6 +2025,10 @@ class ExecutorFSM:
     # ---------- thread control ----------
     def _start_thread(self, mode: str):
         with self._lock:
+            if self._actuator_debug_active or self._actuator_debug_transition:
+                rospy.logwarn("[EXEC] reject %s thread: actuator debug lease active", str(mode))
+                self._emit("CMD_REJECTED:%s:ACTUATOR_DEBUG" % str(mode))
+                return
             if self._running_thread and self._running_thread.is_alive():
                 rospy.logwarn("[EXEC] thread already running; ignore %s", mode)
                 return
@@ -1573,7 +2075,7 @@ class ExecutorFSM:
                 self._run_start(zone_id)
         except Exception as e:
             rospy.logerr("[EXEC] run failed: %s", str(e))
-            self.clean.fail_stop()
+            self._force_cleaning_all_off("run_exception")
             self._publish_state("FAILED")
         finally:
             with self._lock:
@@ -2315,8 +2817,14 @@ class ExecutorFSM:
         self.clean.enter_follow(water_off_latched=self._water_off_latched)
 
     def _ensure_transit_cleaning_off(self):
-        """Transit segment: force all channels off."""
-        self.clean.enter_transit_off(water_off_latched=self._water_off_latched)
+        """Transit segment: physically force all cleaning channels off."""
+        self._force_cleaning_all_off("transit_cleaning_off")
+
+    def _force_cleaning_all_off(self, reason: str):
+        try:
+            self.clean.force_all_off(reason=str(reason), water_off_latched=self._water_off_latched)
+        except Exception as exc:
+            rospy.logwarn("[EXEC] force cleaning all-off failed reason=%s err=%s", str(reason), str(exc))
 
     def _sleep_or_abort(self, seconds: float) -> str:
         deadline = time.time() + max(0.0, float(seconds))
@@ -2342,10 +2850,7 @@ class ExecutorFSM:
 
     def _enter_paused_recovery(self, zone_id: str, plan_id: str, *, code: str, msg: str, data: Optional[Dict[str, Any]] = None):
         rospy.logwarn("[EXEC] enter PAUSED_RECOVERY code=%s msg=%s", str(code), str(msg))
-        try:
-            self.clean.enter_transit_off(water_off_latched=self._water_off_latched)
-        except Exception:
-            pass
+        self._force_cleaning_all_off(f"paused_recovery:{code}")
         self._set_error(code=str(code), msg=str(msg), data=(data or {}))
         self._save_checkpoint(zone_id, plan_id, state="PAUSED")
         self._emit(f"PAUSED_RECOVERY:{code}:{msg}")
@@ -2426,6 +2931,7 @@ class ExecutorFSM:
                     reason = self._should_abort()
                     if reason:
                         rospy.logwarn("[EXEC] CONNECT interrupted by %s", reason)
+                        self._force_cleaning_all_off(f"connect_interrupted:{reason}")
                         self._save_checkpoint(zone_id, plan.plan_id, state=("PAUSED" if reason == "PAUSE" else "CANCELED"))
                         self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
                         return False
@@ -2440,15 +2946,13 @@ class ExecutorFSM:
 
                     if connect_failures <= self.connect_retry_max:
                         self._emit(f"CONNECT_RETRY:block={blk.block_id} attempt={connect_failures}/{self.connect_retry_max}")
-                        try:
-                            self.clean.enter_transit_off(water_off_latched=self._water_off_latched)
-                        except Exception:
-                            pass
+                        self._force_cleaning_all_off("connect_retry")
                         if self.retry_clear_costmaps:
                             self.mbf.clear_costmaps()
 
                         reason = self._sleep_or_abort(self.retry_wait_s)
                         if reason:
+                            self._force_cleaning_all_off(f"connect_retry_wait_interrupted:{reason}")
                             self._save_checkpoint(zone_id, plan.plan_id, state=("PAUSED" if reason == "PAUSE" else "CANCELED"))
                             self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
                             return False
@@ -2467,7 +2971,7 @@ class ExecutorFSM:
                         return False
 
                     rospy.logerr("[EXEC] CONNECT failed block=%d", blk.block_id)
-                    self.clean.fail_stop()
+                    self._force_cleaning_all_off("connect_failed")
                     self._save_checkpoint(zone_id, plan.plan_id, state="FAILED")
                     self._publish_state("FAILED")
                     return False
@@ -2563,16 +3067,14 @@ class ExecutorFSM:
                 if follow_failures <= self.follow_retry_max:
                     self._emit(f"FOLLOW_RETRY:block={blk.block_id} attempt={follow_failures}/{self.follow_retry_max}")
 
-                    try:
-                        self.clean.enter_transit_off(water_off_latched=self._water_off_latched)
-                    except Exception:
-                        pass
+                    self._force_cleaning_all_off("follow_retry")
 
                     if self.retry_clear_costmaps:
                         self.mbf.clear_costmaps()
 
                     reason = self._sleep_or_abort(self.retry_wait_s)
                     if reason:
+                        self._force_cleaning_all_off(f"follow_retry_wait_interrupted:{reason}")
                         self._save_checkpoint(zone_id, plan.plan_id, state=("PAUSED" if reason == "PAUSE" else "CANCELED"))
                         self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
                         return False
@@ -2611,7 +3113,7 @@ class ExecutorFSM:
                     return False
 
                 rospy.logerr("[EXEC] FOLLOW failed block=%d -> fail_stop", blk.block_id)
-                self.clean.fail_stop()
+                self._force_cleaning_all_off("follow_failed")
                 self._save_checkpoint(zone_id, plan.plan_id, state="FAILED")
                 self._publish_state("FAILED")
                 return False

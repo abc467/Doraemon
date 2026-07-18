@@ -20,6 +20,7 @@
   <depend>nav_msgs</depend>
   <depend>mbf_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>dynamic_reconfigure</depend>
   <depend>rosparam</depend>
 
   <depend>coverage_msgs</depend>

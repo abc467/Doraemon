@@ -17,6 +17,8 @@
 #include "cartographer/mapping/internal/2d/pose_graph_2d.h"
 
 #include <cmath>
+#include <chrono>
+#include <future>
 #include <memory>
 #include <random>
 
@@ -218,6 +220,62 @@ TEST_F(PoseGraph2DTest, EmptyMap) {
   pose_graph_->RunFinalOptimization();
   const auto nodes = pose_graph_->GetTrajectoryNodes();
   EXPECT_TRUE(nodes.empty());
+}
+
+TEST_F(PoseGraph2DTest, FlirtFeatureBackfillGateIsFailClosedUntilReady) {
+  using BackfillState = PoseGraph::FlirtFeatureBackfillState;
+  EXPECT_EQ(pose_graph_->GetFlirtFeatureBackfillState(),
+            BackfillState::kReady);
+
+  pose_graph_->SetFlirtFeatureBackfillState(BackfillState::kPending);
+  EXPECT_EQ(pose_graph_->GetFlirtFeatureBackfillState(),
+            BackfillState::kPending);
+
+  pose_graph_->SetFlirtFeatureBackfillState(BackfillState::kFailed);
+  EXPECT_EQ(pose_graph_->GetFlirtFeatureBackfillState(),
+            BackfillState::kFailed);
+
+  pose_graph_->SetFlirtFeatureBackfillState(BackfillState::kReady);
+  EXPECT_EQ(pose_graph_->GetFlirtFeatureBackfillState(),
+            BackfillState::kReady);
+}
+
+TEST_F(PoseGraph2DTest, FlirtSerializationGateKeepsNodeSetStable) {
+  const sensor::RangeData range_data{
+      Eigen::Vector3f::Zero(), point_cloud_, {}};
+  active_submaps_->InsertRangeData(range_data);
+  std::vector<std::shared_ptr<const Submap2D>> insertion_submaps;
+  for (const auto& submap : active_submaps_->submaps()) {
+    insertion_submaps.push_back(submap);
+  }
+  auto constant_data = std::make_shared<const TrajectoryNode::Data>(
+      TrajectoryNode::Data{common::FromUniversal(0),
+                           Eigen::Quaterniond::Identity(),
+                           range_data.returns,
+                           {},
+                           {},
+                           {},
+                           transform::Rigid3d::Identity()});
+
+  pose_graph_->LockFlirtFeatureSerialization();
+  std::promise<void> add_started_promise;
+  auto add_started = add_started_promise.get_future();
+  auto add_finished = std::async(
+      std::launch::async,
+      [this, constant_data, insertion_submaps,
+       add_started_promise = std::move(add_started_promise)]() mutable {
+        add_started_promise.set_value();
+        pose_graph_->AddNode(constant_data, 0, insertion_submaps);
+      });
+  add_started.wait();
+  EXPECT_EQ(add_finished.wait_for(std::chrono::milliseconds(20)),
+            std::future_status::timeout);
+
+  pose_graph_->UnlockFlirtFeatureSerialization();
+  EXPECT_EQ(add_finished.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  add_finished.get();
+  EXPECT_EQ(pose_graph_->GetTrajectoryNodes().SizeOfTrajectoryOrZero(0), 1u);
 }
 
 TEST_F(PoseGraph2DTest, NoMovement) {

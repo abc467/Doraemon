@@ -4,7 +4,7 @@ from unittest import mock
 
 from std_msgs.msg import String
 
-from coverage_task_manager.task_manager import TaskManager
+from coverage_task_manager.task_manager import AppExeTaskRequest, TaskManager
 
 
 class TaskCommandContractTest(unittest.TestCase):
@@ -15,6 +15,7 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._active_run_id = "run_alpha"
         mgr._active_job_id = ""
         mgr._active_schedule_id = ""
+        mgr._mission_store = None
         mgr._phase = "IDLE"
         mgr._mission_state = "IDLE"
         mgr._public_state = "IDLE"
@@ -52,11 +53,14 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._is_dock_supply_owner_phase = lambda: False
         mgr._dock_supply_state = "IDLE"
         mgr._dock_supply_cancel = lambda: None
+        mgr._auto_charge_recovery_exhausted_running = False
         mgr._charge_clears = []
         mgr._clear_charge_monitor = lambda: mgr._charge_clears.append(True)
         mgr._reset_dock_retry_state = lambda: None
         mgr._dock_nav_started_ts = 0.0
         mgr._undock_nav_started_ts = 0.0
+        mgr._dock_stage2_replanning_suppressed = False
+        mgr._dock_stage2_saved_planner_frequency = None
         mgr._repeat_cycle_context = lambda: "job=demo run=run_alpha"
         mgr._repeat_after_charge_enabled = lambda: False
         mgr._dock_supply_state = "IDLE"
@@ -70,6 +74,10 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._charge_last_fresh_ts = 0.0
         mgr._executor_state = "IDLE"
         mgr._get_exec_state = lambda: str(mgr._executor_state)
+        mgr._last_exec_state_seen = ""
+        mgr._job_loops_total = 1
+        mgr._job_loops_done = 0
+        mgr._active_run_loop_index = 1
         mgr.nav = type("Nav", (), {"cancel_all": lambda _self: None})()
         return mgr
 
@@ -577,6 +585,53 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertEqual(mgr._published_states, ["RUNNING"])
         self.assertIn("AUTO_RESUME_CONFIRMED:exec_state=FOLLOW_PATH", mgr._emit_events)
 
+    def test_complete_auto_resuming_if_executor_done_finalizes_normally(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "DONE"
+        mgr._last_exec_state_seen = "DONE"
+        mgr._active_job_id = "job_1"
+        mgr._active_schedule_id = "sched_1"
+        mgr._job_loops_total = 1
+        mgr._job_loops_done = 0
+
+        ok = mgr._complete_auto_resuming_if_executor_done()
+
+        self.assertTrue(ok)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "IDLE")
+        self.assertEqual(mgr._executor_state, "IDLE")
+        self.assertIn("AUTO_RESUME_EXECUTOR_DONE:run=run_alpha", mgr._emit_events)
+        self.assertIn("EXEC_DONE:zone=zone_alpha run=run_alpha", mgr._emit_events)
+        self.assertIn("LOOPS_DONE:status=DONE loops=1/1", mgr._emit_events)
+        self.assertIn("JOB_DONE:id=job_1 schedule=sched_1 status=DONE loops=1/1", mgr._emit_events)
+        self.assertEqual(mgr._published_states, ["IDLE"])
+
+    def test_complete_auto_resuming_if_executor_done_starts_next_loop(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "DONE"
+        mgr._active_job_id = "job_1"
+        mgr._active_schedule_id = "sched_1"
+        mgr._job_loops_total = 2
+        mgr._job_loops_done = 0
+        mgr._new_run_id = lambda: "run_next"
+
+        ok = mgr._complete_auto_resuming_if_executor_done()
+
+        self.assertTrue(ok)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "RUNNING")
+        self.assertEqual(mgr._active_run_id, "run_next")
+        self.assertEqual(mgr._active_run_loop_index, 2)
+        self.assertEqual(mgr._job_loops_done, 1)
+        self.assertIn("AUTO_RESUME_EXECUTOR_DONE:run=run_alpha", mgr._emit_events)
+        self.assertIn("LOOP:job_1 2/2", mgr._emit_events)
+        self.assertEqual(mgr._published_states, ["RUNNING"])
+        self.assertEqual(mgr._exec_cmds, ["start zone_id=zone_alpha run_id=run_next"])
+
     def test_handle_auto_supply_done_without_repeat_starts_auto_resuming(self):
         mgr = self._manager()
         mgr._phase = "AUTO_SUPPLY"
@@ -620,6 +675,29 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertEqual(retry_calls, [(False, "failed")])
         self.assertEqual(mgr._faults, [])
 
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=123.0)
+    def test_handle_manual_supply_ready_to_exit_starts_managed_undock(self, _time_now):
+        mgr = self._manager()
+        mgr._phase = "MANUAL_SUPPLY"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "READY_TO_EXIT"
+        mgr._is_dock_supply_owner_phase = lambda: True
+        exit_calls = []
+        mgr._dock_supply_request_exit = lambda: exit_calls.append(True) or True
+
+        should_continue = mgr._handle_dock_supply_phase()
+
+        self.assertFalse(should_continue)
+        self.assertEqual(exit_calls, [True])
+        self.assertEqual(mgr._phase, "MANUAL_UNDOCKING")
+        self.assertEqual(mgr._undock_nav_started_ts, 123.0)
+        self.assertEqual(mgr._published_states, ["MANUAL_UNDOCKING"])
+        self.assertIn(
+            "SUPPLY_STATE_READY_TO_EXIT:job=demo run=run_alpha repeat_enabled=0",
+            mgr._emit_events,
+        )
+        self.assertIn("UNDOCK_EXIT_REQUESTED", mgr._emit_events)
+
     @mock.patch("coverage_task_manager.task_manager.time.time", return_value=100.0)
     def test_handle_task_side_charge_phase_manual_charge_reaches_threshold_returns_idle(self, _time_now):
         mgr = self._manager()
@@ -659,6 +737,183 @@ class TaskCommandContractTest(unittest.TestCase):
             mgr._charge_faults,
             [("ERROR_UNDOCK_PREP", "supply_cancel_timeout", False)],
         )
+
+    def test_auto_charge_redock_uses_supply_retreat_then_restarts_stage1(self):
+        mgr = self._manager()
+        mgr._auto_charge_redock_running = True
+        mgr._auto_charge_redock_settle_s = 0.0
+        mgr._auto_charge_redock_retreat_timeout_s = 60.0
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr._dock_supply_exit_inflight = False
+        calls = []
+        mgr._dock_supply_cancel = lambda: calls.append("cancel")
+        mgr._dock_supply_recovery_retreat = lambda: calls.append("retreat") or True
+        mgr._start_dock_sequence = lambda manual=False, reset_retry_state=True: (
+            calls.append(("stage1", bool(manual), bool(reset_retry_state))) or True
+        )
+
+        wait_calls = 0
+
+        def wait_for_state(_timeout_s, cond_fn, sleep_s=0.1):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 1:
+                mgr._dock_supply_state = "CANCELED"
+                return cond_fn()
+            self.assertFalse(cond_fn())  # stale CANCELED must not finish the new retreat
+            mgr._dock_supply_state = "RECOVERY_BACKING"
+            self.assertFalse(cond_fn())
+            mgr._dock_supply_state = "RECOVERY_BACK_DONE"
+            return cond_fn()
+
+        mgr._wait = wait_for_state
+
+        mgr._run_auto_charge_redock()
+
+        self.assertEqual(calls, ["cancel", "retreat", ("stage1", False, False)])
+        self.assertEqual(wait_calls, 2)
+        self.assertFalse(mgr._auto_charge_redock_running)
+        self.assertEqual(mgr._dock_supply_state, "IDLE")
+        self.assertIn("AUTO_CHARGE_REDOCK_RESTARTED", mgr._emit_events)
+        self.assertEqual(mgr._charge_faults, [])
+
+    def test_auto_charge_redock_service_callback_returns_without_lock_reentry(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_SUPPLY"
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr._dock_supply_exit_inflight = False
+        mgr._auto_charge_redock_running = False
+
+        class RecordingPublisher:
+            def __init__(self):
+                self.messages = []
+
+            def publish(self, msg):
+                self.messages.append(str(msg.data))
+
+        event_pub = RecordingPublisher()
+        mgr._event_pub = event_pub
+        mgr._emit = TaskManager._emit.__get__(mgr, TaskManager)
+        mgr._publish_state = lambda state: mgr._published_states.append(str(state))
+
+        recovery_thread = mock.Mock()
+        response = []
+        real_thread_class = threading.Thread
+        with mock.patch(
+            "coverage_task_manager.task_manager.threading.Thread",
+            return_value=recovery_thread,
+        ):
+            caller = real_thread_class(
+                target=lambda: response.append(mgr._on_auto_charge_redock(None)),
+                daemon=True,
+            )
+            caller.start()
+            caller.join(0.5)
+
+        self.assertFalse(caller.is_alive(), "redock service callback deadlocked")
+        self.assertEqual(len(response), 1)
+        self.assertTrue(response[0].success)
+        self.assertEqual(mgr._phase, "AUTO_CHARGE_REDOCKING")
+        self.assertTrue(mgr._auto_charge_redock_running)
+        self.assertEqual(
+            event_pub.messages,
+            ["AUTO_CHARGE_REDOCK_ACCEPTED:state=CHARGE_CONFIRMED retreat=dock_supply"],
+        )
+        self.assertEqual(mgr._published_states, ["AUTO_CHARGE_REDOCKING"])
+        recovery_thread.start.assert_called_once_with()
+
+    def test_auto_charge_recovery_exhausted_retreats_then_latches_fault(self):
+        mgr = self._manager()
+        mgr._auto_charge_recovery_exhausted_running = True
+        calls = []
+        mgr._cancel_supply_and_run_recovery_retreat = lambda: calls.append("retreat")
+
+        mgr._run_auto_charge_recovery_exhausted()
+
+        self.assertEqual(calls, ["retreat"])
+        self.assertFalse(mgr._auto_charge_recovery_exhausted_running)
+        self.assertIn("AUTO_CHARGE_RECOVERY_EXHAUSTED_RETREAT_DONE", mgr._emit_events)
+        self.assertEqual(
+            mgr._charge_faults,
+            [
+                (
+                    "ERROR_CHARGE_RECOVERY_EXHAUSTED",
+                    "charge_recovery_exhausted",
+                    False,
+                )
+            ],
+        )
+
+    def test_auto_charge_recovery_exhausted_faults_even_when_retreat_fails(self):
+        mgr = self._manager()
+        mgr._auto_charge_recovery_exhausted_running = True
+        cancel_calls = []
+        mgr._dock_supply_cancel = lambda: cancel_calls.append(True)
+
+        def fail_retreat():
+            raise RuntimeError("blocked path")
+
+        mgr._cancel_supply_and_run_recovery_retreat = fail_retreat
+
+        mgr._run_auto_charge_recovery_exhausted()
+
+        self.assertEqual(cancel_calls, [True])
+        self.assertFalse(mgr._auto_charge_recovery_exhausted_running)
+        self.assertEqual(
+            mgr._charge_faults,
+            [
+                (
+                    "ERROR_CHARGE_RECOVERY_EXHAUSTED",
+                    "charge_recovery_exhausted:retreat_failed:blocked path",
+                    False,
+                )
+            ],
+        )
+
+    def test_actuator_debug_is_busy_and_blocks_low_soc_auto_charge(self):
+        mgr = self._manager()
+        mgr._executor_state = "ACTUATOR_DEBUG"
+        mgr._task_busy = TaskManager._task_busy.__get__(mgr, TaskManager)
+        mgr._is_mission_running = TaskManager._is_mission_running.__get__(mgr, TaskManager)
+        mgr.auto_charge_enable = True
+        mgr._armed = True
+        mgr.low_soc = 0.2
+        mgr.trigger_when_idle = True
+
+        self.assertTrue(mgr._task_busy())
+        self.assertFalse(mgr._should_trigger_auto_charge(0.1))
+
+    def test_actuator_debug_rejects_task_resume_and_motion_commands(self):
+        mgr = self._manager()
+        mgr._executor_state = "ACTUATOR_DEBUG"
+
+        for command in (
+            AppExeTaskRequest.START,
+            AppExeTaskRequest.CONTINUE,
+            AppExeTaskRequest.RETURN,
+        ):
+            allowed, message = mgr._ensure_exe_task_allowed(int(command))
+            self.assertFalse(allowed)
+            self.assertIn("actuator debug lease is active", message)
+
+        resumed, resume_message = mgr._resume_current_task(run_id="run_alpha")
+        self.assertFalse(resumed)
+        self.assertIn("actuator debug lease is active", resume_message)
+
+        returned, return_message = mgr._start_manual_return()
+        self.assertFalse(returned)
+        self.assertIn("actuator debug lease is active", return_message)
+
+    def test_direct_dock_dispatch_is_rejected_if_debug_lease_wins_race(self):
+        mgr = self._manager()
+        mgr._executor_state = "ACTUATOR_DEBUG"
+        mgr._armed = False
+
+        started = mgr._start_dock_sequence(manual=True)
+
+        self.assertFalse(started)
+        self.assertTrue(mgr._armed)
+        self.assertIn("DOCK_REJECT:ACTUATOR_DEBUG", mgr._emit_events)
 
 
 if __name__ == "__main__":

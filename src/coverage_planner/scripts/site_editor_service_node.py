@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 import json
 import math
@@ -84,6 +85,7 @@ from coverage_planner.map_alignment import (
     MapAlignment,
     aligned_to_map_point,
     aligned_to_map_polygon,
+    aligned_to_map_pose,
     make_axis_aligned_rect,
     map_to_aligned_point,
     map_to_aligned_polygon,
@@ -253,6 +255,8 @@ _PREVIEW_COVERAGE_RESPONSE_FIELDS = [
     "map_region",
     "preview_path",
     "display_preview_path",
+    "preview_paths",
+    "display_preview_paths",
     "entry_pose",
     "display_entry_pose",
     "estimated_length_m",
@@ -286,6 +290,8 @@ _COMMIT_COVERAGE_RESPONSE_FIELDS = [
     "map_region",
     "preview_path",
     "display_preview_path",
+    "preview_paths",
+    "display_preview_paths",
     "entry_pose",
     "display_entry_pose",
     "estimated_length_m",
@@ -316,6 +322,8 @@ _GET_ZONE_PLAN_PATH_RESPONSE_FIELDS = [
     "storage_frame",
     "display_path",
     "map_path",
+    "display_paths",
+    "map_paths",
     "display_entry_pose",
     "entry_pose",
     "estimated_length_m",
@@ -376,6 +384,10 @@ def _xy_to_ring(points: Sequence[Sequence[float]]) -> PolygonRing:
     msg = PolygonRing()
     msg.points = [_point32(float(pt[0]), float(pt[1])) for pt in _open_ring(points)]
     return msg
+
+
+def _xy_paths_to_rings(paths: Sequence[Sequence[Sequence[float]]]) -> List[PolygonRing]:
+    return [_xy_to_ring(path) for path in (paths or []) if len(_open_ring(path)) >= 2]
 
 
 def _region_to_lists(region: PolygonRegion) -> Tuple[str, List[XY], List[List[XY]]]:
@@ -874,6 +886,8 @@ class SiteEditorServiceNode:
                         "map_region": AppPolygonRegion,
                         "preview_path": AppPolygonRing,
                         "display_preview_path": AppPolygonRing,
+                        "preview_paths": AppPolygonRing,
+                        "display_preview_paths": AppPolygonRing,
                     },
                     features=["coverage_region_preview", "cleanrobot_app_msgs_parallel"],
                     validations=[
@@ -906,6 +920,8 @@ class SiteEditorServiceNode:
                         "map_region": AppPolygonRegion,
                         "preview_path": AppPolygonRing,
                         "display_preview_path": AppPolygonRing,
+                        "preview_paths": AppPolygonRing,
+                        "display_preview_paths": AppPolygonRing,
                     },
                     features=[
                         "coverage_region_commit",
@@ -965,7 +981,12 @@ class SiteEditorServiceNode:
                     contract_name="zone_plan_path_service_app",
                     service_cls=AppGetZonePlanPath,
                     response_cls=AppGetZonePlanPathResponse,
-                    dependencies={"display_path": AppPolygonRing, "map_path": AppPolygonRing},
+                    dependencies={
+                        "display_path": AppPolygonRing,
+                        "map_path": AppPolygonRing,
+                        "display_paths": AppPolygonRing,
+                        "map_paths": AppPolygonRing,
+                    },
                     features=["zone_plan_path_projection", "cleanrobot_app_msgs_parallel"],
                     validations=[
                         ("AppPolygonRing", AppPolygonRing, _POLYGON_RING_FIELDS, None),
@@ -1132,6 +1153,8 @@ class SiteEditorServiceNode:
                         "map_region": SitePolygonRegion,
                         "preview_path": SitePolygonRing,
                         "display_preview_path": SitePolygonRing,
+                        "preview_paths": SitePolygonRing,
+                        "display_preview_paths": SitePolygonRing,
                     },
                     features=["coverage_region_preview", "cleanrobot_site_msgs_canonical"],
                     validations=[
@@ -1164,6 +1187,8 @@ class SiteEditorServiceNode:
                         "map_region": SitePolygonRegion,
                         "preview_path": SitePolygonRing,
                         "display_preview_path": SitePolygonRing,
+                        "preview_paths": SitePolygonRing,
+                        "display_preview_paths": SitePolygonRing,
                     },
                     features=["coverage_region_commit", "zone_version_optimistic_concurrency", "cleanrobot_site_msgs_canonical"],
                     validations=[
@@ -1219,7 +1244,12 @@ class SiteEditorServiceNode:
                     contract_name="zone_plan_path_service_site",
                     service_cls=SiteGetZonePlanPath,
                     response_cls=SiteGetZonePlanPathResponse,
-                    dependencies={"display_path": SitePolygonRing, "map_path": SitePolygonRing},
+                    dependencies={
+                        "display_path": SitePolygonRing,
+                        "map_path": SitePolygonRing,
+                        "display_paths": SitePolygonRing,
+                        "map_paths": SitePolygonRing,
+                    },
                     features=["zone_plan_path_projection", "cleanrobot_site_msgs_canonical"],
                     validations=[
                         ("SitePolygonRing", SitePolygonRing, _POLYGON_RING_FIELDS, None),
@@ -1448,6 +1478,14 @@ class SiteEditorServiceNode:
                     self._private_param("min_plannable_span_m", PlannerParams.min_plannable_span_m),
                 ),
                 PlannerParams.min_plannable_span_m,
+            ),
+            min_swath_length_m=_finite_float(
+                self._cfg_value(
+                    cfg,
+                    "min_swath_length_m",
+                    self._private_param("min_swath_length_m", PlannerParams.min_swath_length_m),
+                ),
+                PlannerParams.min_swath_length_m,
             ),
             edge_corner_radius_m=_finite_float(
                 self._cfg_value(
@@ -1890,6 +1928,8 @@ class SiteEditorServiceNode:
             storage_frame="",
             display_path=PolygonRing(),
             map_path=PolygonRing(),
+            display_paths=[],
+            map_paths=[],
             display_entry_pose=Pose2D(),
             entry_pose=Pose2D(),
             estimated_length_m=0.0,
@@ -1910,6 +1950,7 @@ class SiteEditorServiceNode:
             order = [int(row["block_id"]) for row in (rows or [])]
 
         path_xy: List[XY] = []
+        paths_xy: List[List[XY]] = []
         entry_pose = Pose2D()
         first_entry = True
         for block_id in order:
@@ -1920,6 +1961,7 @@ class SiteEditorServiceNode:
             pts_xy = [(float(p[0]), float(p[1])) for p in pts_xyyaw if len(p) >= 2]
             if not pts_xy:
                 continue
+            paths_xy.append(pts_xy)
             if first_entry:
                 fallback_yaw = float(pts_xyyaw[0][2]) if len(pts_xyyaw[0]) >= 3 else 0.0
                 entry_yaw = block.get("entry_yaw")
@@ -1938,6 +1980,7 @@ class SiteEditorServiceNode:
 
         return {
             "path_xy": path_xy,
+            "paths_xy": paths_xy,
             "entry_pose": entry_pose,
             "estimated_length_m": float(plan_meta.get("total_length_m") or 0.0),
             "plan_profile_name": str(plan_meta.get("plan_profile_name") or ""),
@@ -2718,7 +2761,8 @@ class SiteEditorServiceNode:
 
             overlay = self._load_plan_overlay(active_plan_id)
             map_path = list(overlay.get("path_xy") or [])
-            if not map_path:
+            map_paths = [list(path) for path in (overlay.get("paths_xy") or [])]
+            if not map_path or not map_paths:
                 return self._empty_zone_plan_path_resp(False, "active plan path is empty")
 
             alignment_version = str(zone_msg.alignment_version or "").strip()
@@ -2727,16 +2771,21 @@ class SiteEditorServiceNode:
             warnings = [str(w) for w in (zone_msg.warnings or [])]
 
             display_path = list(map_path)
+            display_paths = [list(path) for path in map_paths]
             display_entry_pose = overlay.get("entry_pose") if isinstance(overlay.get("entry_pose"), Pose2D) else Pose2D()
             entry_pose = overlay.get("entry_pose") if isinstance(overlay.get("entry_pose"), Pose2D) else Pose2D()
 
             if alignment_version and display_frame != storage_frame:
                 alignment = self._resolve_alignment(asset, alignment_version)
                 display_path = map_to_aligned_polygon(map_path, alignment)
+                display_paths = [
+                    map_to_aligned_polygon(path, alignment) for path in map_paths
+                ]
                 dx, dy, dyaw = map_to_aligned_pose(entry_pose.x, entry_pose.y, entry_pose.theta, alignment)
                 display_entry_pose = _pose2d(dx, dy, dyaw)
             elif display_frame == storage_frame:
                 display_path = list(map_path)
+                display_paths = [list(path) for path in map_paths]
                 display_entry_pose = entry_pose
             else:
                 warnings.append("display path falls back to storage frame")
@@ -2753,6 +2802,8 @@ class SiteEditorServiceNode:
                 storage_frame=storage_frame,
                 display_path=_xy_to_ring(display_path),
                 map_path=_xy_to_ring(map_path),
+                display_paths=_xy_paths_to_rings(display_paths),
+                map_paths=_xy_paths_to_rings(map_paths),
                 display_entry_pose=display_entry_pose,
                 entry_pose=entry_pose,
                 estimated_length_m=float(zone_msg.estimated_length_m or overlay.get("estimated_length_m") or 0.0),
@@ -2906,7 +2957,7 @@ class SiteEditorServiceNode:
                 warnings=[],
             )
 
-    def _flatten_preview_path(self, plan_result) -> List[XY]:
+    def _ordered_preview_paths(self, plan_result) -> List[List[XY]]:
         blocks = list(getattr(plan_result, "blocks", []) or [])
         if not blocks:
             return []
@@ -2914,19 +2965,68 @@ class SiteEditorServiceNode:
         order = [int(x) for x in (getattr(plan_result, "exec_order", []) or [])]
         if not order:
             order = [int(getattr(b, "block_id", idx)) for idx, b in enumerate(blocks)]
-        out: List[XY] = []
+        out: List[List[XY]] = []
         for block_id in order:
             block = block_map.get(int(block_id))
             if block is None:
                 continue
             pts = [(float(p[0]), float(p[1])) for p in (getattr(block, "path_xy", []) or [])]
-            if not pts:
-                continue
-            if out and pts and abs(out[-1][0] - pts[0][0]) < 1e-6 and abs(out[-1][1] - pts[0][1]) < 1e-6:
+            if len(pts) >= 2:
+                out.append(pts)
+        return out
+
+    def _flatten_preview_path(self, plan_result) -> List[XY]:
+        """Legacy single-ring projection; new clients must use per-block paths."""
+        out: List[XY] = []
+        for pts in self._ordered_preview_paths(plan_result):
+            if out and abs(out[-1][0] - pts[0][0]) < 1e-6 and abs(out[-1][1] - pts[0][1]) < 1e-6:
                 out.extend(pts[1:])
             else:
                 out.extend(pts)
         return out
+
+    def _regions_map_to_aligned(
+        self,
+        regions: Sequence[Dict[str, object]],
+        alignment: MapAlignment,
+    ) -> List[Dict[str, object]]:
+        out: List[Dict[str, object]] = []
+        for region in regions or []:
+            outer = map_to_aligned_polygon(list((region or {}).get("outer") or []), alignment)
+            holes = [
+                map_to_aligned_polygon(list(ring or []), alignment)
+                for ring in list((region or {}).get("holes") or [])
+            ]
+            if len(outer) >= 3:
+                out.append({"outer": outer, "holes": holes})
+        return out
+
+    def _plan_result_aligned_to_map(self, plan_result, alignment: MapAlignment):
+        """Convert a site-axis planner result back to canonical raw-map storage."""
+        result = deepcopy(plan_result)
+        result.frame_id = str(alignment.raw_frame or "map")
+        for block in list(getattr(result, "blocks", []) or []):
+            block.path_xy = aligned_to_map_polygon(
+                list(getattr(block, "path_xy", []) or []),
+                alignment,
+            )
+            entry = tuple(getattr(block, "entry_xyyaw", ()) or ())
+            if len(entry) >= 3:
+                block.entry_xyyaw = aligned_to_map_pose(
+                    float(entry[0]), float(entry[1]), float(entry[2]), alignment
+                )
+            exit_pose = tuple(getattr(block, "exit_xyyaw", ()) or ())
+            if len(exit_pose) >= 3:
+                block.exit_xyyaw = aligned_to_map_pose(
+                    float(exit_pose[0]),
+                    float(exit_pose[1]),
+                    float(exit_pose[2]),
+                    alignment,
+                )
+            # Debug geometry is not part of the persisted/runtime path contract.
+            # Keeping untransformed debug points would be worse than omitting them.
+            block.debug = None
+        return result
 
     def _plan_region_preview(
         self,
@@ -3010,9 +3110,19 @@ class SiteEditorServiceNode:
             }
 
         planner_params = self._planner_params_for_region(map_outer, warnings)
-        frame_id = str(alignment.raw_frame or asset.get("frame_id") or "map")
-        planner_regions = self._filter_effective_regions_for_planner(
+        planning_frame_id = str(
+            alignment.aligned_frame or alignment.raw_frame or asset.get("frame_id") or "map"
+        )
+        # F2C evaluates candidate swath angles against the coordinate axes. Plan
+        # in site_map so its 0/90-degree candidates follow the building axes,
+        # then convert every block back to raw map coordinates for persistence
+        # and execution.
+        planner_regions = self._regions_map_to_aligned(
             zone_constraints.effective_regions,
+            alignment,
+        )
+        planner_regions = self._filter_effective_regions_for_planner(
+            planner_regions,
             planner_params,
             warnings,
         )
@@ -3031,9 +3141,9 @@ class SiteEditorServiceNode:
             }
 
         primary = run_plan_coverage_isolated(
-            frame_id=frame_id,
-            outer=map_outer,
-            holes=map_holes,
+            frame_id=planning_frame_id,
+            outer=disp_outer,
+            holes=disp_holes,
             robot_spec=self.default_robot_spec,
             params=planner_params,
             effective_regions=planner_regions,
@@ -3070,9 +3180,9 @@ class SiteEditorServiceNode:
                     "degraded hole-free preview fallback used; commit still requires primary planner success"
                 )
                 fallback = run_plan_coverage_isolated(
-                    frame_id=frame_id,
-                    outer=map_outer,
-                    holes=map_holes,
+                    frame_id=planning_frame_id,
+                    outer=disp_outer,
+                    holes=disp_holes,
                     robot_spec=self.default_robot_spec,
                     params=planner_params,
                     effective_regions=fallback_regions,
@@ -3120,28 +3230,44 @@ class SiteEditorServiceNode:
                 "planner_params": planner_params,
             }
 
-        preview_path_map = self._flatten_preview_path(plan_result)
-        preview_path_disp = map_to_aligned_polygon(preview_path_map, alignment)
+        display_plan_result = plan_result
+        map_plan_result = self._plan_result_aligned_to_map(display_plan_result, alignment)
+        preview_paths_display = self._ordered_preview_paths(display_plan_result)
+        preview_paths_map = self._ordered_preview_paths(map_plan_result)
+        preview_path_disp = self._flatten_preview_path(display_plan_result)
+        preview_path_map = self._flatten_preview_path(map_plan_result)
 
         entry_pose = Pose2D()
         display_entry_pose = Pose2D()
-        blocks = list(getattr(plan_result, "blocks", []) or [])
-        order = [int(x) for x in (getattr(plan_result, "exec_order", []) or [])]
-        if blocks:
-            block_map = {int(getattr(b, "block_id", idx)): b for idx, b in enumerate(blocks)}
-            first = block_map.get(order[0]) if order else blocks[0]
-            entry_xyyaw = tuple(getattr(first, "entry_xyyaw", ()) or ())
-            if len(entry_xyyaw) >= 3:
-                entry_pose = _pose2d(float(entry_xyyaw[0]), float(entry_xyyaw[1]), float(entry_xyyaw[2]))
-                dx, dy, dyaw = map_to_aligned_pose(
-                    float(entry_xyyaw[0]),
-                    float(entry_xyyaw[1]),
-                    float(entry_xyyaw[2]),
-                    alignment,
+        display_blocks = list(getattr(display_plan_result, "blocks", []) or [])
+        map_blocks = list(getattr(map_plan_result, "blocks", []) or [])
+        order = [int(x) for x in (getattr(display_plan_result, "exec_order", []) or [])]
+        if display_blocks and map_blocks:
+            display_block_map = {
+                int(getattr(b, "block_id", idx)): b for idx, b in enumerate(display_blocks)
+            }
+            map_block_map = {
+                int(getattr(b, "block_id", idx)): b for idx, b in enumerate(map_blocks)
+            }
+            first_id = order[0] if order else int(getattr(display_blocks[0], "block_id", 0))
+            display_first = display_block_map.get(first_id, display_blocks[0])
+            map_first = map_block_map.get(first_id, map_blocks[0])
+            display_entry = tuple(getattr(display_first, "entry_xyyaw", ()) or ())
+            map_entry = tuple(getattr(map_first, "entry_xyyaw", ()) or ())
+            if len(display_entry) >= 3:
+                display_entry_pose = _pose2d(
+                    float(display_entry[0]),
+                    float(display_entry[1]),
+                    float(display_entry[2]),
                 )
-                display_entry_pose = _pose2d(dx, dy, dyaw)
+            if len(map_entry) >= 3:
+                entry_pose = _pose2d(
+                    float(map_entry[0]), float(map_entry[1]), float(map_entry[2])
+                )
 
-        estimated_length_m = float(getattr(plan_result, "total_length_m", 0.0) or 0.0)
+        estimated_length_m = float(
+            getattr(map_plan_result, "total_length_m", 0.0) or 0.0
+        )
         estimated_duration_s = float(estimated_length_m / self.preview_nominal_speed_mps) if self.preview_nominal_speed_mps > 1e-6 else 0.0
         warnings.append("estimated duration uses nominal speed %.2f m/s" % float(self.preview_nominal_speed_mps))
 
@@ -3160,12 +3286,14 @@ class SiteEditorServiceNode:
             "display_region": _lists_to_region(str(alignment.aligned_frame or self.default_aligned_frame), disp_outer, disp_holes),
             "preview_path_map": preview_path_map,
             "preview_path_display": preview_path_disp,
+            "preview_paths_map": preview_paths_map,
+            "preview_paths_display": preview_paths_display,
             "entry_pose": entry_pose,
             "display_entry_pose": display_entry_pose,
             "estimated_length_m": estimated_length_m,
             "estimated_duration_s": estimated_duration_s,
             "constraint_version": str(zone_constraints.constraint_version or ""),
-            "plan_result": plan_result,
+            "plan_result": map_plan_result,
             "planner_params": planner_params,
         }
 
@@ -3184,6 +3312,10 @@ class SiteEditorServiceNode:
             map_region=preview.get("map_region") if isinstance(preview.get("map_region"), PolygonRegion) else PolygonRegion(),
             preview_path=_xy_to_ring(preview.get("preview_path_map") or []),
             display_preview_path=_xy_to_ring(preview.get("preview_path_display") or []),
+            preview_paths=_xy_paths_to_rings(preview.get("preview_paths_map") or []),
+            display_preview_paths=_xy_paths_to_rings(
+                preview.get("preview_paths_display") or []
+            ),
             entry_pose=preview.get("entry_pose") if isinstance(preview.get("entry_pose"), Pose2D) else Pose2D(),
             display_entry_pose=preview.get("display_entry_pose") if isinstance(preview.get("display_entry_pose"), Pose2D) else Pose2D(),
             estimated_length_m=float(preview.get("estimated_length_m") or 0.0),
@@ -3228,6 +3360,8 @@ class SiteEditorServiceNode:
                 map_region=PolygonRegion(),
                 preview_path=PolygonRing(),
                 display_preview_path=PolygonRing(),
+                preview_paths=[],
+                display_preview_paths=[],
                 entry_pose=Pose2D(),
                 display_entry_pose=Pose2D(),
                 estimated_length_m=0.0,
@@ -3276,6 +3410,10 @@ class SiteEditorServiceNode:
                     map_region=preview.get("map_region") if isinstance(preview.get("map_region"), PolygonRegion) else PolygonRegion(),
                     preview_path=_xy_to_ring(preview.get("preview_path_map") or []),
                     display_preview_path=_xy_to_ring(preview.get("preview_path_display") or []),
+                    preview_paths=_xy_paths_to_rings(preview.get("preview_paths_map") or []),
+                    display_preview_paths=_xy_paths_to_rings(
+                        preview.get("preview_paths_display") or []
+                    ),
                     entry_pose=preview.get("entry_pose") if isinstance(preview.get("entry_pose"), Pose2D) else Pose2D(),
                     display_entry_pose=preview.get("display_entry_pose") if isinstance(preview.get("display_entry_pose"), Pose2D) else Pose2D(),
                     estimated_length_m=float(preview.get("estimated_length_m") or 0.0),
@@ -3317,6 +3455,10 @@ class SiteEditorServiceNode:
                     map_region=preview.get("map_region") if isinstance(preview.get("map_region"), PolygonRegion) else PolygonRegion(),
                     preview_path=_xy_to_ring(preview.get("preview_path_map") or []),
                     display_preview_path=_xy_to_ring(preview.get("preview_path_display") or []),
+                    preview_paths=_xy_paths_to_rings(preview.get("preview_paths_map") or []),
+                    display_preview_paths=_xy_paths_to_rings(
+                        preview.get("preview_paths_display") or []
+                    ),
                     entry_pose=preview.get("entry_pose") if isinstance(preview.get("entry_pose"), Pose2D) else Pose2D(),
                     display_entry_pose=preview.get("display_entry_pose") if isinstance(preview.get("display_entry_pose"), Pose2D) else Pose2D(),
                     estimated_length_m=float(preview.get("estimated_length_m") or 0.0),
@@ -3348,6 +3490,10 @@ class SiteEditorServiceNode:
                     map_region=preview.get("map_region") if isinstance(preview.get("map_region"), PolygonRegion) else PolygonRegion(),
                     preview_path=_xy_to_ring(preview.get("preview_path_map") or []),
                     display_preview_path=_xy_to_ring(preview.get("preview_path_display") or []),
+                    preview_paths=_xy_paths_to_rings(preview.get("preview_paths_map") or []),
+                    display_preview_paths=_xy_paths_to_rings(
+                        preview.get("preview_paths_display") or []
+                    ),
                     entry_pose=preview.get("entry_pose") if isinstance(preview.get("entry_pose"), Pose2D) else Pose2D(),
                     display_entry_pose=preview.get("display_entry_pose") if isinstance(preview.get("display_entry_pose"), Pose2D) else Pose2D(),
                     estimated_length_m=float(preview.get("estimated_length_m") or 0.0),
@@ -3422,6 +3568,10 @@ class SiteEditorServiceNode:
                 map_region=preview.get("map_region") if isinstance(preview.get("map_region"), PolygonRegion) else PolygonRegion(),
                 preview_path=_xy_to_ring(preview.get("preview_path_map") or []),
                 display_preview_path=_xy_to_ring(preview.get("preview_path_display") or []),
+                preview_paths=_xy_paths_to_rings(preview.get("preview_paths_map") or []),
+                display_preview_paths=_xy_paths_to_rings(
+                    preview.get("preview_paths_display") or []
+                ),
                 entry_pose=preview.get("entry_pose") if isinstance(preview.get("entry_pose"), Pose2D) else Pose2D(),
                 display_entry_pose=preview.get("display_entry_pose") if isinstance(preview.get("display_entry_pose"), Pose2D) else Pose2D(),
                 estimated_length_m=float(preview.get("estimated_length_m") or 0.0),
@@ -3445,6 +3595,8 @@ class SiteEditorServiceNode:
                 map_region=PolygonRegion(),
                 preview_path=PolygonRing(),
                 display_preview_path=PolygonRing(),
+                preview_paths=[],
+                display_preview_paths=[],
                 entry_pose=Pose2D(),
                 display_entry_pose=Pose2D(),
                 estimated_length_m=0.0,

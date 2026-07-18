@@ -587,6 +587,33 @@ class SlamApiStateControllerTest(unittest.TestCase):
             list(msg.blocking_reasons),
         )
 
+    @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
+    @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
+    def test_build_state_prioritizes_current_confirmed_loss_episode_and_reason(
+        self, get_param, time_now, _scope, _identity
+    ):
+        time_now.return_value = mock.Mock()
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/mode": "localization",
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "manual_assist_required",
+            "/cartographer/runtime/localization_valid": False,
+            "/cartographer/runtime/localization_stamp": 200.0,
+            "/cartographer/runtime/localization_lost_episode": "12",
+            "/cartographer/runtime/localization_lost_reason": "confirmed_lost_recovery_failed",
+            "/cartographer/runtime/localization_lost_stamp": 200.0,
+        }.get(key, default)
+
+        msg = self.controller.build_state(robot_id="local_robot", refresh_map_identity=False)
+
+        self.assertTrue(msg.manual_assist_required)
+        self.assertEqual(
+            msg.blocking_reason,
+            "SLAM_LOCALIZATION_LOST episode=12 reason=confirmed_lost_recovery_failed",
+        )
+
     def test_active_job_state_ignores_finished_job(self):
         job = SlamJobState()
         job.job_id = "job_1"

@@ -15,7 +15,7 @@
 POSE_GRAPH = {
   optimize_every_n_nodes = 20,
   constraint_builder = {
-    sampling_ratio = 0.1, -- 临时提高约束采样，观察 pure localization 能否形成地图约束
+    sampling_ratio = 0.1, -- 每个 frozen submap 独立均匀采样，外层近邻调度限制候选数量
     max_constraint_distance = 5.0, -- 临时放宽约束距离，给漂移后的后端匹配留搜索余量
     min_score = 0.62,
     global_localization_min_score = 0.65,
@@ -84,7 +84,7 @@ POSE_GRAPH = {
     },
   },
   max_num_final_iterations = 200,
-  global_sampling_ratio = 0.05, -- ORI:0.05
+  global_sampling_ratio = 0.05, -- active->frozen 由确定性轮询覆盖，不受此通用采样器限制
   log_residual_histograms = false,
   global_constraint_search_after_n_seconds = 10.,
    --overlapping_submaps_trimmer_2d = {

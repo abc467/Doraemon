@@ -44,6 +44,8 @@ float32 dock_score_threshold
 bool dock_score_lower_is_better
 
 float32 dock_target_dist
+float32 dock_xy_tolerance
+float32 dock_success_threshold
 float32 stage2_min_extra_dist_m
 float32 stage2_min_dock_pose_x
 float32 stage2_abs_y_max

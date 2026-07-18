@@ -15,6 +15,8 @@ string display_frame
 string storage_frame
 PolygonRing display_path
 PolygonRing map_path
+PolygonRing[] display_paths
+PolygonRing[] map_paths
 geometry_msgs/Pose2D display_entry_pose
 geometry_msgs/Pose2D entry_pose
 float64 estimated_length_m

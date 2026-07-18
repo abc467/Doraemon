@@ -14,7 +14,7 @@ obstacle_layer:
   raytrace_range: 5.0
   track_unknown_space: true
   combination_method: 1
-  observation_sources: laser_scan_sensor left_cam_source right_cam_source
+  observation_sources: laser_scan_sensor left_cam_source right_cam_source up_cam_source
 
   laser_scan_sensor:
     data_type: LaserScan
@@ -27,7 +27,10 @@ obstacle_layer:
     data_type: PointCloud2
     topic: /left/obstacle_2d
     marking: true
-    clearing: true
+    # obstacle_2d is an obstacle-only synthetic cloud; keep laser as the
+    # free-space clearing source so sparse projected obstacle points do not
+    # accidentally raytrace away other obstacles.
+    clearing: false
     min_obstacle_height: -0.5
     max_obstacle_height: 2.0
     obstacle_range: 2.5
@@ -37,7 +40,7 @@ obstacle_layer:
     data_type: PointCloud2
     topic: /right/obstacle_2d
     marking: true
-    clearing: true
+    clearing: false
     min_obstacle_height: -0.5
     max_obstacle_height: 2.0
     obstacle_range: 2.5
@@ -47,7 +50,7 @@ obstacle_layer:
     data_type: PointCloud2
     topic: /up/obstacle_2d
     marking: true
-    clearing: true
+    clearing: false
     min_obstacle_height: -0.5
     max_obstacle_height: 2.0
     obstacle_range: 2.5
@@ -57,7 +60,7 @@ inflation_layer:
   enabled: true
   # The padded front overhang is 0.6815 m from the planning origin. Keep the
   # inflation field beyond the body so MPPI starts reacting before contact.
-  cost_scaling_factor: 3.0
+  cost_scaling_factor: 2.5
   inflation_radius: 1.0
 
 keepout_constraint_layer:

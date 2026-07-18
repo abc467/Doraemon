@@ -8,27 +8,27 @@ This node encapsulates the real-robot workflow:
      unless station_status[11] already reports AGV in-place
   2) Station IR in-place check
   3) Optional mechanical connect (legacy cylinder/rod flow)
-  4) Drain sewage if needed
-  5) Refill clean water if needed
-  6) Enable charge (robot relay + station charger)
-  7) Wait until target SOC
-  8) Disable charge
-  9) Optional mechanical disconnect (legacy cylinder/rod flow)
+  4) Enable charge (robot relay + station charger)
+  5) Wait until target SOC and disable charge
+  6) Drain sewage until a fresh sewage level reports zero, then settle in place
+  7) Optional refill (disabled in the production configuration)
+  8) Optional mechanical disconnect (legacy cylinder/rod flow)
 
 Temporary fallback:
   - When `~direct_charge_after_precise_docking` is enabled, the workflow will
-    start charging immediately after precise docking succeeds, skipping station
-    IR in-place / drain / refill. This is meant for现场临时兜底验证，不是正式长期流程。
+    start charging immediately after precise docking succeeds and skip the station
+    IR / legacy mechanical-connect checks. Post-charge supply stages still run.
 
 Interfaces:
   - Service  : /dock_supply/start          (std_srvs/Trigger)  -> start workflow (non-blocking)
   - Service  : /dock_supply/cancel         (std_srvs/Trigger)  -> cancel workflow
   - Service  : /dock_supply/set_defer_exit (std_srvs/SetBool)  -> defer exit until /dock_supply/exit
   - Service  : /dock_supply/exit           (std_srvs/Trigger)  -> execute configured exit workflow
+  - Service  : /dock_supply/recovery_retreat (std_srvs/Trigger) -> back out without completing the charge workflow
   - Topic    : /dock_supply/state          (std_msgs/String)   -> IDLE/LOCK_DOCK_POSE/SEARCH_DOCK_POSE/PRECISE_DOCKING/WAIT_STATION_IN_PLACE/
                                                            SEARCH_STATION_IN_PLACE/
-                                                           DRAINING/REFILLING/CHARGE_CMD_SENT/CHARGE_CONFIRMED/READY_TO_EXIT/EXIT_BACKING/
-                                                           DONE/FAILED/CANCELED
+                                                           DRAINING/DRAIN_SETTLING/REFILLING/CHARGE_CMD_SENT/CHARGE_CONFIRMED/READY_TO_EXIT/EXIT_BACKING/
+                                                           RECOVERY_BACKING/RECOVERY_BACK_DONE/DONE/FAILED/CANCELED
 
 Dependencies:
   - /battery_state     (sensor_msgs/BatteryState) published by mcore_tcp_bridge
@@ -36,7 +36,7 @@ Dependencies:
   - /station_status    (robot_platform_msgs/StationStatus) for IR/(legacy rod) states
   - /station/control   (robot_platform_msgs/ControlStation) command to station_tcp_bridge
   - /mcore/control_water_tap (robot_platform_msgs/ControlWaterTap) command to mcore_tcp_bridge
-  - /mcore/charge_enable (std_msgs/Bool) command to mcore_tcp_bridge
+  - /mcore/charge_enable (std_msgs/Bool) command to mcore_velocity_sender_node
 
 NOTE:
   Task layer (coverage_task_manager) is expected to:
@@ -106,10 +106,10 @@ class DockSupplyError(RuntimeError):
 class DockSupplyManager:
     def __init__(self):
         # thresholds
-        self.target_soc = float(rospy.get_param('~target_soc', 0.80))
+        self.target_soc = float(rospy.get_param('~target_soc', 0.95))
         self.target_clean_level = int(rospy.get_param('~target_clean_level', 35))
         self.enable_drain = bool(rospy.get_param('~enable_drain', True))
-        self.enable_refill = bool(rospy.get_param('~enable_refill', True))
+        self.enable_refill = bool(rospy.get_param('~enable_refill', False))
         self.test_continue_on_charge_timeout = bool(rospy.get_param('~test_continue_on_charge_timeout', False))
 
         # docking
@@ -162,8 +162,13 @@ class DockSupplyManager:
 
         # timeouts
         self.rod_timeout_s = float(rospy.get_param('~rod_timeout_s', 25.0))
-        self.drain_timeout_s = float(rospy.get_param('~drain_timeout_s', 600.0))
-        self.refill_timeout_s = float(rospy.get_param('~refill_timeout_s', 600.0))
+        self.drain_timeout_s = max(1.0, float(rospy.get_param('~drain_timeout_s', 600.0)))
+        self.drain_settle_s = max(0.0, float(rospy.get_param('~drain_settle_s', 30.0)))
+        self.refill_timeout_s = max(1.0, float(rospy.get_param('~refill_timeout_s', 600.0)))
+        self.combined_status_wait_s = max(0.1, float(rospy.get_param('~combined_status_wait_s', 5.0)))
+        self.combined_status_stale_timeout_s = max(
+            0.1, float(rospy.get_param('~combined_status_stale_timeout_s', 3.0))
+        )
         self.charge_timeout_s = float(rospy.get_param('~charge_timeout_s', 10800.0))
         self.charge_check_period_s = float(rospy.get_param('~charge_check_period_s', 5.0))
         self.charge_cmd_repeat = max(1, int(rospy.get_param('~charge_cmd_repeat', 2)))
@@ -172,6 +177,7 @@ class DockSupplyManager:
         self.station_charge_enable_interval_s = max(
             0.0, float(rospy.get_param('~station_charge_enable_interval_s', 3.0))
         )
+        self.charge_voltage_confirm_enable = bool(rospy.get_param('~charge_voltage_confirm_enable', False))
         self.charge_confirm_voltage_delta_v = max(
             0.01, float(rospy.get_param('~charge_confirm_voltage_delta_v', 0.20))
         )
@@ -197,6 +203,7 @@ class DockSupplyManager:
 
         self._bat: Optional[BatteryState] = None
         self._comb: Optional[CombinedStatus] = None
+        self._comb_ts: float = 0.0
         self._station: Optional[StationStatus] = None
         self._dock_pose_ts: float = 0.0
         self._dock_pose_times = deque(maxlen=128)
@@ -206,6 +213,10 @@ class DockSupplyManager:
         rospy.Subscriber(self.dock_pose_topic, PoseStamped, self._on_dock_pose, queue_size=20)
 
         self._lock = threading.Lock()
+        # Serialize each charge ON/OFF write against an asynchronous cancel.
+        # The lock is deliberately per write, not around the multi-second
+        # repeat sequence, so cancel can preempt between repeats.
+        self._charge_io_lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._cancel = False
         self._ready_to_exit = False
@@ -216,14 +227,21 @@ class DockSupplyManager:
         self._srv_cancel = rospy.Service('/dock_supply/cancel', Trigger, self._srv_cancel_cb)
         self._srv_set_defer_exit = rospy.Service('/dock_supply/set_defer_exit', SetBool, self._srv_set_defer_exit_cb)
         self._srv_exit = rospy.Service('/dock_supply/exit', Trigger, self._srv_exit_cb)
+        self._srv_recovery_retreat = rospy.Service(
+            '/dock_supply/recovery_retreat', Trigger, self._srv_recovery_retreat_cb
+        )
 
         self._dock_client = actionlib.SimpleActionClient(self.docking_action_name, AutoDockingAction)
         rospy.loginfo(
-            '[SUPPLY] config: mechanical_connect_enable=%s skip_precise_docking_if_station_in_place=%s direct_charge_after_precise_docking=%s drain_timeout=%.1fs refill_timeout=%.1fs charge_timeout=%.1fs continue_on_charge_timeout=%s',
+            '[SUPPLY] config: mechanical_connect_enable=%s skip_precise_docking_if_station_in_place=%s direct_charge_after_precise_docking=%s enable_drain=%s enable_refill=%s drain_timeout=%.1fs drain_settle=%.1fs combined_status_stale=%.1fs refill_timeout=%.1fs charge_timeout=%.1fs continue_on_charge_timeout=%s',
             str(self.mechanical_connect_enable),
             str(self.skip_precise_docking_if_station_in_place),
             str(self.direct_charge_after_precise_docking),
+            str(self.enable_drain),
+            str(self.enable_refill),
             self.drain_timeout_s,
+            self.drain_settle_s,
+            self.combined_status_stale_timeout_s,
             self.refill_timeout_s,
             self.charge_timeout_s,
             str(self.test_continue_on_charge_timeout),
@@ -235,6 +253,7 @@ class DockSupplyManager:
 
     def _on_combined(self, msg: CombinedStatus):
         self._comb = msg
+        self._comb_ts = time.time()
 
     def _on_station(self, msg: StationStatus):
         self._station = msg
@@ -259,7 +278,18 @@ class DockSupplyManager:
     def _srv_cancel_cb(self, _req):
         with self._lock:
             self._cancel = True
-        return TriggerResponse(success=True, message='cancel requested')
+            workflow_active = self._thread is not None and self._thread.is_alive()
+        # Do not wait for the worker to reach its next polling point.  In
+        # particular, charge enable is repeated at multi-second intervals.
+        # Immediate OFF here prevents an active sequence from remaining on
+        # while the worker unwinds; the worker performs the same idempotent
+        # safe abort once it observes the cancellation.
+        if workflow_active:
+            self._safe_abort()
+        return TriggerResponse(
+            success=True,
+            message='cancel requested; safety outputs forced off' if workflow_active else 'already quiescent',
+        )
 
     def _srv_set_defer_exit_cb(self, req):
         enabled = bool(getattr(req, 'data', False))
@@ -281,6 +311,21 @@ class DockSupplyManager:
             self._thread = threading.Thread(target=self._run_exit_workflow, daemon=True)
             self._thread.start()
         return TriggerResponse(success=True, message='exit started')
+
+    def _srv_recovery_retreat_cb(self, _req):
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return TriggerResponse(success=False, message='workflow already running')
+            state = str(self._state or '').strip().upper()
+            if state not in ['IDLE', 'DONE', 'FAILED', 'CANCELED', 'RECOVERY_BACK_DONE'] and not state.startswith('FAILED'):
+                return TriggerResponse(success=False, message='dock_supply is not quiescent: %s' % (state or '-'))
+            self._cancel = False
+            self._thread = threading.Thread(target=self._run_recovery_retreat_workflow, daemon=True)
+            self._thread.start()
+        return TriggerResponse(
+            success=True,
+            message='recovery retreat started: %.2fm at %.2fm/s' % (self.back_distance, self.back_speed),
+        )
 
     # ---------------- helpers ----------------
     def _set_state(self, s: str):
@@ -335,17 +380,35 @@ class DockSupplyManager:
 
     def _charge_enable(self, on: bool):
         desired = bool(on)
+        mcore_repeats = self.charge_cmd_repeat
+        mcore_interval_s = self.charge_cmd_interval_s
         station_repeats = self.station_charge_enable_repeat if desired else 1
         station_interval_s = self.station_charge_enable_interval_s if desired else 0.0
         rospy.loginfo(
-            '[SUPPLY] charge_enable on=%s dispatch: mcore_topic=1 station_topic=%d interval=%.2fs',
+            '[SUPPLY] charge_enable on=%s dispatch: mcore_topic=%d station_topic=%d interval=%.2fs',
             str(desired),
+            mcore_repeats,
             station_repeats,
             station_interval_s,
         )
-        self._charge_pub.publish(Bool(data=desired))
+        for idx in range(mcore_repeats):
+            with self._charge_io_lock:
+                if desired and self._is_canceled():
+                    raise DockSupplyError('CANCELED', 'canceled during charge command dispatch')
+                self._charge_pub.publish(Bool(data=desired))
+            rospy.loginfo(
+                '[SUPPLY] charge_enable mcore tx %d/%d on=%s',
+                idx + 1,
+                mcore_repeats,
+                str(desired),
+            )
+            if idx + 1 < mcore_repeats and mcore_interval_s > 0.0:
+                rospy.sleep(mcore_interval_s)
         for idx in range(station_repeats):
-            self._station_cmd(1, desired)
+            with self._charge_io_lock:
+                if desired and self._is_canceled():
+                    raise DockSupplyError('CANCELED', 'canceled during station charge dispatch')
+                self._station_cmd(1, desired)
             rospy.loginfo(
                 '[SUPPLY] charge_enable station tx %d/%d on=%s',
                 idx + 1,
@@ -491,6 +554,7 @@ class DockSupplyManager:
         self._ensure_dock_pose_locked()
         self._set_state('PRECISE_DOCKING')
         goal = AutoDockingGoal()
+        self.docking_target_dist = float(rospy.get_param('~docking_target_dist', self.docking_target_dist))
         goal.target_dist = float(self.docking_target_dist)
         rospy.loginfo('[SUPPLY] start fine docking target_dist=%.3f', goal.target_dist)
         self._dock_client.send_goal(goal)
@@ -517,21 +581,17 @@ class DockSupplyManager:
             raise DockSupplyError('FAILED_PRECISE_DOCK_POSE_LOST', f'fine docking failed: {msg}')
         raise DockSupplyError('FAILED_PRECISE_DOCK', f'fine docking failed: {msg}')
 
+    def _run_backing_sequence(self, state: str, reason: str):
+        distance = max(0.0, float(self.back_distance))
+        speed = max(1e-3, abs(float(self.back_speed)))
+        self._set_state(state)
+        duration = distance / speed
+        rospy.loginfo('[SUPPLY] %s back %.2fm v=%.2f (%.1fs)', reason, distance, speed, duration)
+        self._drive_for(-speed, 0.0, duration)
+
     def _run_exit_sequence(self):
         if self.exit_mode == 'back':
-            self._set_state('EXIT_BACKING')
-            dur = max(0.0, self.back_distance / max(1e-3, self.back_speed))
-            rospy.loginfo('[SUPPLY] exit back %.2fm v=%.2f (%.1fs)', self.back_distance, self.back_speed, dur)
-            t = Twist()
-            t.linear.x = -abs(self.back_speed)
-            t.angular.z = 0.0
-            t0 = time.time()
-            while time.time() - t0 < dur and not rospy.is_shutdown():
-                if self._is_canceled():
-                    raise DockSupplyError('CANCELED', 'canceled')
-                self._cmd_vel_pub.publish(t)
-                rospy.sleep(0.1)
-            self._stop_move()
+            self._run_backing_sequence('EXIT_BACKING', 'exit')
         else:
             rospy.loginfo('[SUPPLY] exit skipped (exit_mode=%s)', self.exit_mode)
         self._set_state('DONE')
@@ -549,6 +609,24 @@ class DockSupplyManager:
             else:
                 rospy.logerr('[SUPPLY] exit failed: %s', str(e))
                 self._set_state(code or 'FAILED')
+            self._safe_abort()
+
+    def _run_recovery_retreat_workflow(self):
+        try:
+            if self.exit_mode != 'back':
+                raise DockSupplyError('FAILED_RECOVERY_RETREAT', 'exit_mode must be back')
+            self._run_backing_sequence('RECOVERY_BACKING', 'recovery retreat')
+            self._set_state('RECOVERY_BACK_DONE')
+        except Exception as e:
+            if isinstance(e, DockSupplyError):
+                code = e.code
+            else:
+                code = 'FAILED_RECOVERY_RETREAT'
+            if code == 'CANCELED' or 'canceled' in str(e).lower() or self._is_canceled():
+                self._set_state('CANCELED')
+            else:
+                rospy.logerr('[SUPPLY] recovery retreat failed: %s', str(e))
+                self._set_state(code or 'FAILED_RECOVERY_RETREAT')
             self._safe_abort()
 
     def _confirm_charge_started(self, base_v: Optional[float]) -> bool:
@@ -675,32 +753,176 @@ class DockSupplyManager:
             rospy.sleep(0.2)
         raise DockSupplyError('FAILED_MECHANICAL_DISCONNECT', 'rod retract timeout')
 
+    def _latest_combined_level(self, field_name: str) -> Optional[int]:
+        comb = self._comb
+        comb_ts = float(self._comb_ts or 0.0)
+        if comb is None or comb_ts <= 0.0:
+            return None
+        if (time.time() - comb_ts) > self.combined_status_stale_timeout_s:
+            return None
+        try:
+            level = int(getattr(comb, field_name))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if level < 0 or level > 100:
+            return None
+        return level
+
+    def _wait_for_fresh_combined_level(self, field_name: str, failure_code: str) -> int:
+        deadline = time.time() + self.combined_status_wait_s
+        while time.time() < deadline and not rospy.is_shutdown():
+            if self._is_canceled():
+                raise DockSupplyError('CANCELED', 'canceled')
+            level = self._latest_combined_level(field_name)
+            if level is not None:
+                return level
+            rospy.sleep(0.1)
+        raise DockSupplyError(failure_code, '%s data missing, invalid, or stale' % field_name)
+
+    def _run_drain_phase(self) -> None:
+        if not self.enable_drain:
+            rospy.loginfo('[SUPPLY] skip post-charge drain (enable_drain=false)')
+            return
+
+        sewage = self._wait_for_fresh_combined_level('sewage_level', 'FAILED_SEWAGE_STATUS_STALE')
+        if sewage == 0:
+            rospy.loginfo('[SUPPLY] post-charge drain already complete: sewage_level=0')
+            return
+
+        self._set_state('DRAINING')
+        rospy.loginfo('[SUPPLY] post-charge drain start: sewage_level=%d', sewage)
+        drain_outputs_active = False
+        try:
+            self._tap_cmd(3, 1)  # robot sewage valve open
+            drain_outputs_active = True
+            rospy.sleep(0.5)
+            if self._is_canceled():
+                raise DockSupplyError('CANCELED', 'canceled')
+            self._station_cmd(3, True)  # station drain start
+
+            deadline = time.time() + self.drain_timeout_s
+            while time.time() < deadline and not rospy.is_shutdown():
+                if self._is_canceled():
+                    raise DockSupplyError('CANCELED', 'canceled')
+                sewage = self._latest_combined_level('sewage_level')
+                if sewage is None:
+                    raise DockSupplyError(
+                        'FAILED_SEWAGE_STATUS_STALE',
+                        'sewage_level became missing, invalid, or stale during drain',
+                    )
+                if sewage == 0:
+                    rospy.loginfo('[SUPPLY] post-charge drain complete: sewage_level=0')
+                    self._close_drain_outputs()
+                    drain_outputs_active = False
+                    self._run_drain_settle_phase()
+                    return
+                rospy.sleep(0.5)
+            raise DockSupplyError(
+                'FAILED_DRAIN_TIMEOUT',
+                'sewage_level did not reach zero within %.1fs' % self.drain_timeout_s,
+            )
+        finally:
+            if drain_outputs_active:
+                self._close_drain_outputs()
+
+    def _close_drain_outputs(self) -> None:
+        self._station_cmd(3, False)
+        self._tap_cmd(3, 0)
+
+    def _run_drain_settle_phase(self) -> None:
+        if self.drain_settle_s <= 1e-6:
+            return
+        self._set_state('DRAIN_SETTLING')
+        self._stop_move()
+        rospy.loginfo(
+            '[SUPPLY] drain outputs closed; keep robot stopped for %.1fs before exiting',
+            self.drain_settle_s,
+        )
+        deadline = time.monotonic() + self.drain_settle_s
+        while not rospy.is_shutdown():
+            if self._is_canceled():
+                raise DockSupplyError('CANCELED', 'canceled')
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                break
+            rospy.sleep(min(0.2, remaining_s))
+        self._stop_move()
+        rospy.loginfo('[SUPPLY] residual sewage settling complete')
+
+    def _run_refill_phase(self) -> None:
+        if not self.enable_refill:
+            rospy.loginfo('[SUPPLY] skip clean-water refill (enable_refill=false)')
+            return
+
+        clean = self._wait_for_fresh_combined_level('clean_level', 'FAILED_CLEAN_STATUS_STALE')
+        if clean >= self.target_clean_level:
+            rospy.loginfo(
+                '[SUPPLY] clean-water refill already complete: clean_level=%d target=%d',
+                clean,
+                self.target_clean_level,
+            )
+            return
+
+        self._set_state('REFILLING')
+        rospy.loginfo('[SUPPLY] refill clean water level=%d -> target=%d', clean, self.target_clean_level)
+        try:
+            self._tap_cmd(2, 1)
+            rospy.sleep(0.5)
+            if self._is_canceled():
+                raise DockSupplyError('CANCELED', 'canceled')
+            self._station_cmd(11, True)
+            deadline = time.time() + self.refill_timeout_s
+            while time.time() < deadline and not rospy.is_shutdown():
+                if self._is_canceled():
+                    raise DockSupplyError('CANCELED', 'canceled')
+                clean = self._latest_combined_level('clean_level')
+                if clean is None:
+                    raise DockSupplyError(
+                        'FAILED_CLEAN_STATUS_STALE',
+                        'clean_level became missing, invalid, or stale during refill',
+                    )
+                if clean >= self.target_clean_level:
+                    rospy.loginfo('[SUPPLY] clean-water refill complete: clean_level=%d', clean)
+                    return
+                rospy.sleep(0.5)
+            raise DockSupplyError(
+                'FAILED_REFILL_TIMEOUT',
+                'clean_level did not reach %d within %.1fs' % (self.target_clean_level, self.refill_timeout_s),
+            )
+        finally:
+            self._station_cmd(11, False)
+            self._tap_cmd(2, 0)
+
     def _run_charge_phase(self) -> None:
         self._set_state('CHARGE_CMD_SENT')
-        charge_base_v = self._latest_voltage()
+        charge_base_v = self._latest_voltage() if self.charge_voltage_confirm_enable else None
         rospy.loginfo(
-            '[SUPPLY] enable charging... target_soc=%.2f base_v=%s',
+            '[SUPPLY] enable charging... target_soc=%.2f voltage_confirm=%s base_v=%s',
             self.target_soc,
+            str(self.charge_voltage_confirm_enable),
             '%.3f' % charge_base_v if charge_base_v is not None else 'n/a',
         )
         self._charge_enable(True)
         rospy.sleep(1.0)
 
-        confirmed = False
-        for attempt in range(self.charge_confirm_retry_limit + 1):
-            if self._confirm_charge_started(charge_base_v):
-                confirmed = True
-                break
-            if attempt >= self.charge_confirm_retry_limit:
-                break
-            rospy.logwarn(
-                '[SUPPLY] charge not confirmed, resend command attempt=%d/%d',
-                attempt + 1,
-                self.charge_confirm_retry_limit,
-            )
-            self._charge_enable(True)
-        if not confirmed:
-            raise DockSupplyError('FAILED_CHARGE_NOT_CONFIRMED', 'charge not confirmed after retries')
+        if self.charge_voltage_confirm_enable:
+            confirmed = False
+            for attempt in range(self.charge_confirm_retry_limit + 1):
+                if self._confirm_charge_started(charge_base_v):
+                    confirmed = True
+                    break
+                if attempt >= self.charge_confirm_retry_limit:
+                    break
+                rospy.logwarn(
+                    '[SUPPLY] charge not confirmed, resend command attempt=%d/%d',
+                    attempt + 1,
+                    self.charge_confirm_retry_limit,
+                )
+                self._charge_enable(True)
+            if not confirmed:
+                raise DockSupplyError('FAILED_CHARGE_NOT_CONFIRMED', 'charge not confirmed after retries')
+        else:
+            rospy.loginfo('[SUPPLY] charge voltage confirmation disabled; continue after command dispatch')
 
         self._set_state('CHARGE_CONFIRMED')
 
@@ -722,6 +944,7 @@ class DockSupplyManager:
     # ---------------- main workflow ----------------
     def _run(self):
         self._set_state('RUNNING')
+        mechanical_connected = False
         try:
             # 1) fine docking (or skip if already in station IR in-place)
             self._run_precise_docking()
@@ -736,7 +959,7 @@ class DockSupplyManager:
 
             if self.direct_charge_after_precise_docking:
                 rospy.logwarn(
-                    '[SUPPLY] temporary override enabled: start charging immediately after precise docking; skip station in-place / supply steps'
+                    '[SUPPLY] direct-charge mode: skip station in-place and legacy mechanical-connect checks; post-charge supply remains enabled'
                 )
             else:
                 # 2) IR in-place
@@ -746,75 +969,29 @@ class DockSupplyManager:
                 if self.mechanical_connect_enable:
                     self._set_state('MECHANICAL_CONNECT')
                     self._wait_for_rod_connected()
+                    mechanical_connected = True
                 else:
                     rospy.loginfo('[SUPPLY] skip mechanical connect (mechanical_connect_enable=false)')
 
-                # 4) drain sewage
-                comb = self._comb
-                sewage = int(getattr(comb, 'sewage_level', 0)) if comb is not None else 0
-                if self.enable_drain and sewage > 0:
-                    self._set_state('DRAINING')
-                    rospy.loginfo('[SUPPLY] drain sewage level=%d', sewage)
-                    self._tap_cmd(3, 1)  # sewage valve open
-                    rospy.sleep(0.5)
-                    self._station_cmd(3, True)  # start drain
-                    t0 = time.time()
-                    while time.time() - t0 < self.drain_timeout_s and not rospy.is_shutdown():
-                        if self._is_canceled():
-                            raise DockSupplyError('CANCELED', 'canceled')
-                        comb = self._comb
-                        sewage = int(getattr(comb, 'sewage_level', 0)) if comb is not None else 0
-                        if sewage == 0:
-                            rospy.loginfo('[SUPPLY] sewage drained')
-                            break
-                        rospy.sleep(1.0)
-                    else:
-                        rospy.logwarn('[SUPPLY] drain timeout after %.1fs, continue workflow', self.drain_timeout_s)
-                    self._station_cmd(3, False)
-                    self._tap_cmd(3, 0)
-                else:
-                    rospy.loginfo('[SUPPLY] skip drain (enable=%s sewage=%d)', str(self.enable_drain), sewage)
-
-                # 5) refill clean water
-                comb = self._comb
-                clean = int(getattr(comb, 'clean_level', 0)) if comb is not None else 0
-                if self.enable_refill and clean < self.target_clean_level:
-                    self._set_state('REFILLING')
-                    rospy.loginfo('[SUPPLY] refill clean water level=%d -> target=%d', clean, self.target_clean_level)
-                    self._tap_cmd(2, 1)  # clean valve open
-                    rospy.sleep(0.5)
-                    self._station_cmd(11, True)  # start refill
-                    t0 = time.time()
-                    while time.time() - t0 < self.refill_timeout_s and not rospy.is_shutdown():
-                        if self._is_canceled():
-                            raise DockSupplyError('CANCELED', 'canceled')
-                        comb = self._comb
-                        clean = int(getattr(comb, 'clean_level', 0)) if comb is not None else 0
-                        if clean >= self.target_clean_level:
-                            rospy.loginfo('[SUPPLY] clean water refilled')
-                            break
-                        rospy.sleep(1.0)
-                    else:
-                        rospy.logwarn('[SUPPLY] refill timeout after %.1fs, continue workflow', self.refill_timeout_s)
-                    self._station_cmd(11, False)
-                    self._tap_cmd(2, 0)
-                else:
-                    rospy.loginfo('[SUPPLY] skip refill (enable=%s clean=%d)', str(self.enable_refill), clean)
-
-            # 6) charging loop
+            # 4) charging loop
             self._run_charge_phase()
 
-            # 7) disable charge + optional retract rod
+            # 5) stop all charging before operating the sewage path
             self._set_state('DISABLE_CHARGING')
             rospy.loginfo('[SUPPLY] disable charging...')
             self._charge_enable(False)
             rospy.sleep(0.5)
 
-            if self.mechanical_connect_enable:
+            # 6) post-charge supply. Refill remains behind an explicit switch.
+            self._run_drain_phase()
+            self._run_refill_phase()
+
+            # 7) optional retract rod
+            if mechanical_connected:
                 self._set_state('MECHANICAL_DISCONNECT')
                 self._wait_for_rod_reset()
             else:
-                rospy.loginfo('[SUPPLY] skip mechanical disconnect (mechanical_connect_enable=false)')
+                rospy.loginfo('[SUPPLY] skip mechanical disconnect (not connected by this workflow)')
 
             # 8) optional exit
             if self._defer_exit_enabled():

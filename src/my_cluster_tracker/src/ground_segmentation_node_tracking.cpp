@@ -26,7 +26,11 @@
 
 #include <Eigen/Dense>
 #include <cmath>
+#include <cstdint>
 #include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 using Cloud = pcl::PointCloud<pcl::PointXYZ>;
 
@@ -44,7 +48,7 @@ public:
     // ROI
     p.param("x_min", x_min_, -1.2f);  p.param("x_max", x_max_,  1.5f);
     p.param("y_min", y_min_, -0.6f);  p.param("y_max", y_max_,  0.6f);
-    p.param("z_min", z_min_, -5.0f);  p.param("z_max", z_max_,  5.0f);
+    p.param("z_min", z_min_, -0.10f); p.param("z_max", z_max_,  0.60f);
 
     // 滤波 / 分割
     p.param("leaf", leaf_, 0.015f);                    // 体素叶大小（示例）
@@ -59,18 +63,23 @@ public:
 
     // ★ 地面稳定化：平面低通 + 滞回双阈值（用于分类）
     p.param("plane_alpha", plane_alpha_, 0.1f);  // 0.05~0.2 越小越稳
-    p.param("dist_lo",     dist_lo_,     0.04f);
-    p.param("dist_hi",     dist_hi_,     0.15f);
+    p.param("dist_lo",     dist_lo_,     0.025f);
+    p.param("dist_hi",     dist_hi_,     0.055f);
+    p.param("height_fallback_enabled", height_fallback_enabled_, true);
     p.param("self_filter_enabled", self_filter_enabled_, true);
-    p.param("self_x_min", self_x_min_, -0.65f);
-    p.param("self_x_max", self_x_max_,  0.65f);
-    p.param("self_y_min", self_y_min_, -0.55f);
-    p.param("self_y_max", self_y_max_,  0.55f);
+    p.param("self_x_min", self_x_min_, -0.27f);
+    p.param("self_x_max", self_x_max_,  0.69f);
+    p.param("self_y_min", self_y_min_, -0.38f);
+    p.param("self_y_max", self_y_max_,  0.38f);
     p.param("cluster_filter_enabled", cluster_filter_enabled_, true);
     p.param("cluster_tolerance", cluster_tolerance_, 0.10f);
     p.param("min_cluster_size", min_cluster_size_, 18);
     p.param("max_cluster_size", max_cluster_size_, 10000);
     p.param("min_obstacle_points", min_obstacle_points_, 18);
+    p.param("obstacle_expand_enabled", obstacle_expand_enabled_, false);
+    p.param("obstacle_expand_radius", obstacle_expand_radius_, 0.0f);
+    p.param("obstacle_expand_resolution", obstacle_expand_resolution_, 0.05f);
+    buildExpansionOffsets();
 
     // ---------------- 订阅/发布 ----------------
     sub_ = nh.subscribe(input_topic_, queue_size_, &Node::cb, this);
@@ -98,6 +107,7 @@ public:
                     << ", frame=" << target_frame_
                     << ", plane_alpha=" << plane_alpha_
                     << ", hyst=(" << dist_lo_ << "," << dist_hi_ << ")"
+                    << ", height_fallback=" << (height_fallback_enabled_ ? "on" : "off")
                     << ", SOR(K=" << mean_k_ << ", std=" << std_mul_ << ")"
                     << ", ROR(r=" << ror_r_ << ", n=" << ror_n_ << ")"
                     << ", self_filter=" << (self_filter_enabled_ ? "on" : "off")
@@ -106,7 +116,11 @@ public:
                     << ", cluster_filter=" << (cluster_filter_enabled_ ? "on" : "off")
                     << " tol=" << cluster_tolerance_
                     << " size=[" << min_cluster_size_ << "," << max_cluster_size_ << "]"
-                    << ", min_obstacle_points=" << min_obstacle_points_);
+                    << ", min_obstacle_points=" << min_obstacle_points_
+                    << ", obstacle_expand=" << (obstacle_expand_enabled_ ? "on" : "off")
+                    << " radius=" << obstacle_expand_radius_
+                    << " resolution=" << obstacle_expand_resolution_
+                    << " cells=" << expansion_offsets_.size());
   }
 
 private:
@@ -145,7 +159,13 @@ private:
 
     // 5) 地面分割（★ 稳定化：平面低通 + 滞回双阈值）
     Cloud::Ptr obst(new Cloud);
-    if (!segmentGroundStable(ds, obst)) { publish2D(Cloud::Ptr(new Cloud), msg->header.stamp); return; }
+    if (!segmentGroundStable(ds, obst)) {
+      if (!height_fallback_enabled_) {
+        publish2D(Cloud::Ptr(new Cloud), msg->header.stamp);
+        return;
+      }
+      segmentByBaseHeight(ds, obst);
+    }
     if (obst->empty()) { publish2D(Cloud::Ptr(new Cloud), msg->header.stamp); return; }
 
     // 6) SOR → 7) ROR
@@ -179,7 +199,10 @@ private:
     Cloud::Ptr proj2d(new Cloud);
     proj2d->reserve(clustered->size());
     for (const auto& p : clustered->points) proj2d->points.emplace_back(p.x, p.y, 0.0f);
-    publish2D(proj2d, msg->header.stamp);
+
+    Cloud::Ptr expanded2d;
+    expand2DObstacles(proj2d, expanded2d);
+    publish2D(expanded2d, msg->header.stamp);
   }
 
   // ---------- 平面稳定化分割：RANSAC观测 → IIR平滑 → 双阈值分类 ----------
@@ -223,6 +246,16 @@ private:
     return true;
   }
 
+  void segmentByBaseHeight(const Cloud::Ptr& in, Cloud::Ptr& obst_out) const {
+    obst_out.reset(new Cloud);
+    obst_out->points.reserve(in->size());
+    for (const auto& p : in->points) {
+      if (p.z > dist_hi_) {
+        obst_out->points.push_back(p);
+      }
+    }
+  }
+
   void filterSelfPoints(const Cloud::Ptr& in, Cloud::Ptr& out) const {
     out.reset(new Cloud);
     out->points.reserve(in->size());
@@ -264,7 +297,69 @@ private:
     }
   }
 
+  static std::uint64_t cellKey(int ix, int iy) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(ix)) << 32) |
+           static_cast<std::uint32_t>(iy);
+  }
+
+  void buildExpansionOffsets() {
+    if (obstacle_expand_resolution_ <= 0.0f) {
+      ROS_WARN_STREAM("[gs2d_single] invalid obstacle_expand_resolution="
+                      << obstacle_expand_resolution_ << ", using 0.05");
+      obstacle_expand_resolution_ = 0.05f;
+    }
+    if (obstacle_expand_radius_ < 0.0f) {
+      ROS_WARN_STREAM("[gs2d_single] invalid obstacle_expand_radius="
+                      << obstacle_expand_radius_ << ", disabling expansion");
+      obstacle_expand_radius_ = 0.0f;
+    }
+
+    expansion_offsets_.clear();
+    if (!obstacle_expand_enabled_ || obstacle_expand_radius_ <= 0.0f) return;
+
+    const int cell_radius =
+        static_cast<int>(std::ceil(obstacle_expand_radius_ / obstacle_expand_resolution_));
+    for (int dx = -cell_radius; dx <= cell_radius; ++dx) {
+      for (int dy = -cell_radius; dy <= cell_radius; ++dy) {
+        const float x = static_cast<float>(dx) * obstacle_expand_resolution_;
+        const float y = static_cast<float>(dy) * obstacle_expand_resolution_;
+        if (std::sqrt(x * x + y * y) <= obstacle_expand_radius_ + 1e-6f) {
+          expansion_offsets_.emplace_back(dx, dy);
+        }
+      }
+    }
+  }
+
+  void expand2DObstacles(const Cloud::Ptr& in, Cloud::Ptr& out) const {
+    if (!obstacle_expand_enabled_ || expansion_offsets_.empty()) {
+      out = in;
+      return;
+    }
+
+    std::unordered_set<std::uint64_t> seen;
+    seen.reserve(in->size() * expansion_offsets_.size());
+
+    out.reset(new Cloud);
+    out->points.reserve(in->size() * expansion_offsets_.size());
+    for (const auto& p : in->points) {
+      const int ix = static_cast<int>(std::lround(p.x / obstacle_expand_resolution_));
+      const int iy = static_cast<int>(std::lround(p.y / obstacle_expand_resolution_));
+      for (const auto& offset : expansion_offsets_) {
+        const int ex = ix + offset.first;
+        const int ey = iy + offset.second;
+        if (seen.insert(cellKey(ex, ey)).second) {
+          out->points.emplace_back(static_cast<float>(ex) * obstacle_expand_resolution_,
+                                   static_cast<float>(ey) * obstacle_expand_resolution_,
+                                   0.0f);
+        }
+      }
+    }
+  }
+
   void publish2D(const Cloud::Ptr& c, const ros::Time& stamp) {
+    c->width = static_cast<std::uint32_t>(c->points.size());
+    c->height = 1;
+    c->is_dense = false;
     sensor_msgs::PointCloud2 out;
     pcl::toROSMsg(*c, out);
     out.header.frame_id = target_frame_;
@@ -298,12 +393,17 @@ private:
   float plane_d_{0.0f};
   float plane_alpha_;
   float dist_lo_, dist_hi_;
+  bool height_fallback_enabled_;
   bool self_filter_enabled_;
   float self_x_min_, self_x_max_, self_y_min_, self_y_max_;
   bool cluster_filter_enabled_;
   float cluster_tolerance_;
   int min_cluster_size_, max_cluster_size_;
   int min_obstacle_points_;
+  bool obstacle_expand_enabled_;
+  float obstacle_expand_radius_;
+  float obstacle_expand_resolution_;
+  std::vector<std::pair<int, int>> expansion_offsets_;
 };
 
 int main(int argc, char** argv) {

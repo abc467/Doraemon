@@ -18,6 +18,8 @@ PolygonRegion display_region
 PolygonRegion map_region
 PolygonRing preview_path
 PolygonRing display_preview_path
+PolygonRing[] preview_paths
+PolygonRing[] display_preview_paths
 geometry_msgs/Pose2D entry_pose
 geometry_msgs/Pose2D display_entry_pose
 float64 estimated_length_m

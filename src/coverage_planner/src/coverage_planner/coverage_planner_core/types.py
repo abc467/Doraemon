@@ -42,6 +42,9 @@ class PlannerParams:
     e_pre_min: float = 0.4
     e_pre_max: float = 0.5
 
+    # Appended for positional-constructor compatibility with older callers.
+    min_swath_length_m: float = 0.0
+
 
 @dataclass
 class BlockDebug:

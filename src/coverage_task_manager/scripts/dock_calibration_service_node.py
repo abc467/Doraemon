@@ -97,6 +97,12 @@ class DockCalibrationServiceNode:
         self.docking_target_dist_param_name = _text(
             rospy.get_param("~docking_target_dist_param_name", "/dock_supply_manager/docking_target_dist")
         )
+        self.docking_controller_dist_param_name = _text(
+            rospy.get_param("~docking_controller_dist_param_name", "/docking_controller/docking_distance")
+        )
+        self.docking_xy_tolerance_param_name = _text(
+            rospy.get_param("~docking_xy_tolerance_param_name", "/docking_controller/xy_tolerance")
+        )
 
         self.storage_path = _text(
             rospy.get_param("~storage_path", "/data/coverage/dock_calibration.yaml")
@@ -107,7 +113,8 @@ class DockCalibrationServiceNode:
         self.dock_pose_stale_timeout_s = max(0.1, float(rospy.get_param("~dock_pose_stale_timeout_s", 1.0)))
         self.dock_score_stale_timeout_s = max(0.1, float(rospy.get_param("~dock_score_stale_timeout_s", 1.0)))
         self.dock_score_threshold = float(rospy.get_param("~dock_score_threshold", 0.00012))
-        self.dock_target_dist = float(rospy.get_param("~dock_target_dist", 0.607))
+        self.dock_target_dist = float(rospy.get_param("~dock_target_dist", 0.780))
+        self.dock_xy_tolerance = float(rospy.get_param("~dock_xy_tolerance", 0.005))
         self.stage2_min_extra_dist_m = max(0.0, float(rospy.get_param("~stage2_min_extra_dist_m", 0.20)))
         self.stage2_abs_y_max = max(0.0, float(rospy.get_param("~stage2_abs_y_max", 0.15)))
         self.stage2_abs_yaw_max_rad = max(0.0, float(rospy.get_param("~stage2_abs_yaw_max_rad", math.radians(8.0))))
@@ -145,9 +152,13 @@ class DockCalibrationServiceNode:
         self._saved_map_name = ""
         self._saved_map_id = ""
         self._saved_map_md5 = ""
+        self._startup_reapply_remaining = 0
+        self._startup_reapply_timer = None
 
         if self.load_persisted_on_start:
-            self._load_storage(apply_params=True, quiet=True)
+            loaded, _ = self._load_storage(apply_params=True, quiet=True)
+            if loaded:
+                self._startup_reapply_remaining = 4
 
         self._state_pub = rospy.Publisher(self.state_topic, DockCalibrationState, queue_size=1, latch=True)
         rospy.Subscriber(self.slam_state_topic, SlamState, self._on_slam_state, queue_size=10)
@@ -157,6 +168,8 @@ class DockCalibrationServiceNode:
         self._status_srv = rospy.Service(self.status_service_name, GetDockCalibrationStatus, self._handle_status)
         self._command_srv = rospy.Service(self.command_service_name, OperateDockCalibration, self._handle_command)
         self._timer = rospy.Timer(rospy.Duration(1.0 / self.publish_hz), self._on_timer)
+        if self._startup_reapply_remaining > 0:
+            self._startup_reapply_timer = rospy.Timer(rospy.Duration(3.0), self._on_startup_reapply_timer)
 
         publish_contract_param(rospy, self.status_contract_param_ns, self._build_status_contract_report(), enabled=True)
         publish_contract_param(rospy, self.command_contract_param_ns, self._build_command_contract_report(), enabled=True)
@@ -201,6 +214,7 @@ class DockCalibrationServiceNode:
                 "save_stage1_from_current_pose",
                 "save_stage2_from_current_pose",
                 "manual_stage_pose_set",
+                "precise_docking_parameter_set",
                 "persistent_dock_points",
                 "hot_rosparam_apply",
             ],
@@ -213,6 +227,7 @@ class DockCalibrationServiceNode:
                 "dock_stage1_stage2_calibration",
                 "frontend_operator_quality_judgement",
                 "dock_pose_score_display",
+                "precise_docking_parameter_tuning",
                 "persistent_dock_points",
             ],
             "services": {
@@ -258,6 +273,27 @@ class DockCalibrationServiceNode:
     def _on_timer(self, _event):
         self._state_pub.publish(self._build_state())
 
+    def _on_startup_reapply_timer(self, _event):
+        with self._lock:
+            if self._startup_reapply_remaining <= 0:
+                if self._startup_reapply_timer is not None:
+                    self._startup_reapply_timer.shutdown()
+                    self._startup_reapply_timer = None
+                return
+            target = float(self.dock_target_dist)
+            tolerance = float(self.dock_xy_tolerance)
+            self._startup_reapply_remaining -= 1
+        self._apply_dock_params(target=target, tolerance=tolerance)
+        rospy.loginfo(
+            "[dock_calib] reapplied persisted dock params target=%.3f tolerance=%.3f remaining=%d",
+            target,
+            tolerance,
+            self._startup_reapply_remaining,
+        )
+        if self._startup_reapply_remaining <= 0 and self._startup_reapply_timer is not None:
+            self._startup_reapply_timer.shutdown()
+            self._startup_reapply_timer = None
+
     def _handle_status(self, req):
         state = self._build_state()
         robot_id = _text(getattr(req, "robot_id", ""))
@@ -293,6 +329,12 @@ class DockCalibrationServiceNode:
             if op == int(OperateDockCalibrationRequest.RELOAD):
                 ok, msg = self._load_storage(apply_params=True, quiet=False)
                 return self._command_response(ok, "" if ok else "LOAD_FAILED", msg, op)
+            if op == int(OperateDockCalibrationRequest.SET_DOCK_PARAMS):
+                return self._set_dock_params(
+                    getattr(req, "dock_target_dist", 0.0),
+                    getattr(req, "dock_xy_tolerance", 0.0),
+                    operation=op,
+                )
         except Exception as e:
             rospy.logerr("[dock_calib] command failed op=%s: %s", str(op), str(e))
             return self._command_response(False, "COMMAND_FAILED", str(e), op)
@@ -338,6 +380,37 @@ class DockCalibrationServiceNode:
             operation,
         )
 
+    def _set_dock_params(self, dock_target_dist, dock_xy_tolerance, *, operation: int):
+        target = _as_float(dock_target_dist, float("nan"))
+        tolerance = _as_float(dock_xy_tolerance, float("nan"))
+        if not math.isfinite(target) or target < 0.20 or target > 2.00:
+            return self._command_response(
+                False,
+                "INVALID_DOCK_TARGET_DIST",
+                "dock_target_dist must be within [0.20, 2.00] meters",
+                operation,
+            )
+        if not math.isfinite(tolerance) or tolerance < 0.0 or tolerance > 0.05:
+            return self._command_response(
+                False,
+                "INVALID_DOCK_XY_TOLERANCE",
+                "dock_xy_tolerance must be within [0.000, 0.050] meters",
+                operation,
+            )
+
+        self.dock_target_dist = float(target)
+        self.dock_xy_tolerance = float(tolerance)
+        self._apply_dock_params(target=self.dock_target_dist, tolerance=self.dock_xy_tolerance)
+        self._persist_storage()
+        self._state_pub.publish(self._build_state())
+        return self._command_response(
+            True,
+            "",
+            "updated dock params target=%.3f tolerance=%.3f threshold=%.3f"
+            % (self.dock_target_dist, self.dock_xy_tolerance, self.dock_target_dist + self.dock_xy_tolerance),
+            operation,
+        )
+
     def _stage_param(self, param_name: str):
         if not param_name or not rospy.has_param(param_name):
             return False, (0.0, 0.0, 0.0)
@@ -347,6 +420,19 @@ class DockCalibrationServiceNode:
         if self.docking_target_dist_param_name and rospy.has_param(self.docking_target_dist_param_name):
             return _as_float(rospy.get_param(self.docking_target_dist_param_name), self.dock_target_dist)
         return float(self.dock_target_dist)
+
+    def _xy_tolerance(self) -> float:
+        if self.docking_xy_tolerance_param_name and rospy.has_param(self.docking_xy_tolerance_param_name):
+            return _as_float(rospy.get_param(self.docking_xy_tolerance_param_name), self.dock_xy_tolerance)
+        return float(self.dock_xy_tolerance)
+
+    def _apply_dock_params(self, *, target: float, tolerance: float):
+        if self.docking_target_dist_param_name:
+            rospy.set_param(self.docking_target_dist_param_name, float(target))
+        if self.docking_controller_dist_param_name:
+            rospy.set_param(self.docking_controller_dist_param_name, float(target))
+        if self.docking_xy_tolerance_param_name:
+            rospy.set_param(self.docking_xy_tolerance_param_name, float(tolerance))
 
     def _current_pose_from_slam(self, now: float):
         msg = self._slam_state
@@ -388,6 +474,8 @@ class DockCalibrationServiceNode:
                 dock_yaw = _yaw_from_quat(self._dock_pose.pose.orientation)
 
             target_dist = self._target_dist()
+            xy_tolerance = self._xy_tolerance()
+            success_threshold = target_dist + xy_tolerance
             min_dock_x = target_dist + self.stage2_min_extra_dist_m
             quality_ok = bool(
                 dock_pose_fresh
@@ -474,6 +562,8 @@ class DockCalibrationServiceNode:
             state.dock_score_lower_is_better = True
 
             state.dock_target_dist = float(target_dist)
+            state.dock_xy_tolerance = float(xy_tolerance)
+            state.dock_success_threshold = float(success_threshold)
             state.stage2_min_extra_dist_m = float(self.stage2_min_extra_dist_m)
             state.stage2_min_dock_pose_x = float(min_dock_x)
             state.stage2_abs_y_max = float(self.stage2_abs_y_max)
@@ -514,6 +604,8 @@ class DockCalibrationServiceNode:
             },
             "dock_stage1_xyyaw": list(stage1) if stage1_set else None,
             "dock_xyyaw": list(stage2) if stage2_set else None,
+            "dock_target_dist": float(self._target_dist()),
+            "dock_xy_tolerance": float(self._xy_tolerance()),
         }
 
     def _persist_storage(self):
@@ -553,6 +645,12 @@ class DockCalibrationServiceNode:
                 rospy.set_param(self.stage1_param_name, list(_parse_xyyaw(stage1)))
             if isinstance(stage2, (list, tuple)) and len(stage2) >= 3:
                 rospy.set_param(self.stage2_param_name, list(_parse_xyyaw(stage2)))
+            target = _as_float(payload.get("dock_target_dist"), self.dock_target_dist)
+            tolerance = _as_float(payload.get("dock_xy_tolerance"), self.dock_xy_tolerance)
+            if math.isfinite(target) and math.isfinite(tolerance):
+                self.dock_target_dist = float(target)
+                self.dock_xy_tolerance = float(tolerance)
+                self._apply_dock_params(target=self.dock_target_dist, tolerance=self.dock_xy_tolerance)
         if not quiet:
             rospy.loginfo("[dock_calib] loaded storage: %s", self.storage_path)
         return True, "loaded"

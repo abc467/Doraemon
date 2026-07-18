@@ -46,6 +46,9 @@ proto::PoseGraphOptions CreatePoseGraphOptions(
 
 class PoseGraph : public PoseGraphInterface {
  public:
+  using FlirtFeatureBackfillState =
+      PoseGraphInterface::FlirtFeatureBackfillState;
+
   struct InitialTrajectoryPose {
     int to_trajectory_id;
     transform::Rigid3d relative_pose;
@@ -81,9 +84,26 @@ class PoseGraph : public PoseGraphInterface {
   // Freezes a trajectory. Poses in this trajectory will not be optimized.
   virtual void FreezeTrajectory(int trajectory_id) = 0;
 
-  // Computes any missing per-node FLIRT features before serialization. This is
-  // a no-op for pose graphs that do not use FLIRT features.
-  virtual void ComputeFlirtFeaturesForAllNodes() {}
+  // Computes any missing per-node FLIRT features before serialization or after
+  // loading a legacy PBStream. Returns false when FLIRT is unavailable or any
+  // node could not be populated. This is a successful no-op for pose graphs
+  // that do not use FLIRT features.
+  virtual bool ComputeFlirtFeaturesForAllNodes() { return true; }
+
+  // Explicit FLIRT relocation must be rejected unless this state is kReady.
+  // Ordinary Cartographer localization does not depend on this gate.
+  virtual void SetFlirtFeatureBackfillState(
+      FlirtFeatureBackfillState /* state */) override {}
+  virtual FlirtFeatureBackfillState GetFlirtFeatureBackfillState()
+      const override {
+    return FlirtFeatureBackfillState::kReady;
+  }
+
+  // Serializers use this independent gate to keep the node set stable while
+  // missing features are populated and the PBStream is written. It must never
+  // be implemented by holding the PoseGraph data mutex.
+  virtual void LockFlirtFeatureSerialization() {}
+  virtual void UnlockFlirtFeatureSerialization() {}
 
   // Adds a 'submap' from a proto with the given 'global_pose' to the
   // appropriate trajectory.

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <deque>
 #include <mutex>
 #include <numeric>
@@ -13,6 +14,15 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
+
+double SanitizeDurationMs(const double duration_ms) {
+  return std::isfinite(duration_ms) && duration_ms >= 0.0 ? duration_ms : 0.0;
+}
+
+std::string NonEmptyOr(const std::string& value,
+                       const std::string& fallback) {
+  return value.empty() ? fallback : value;
+}
 
 struct ScoreEvent {
   TimePoint time;
@@ -145,6 +155,31 @@ class LocalizationHealthStore {
     latest_recovery_full_search_submap_count_ = 0;
     recovery_state_ = "OK";
     recovery_reason_.clear();
+    localization_lost_latched_ = false;
+    localization_loss_episode_ = 0;
+    map_scan_distance_field_source_ = "unavailable";
+    map_scan_distance_field_generation_ = 0;
+    map_scan_distance_field_cells_ = 0;
+    map_scan_distance_field_resident_bytes_ = 0;
+    map_scan_distance_field_load_count_ = 0;
+    map_scan_distance_field_load_failure_count_ = 0;
+    map_scan_distance_field_last_load_source_.clear();
+    map_scan_distance_field_last_load_result_.clear();
+    map_scan_distance_field_last_load_duration_ms_ = 0.0;
+    map_scan_distance_field_build_count_ = 0;
+    map_scan_distance_field_build_failure_count_ = 0;
+    map_scan_distance_field_build_published_count_ = 0;
+    map_scan_distance_field_build_unpublished_count_ = 0;
+    map_scan_distance_field_last_build_source_.clear();
+    map_scan_distance_field_last_build_result_.clear();
+    map_scan_distance_field_last_build_published_ = false;
+    map_scan_distance_field_last_build_duration_ms_ = 0.0;
+    map_scan_distance_field_invalidation_count_ = 0;
+    map_scan_distance_field_last_invalidation_reason_.clear();
+    map_scan_distance_field_query_count_ = 0;
+    map_scan_distance_field_query_duration_sum_ms_ = 0.0;
+    map_scan_distance_field_last_query_duration_ms_ = 0.0;
+    map_scan_distance_field_max_query_duration_ms_ = 0.0;
     last_active_frozen_accepted_constraint_time_ = TimePoint();
     total_match_score_count_ = 0;
     total_backpressure_count_ = 0;
@@ -157,6 +192,7 @@ class LocalizationHealthStore {
     total_current_pose_scan_map_bad_count_ = 0;
     total_map_scan_bad_count_ = 0;
     total_recovery_full_search_count_ = 0;
+    total_localization_loss_count_ = 0;
     total_auto_relocation_trigger_count_ = 0;
     total_auto_relocation_success_count_ = 0;
     scores_.clear();
@@ -314,8 +350,27 @@ class LocalizationHealthStore {
   void RecordRecoveryState(const std::string& state,
                            const std::string& reason) {
     std::lock_guard<std::mutex> lock(mutex_);
-    recovery_state_ = state;
-    recovery_reason_ = reason;
+    if (state == "LOST_CONFIRMED") {
+      if (!localization_lost_latched_) {
+        ++localization_loss_episode_;
+        ++total_localization_loss_count_;
+      }
+      localization_lost_latched_ = true;
+      recovery_state_ = state;
+      recovery_reason_ = reason;
+    } else if (!localization_lost_latched_) {
+      recovery_state_ = state;
+      recovery_reason_ = reason;
+    }
+    observed_ = true;
+  }
+
+  void RecordExplicitRelocationSuccess(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    localization_lost_latched_ = false;
+    recovery_state_ = "DEGRADED";
+    recovery_reason_ = NonEmptyOr(reason,
+                                  "explicit_relocation_waiting_constraint");
     observed_ = true;
   }
 
@@ -324,8 +379,10 @@ class LocalizationHealthStore {
     std::lock_guard<std::mutex> lock(mutex_);
     latest_recovery_full_search_submap_count_ = checked_submaps;
     recovery_full_searches_.push_back({Clock::now(), checked_submaps, reason});
-    recovery_state_ = "RECOVERY_SEARCH";
-    recovery_reason_ = reason;
+    if (!localization_lost_latched_) {
+      recovery_state_ = "RECOVERY_SEARCH";
+      recovery_reason_ = reason;
+    }
     ++total_recovery_full_search_count_;
     observed_ = true;
   }
@@ -372,6 +429,94 @@ class LocalizationHealthStore {
     observed_ = true;
   }
 
+  void RecordMapScanDistanceFieldInvalidation(
+      const int generation, const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    map_scan_distance_field_source_ = "unavailable";
+    map_scan_distance_field_generation_ = generation;
+    map_scan_distance_field_cells_ = 0;
+    map_scan_distance_field_resident_bytes_ = 0;
+    ++map_scan_distance_field_invalidation_count_;
+    map_scan_distance_field_last_invalidation_reason_ =
+        NonEmptyOr(reason, "unspecified");
+    observed_ = true;
+  }
+
+  void RecordMapScanDistanceFieldLoad(
+      const bool success, const std::string& source, const int generation,
+      const std::size_t cells, const std::size_t resident_bytes,
+      const double duration_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++map_scan_distance_field_load_count_;
+    map_scan_distance_field_last_load_source_ =
+        NonEmptyOr(source, "unspecified");
+    map_scan_distance_field_last_load_result_ = success ? "success" : "failed";
+    map_scan_distance_field_last_load_duration_ms_ =
+        SanitizeDurationMs(duration_ms);
+    map_scan_distance_field_generation_ = generation;
+    if (success) {
+      map_scan_distance_field_source_ =
+          NonEmptyOr(source, "cache_unknown");
+      map_scan_distance_field_cells_ = cells;
+      map_scan_distance_field_resident_bytes_ = resident_bytes;
+    } else {
+      ++map_scan_distance_field_load_failure_count_;
+      map_scan_distance_field_source_ = "unavailable";
+      map_scan_distance_field_cells_ = 0;
+      map_scan_distance_field_resident_bytes_ = 0;
+    }
+    observed_ = true;
+  }
+
+  void RecordMapScanDistanceFieldBuild(
+      const bool success, const bool published, const std::string& source,
+      const int generation, const std::size_t cells,
+      const std::size_t resident_bytes, const double duration_ms,
+      const std::string& result) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++map_scan_distance_field_build_count_;
+    const bool actually_published = success && published;
+    if (!success) {
+      ++map_scan_distance_field_build_failure_count_;
+    }
+    if (actually_published) {
+      ++map_scan_distance_field_build_published_count_;
+    } else {
+      ++map_scan_distance_field_build_unpublished_count_;
+    }
+    map_scan_distance_field_last_build_source_ =
+        NonEmptyOr(source, "unspecified");
+    map_scan_distance_field_last_build_result_ = NonEmptyOr(
+        result, success ? (actually_published ? "published" : "not_published")
+                        : "failed");
+    map_scan_distance_field_last_build_published_ = actually_published;
+    map_scan_distance_field_last_build_duration_ms_ =
+        SanitizeDurationMs(duration_ms);
+
+    // A stale or failed asynchronous result must not overwrite the diagnostics
+    // for the currently published generation.
+    if (actually_published) {
+      map_scan_distance_field_source_ =
+          NonEmptyOr(source, "cold_build");
+      map_scan_distance_field_generation_ = generation;
+      map_scan_distance_field_cells_ = cells;
+      map_scan_distance_field_resident_bytes_ = resident_bytes;
+    }
+    observed_ = true;
+  }
+
+  void RecordMapScanDistanceFieldQuery(const double duration_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const double sanitized_duration_ms = SanitizeDurationMs(duration_ms);
+    ++map_scan_distance_field_query_count_;
+    map_scan_distance_field_last_query_duration_ms_ = sanitized_duration_ms;
+    map_scan_distance_field_query_duration_sum_ms_ += sanitized_duration_ms;
+    map_scan_distance_field_max_query_duration_ms_ =
+        std::max(map_scan_distance_field_max_query_duration_ms_,
+                 sanitized_duration_ms);
+    observed_ = true;
+  }
+
   void RecordAutoRelocationTrigger(const std::size_t queue_size) {
     std::lock_guard<std::mutex> lock(mutex_);
     latest_auto_relocation_queue_size_ = static_cast<int>(queue_size);
@@ -408,10 +553,8 @@ class LocalizationHealthStore {
         latest_backpressure_keep_every_n_;
     snapshot.latest_match_score_percent = latest_match_score_percent_;
     snapshot.latest_active_submaps = latest_active_submaps_;
-    snapshot.latest_auto_relocation_queue_size =
-        latest_auto_relocation_queue_size_;
-    snapshot.latest_auto_relocation_return_code =
-        latest_auto_relocation_return_code_;
+    snapshot.latest_auto_relocation_queue_size = -1;
+    snapshot.latest_auto_relocation_return_code = 0;
     snapshot.active_frozen_top1_score = latest_active_frozen_top1_score_;
     snapshot.active_frozen_top2_score = latest_active_frozen_top2_score_;
     snapshot.active_frozen_margin = latest_active_frozen_margin_;
@@ -452,6 +595,56 @@ class LocalizationHealthStore {
     snapshot.map_scan_checked_submaps = latest_map_scan_checked_submaps_;
     snapshot.recovery_state = recovery_state_;
     snapshot.recovery_reason = recovery_reason_;
+    snapshot.automatic_relocation_enabled = false;
+    snapshot.localization_lost_confirmed = localization_lost_latched_;
+    snapshot.localization_loss_episode = localization_loss_episode_;
+    snapshot.map_scan_distance_field_source = map_scan_distance_field_source_;
+    snapshot.map_scan_distance_field_generation =
+        map_scan_distance_field_generation_;
+    snapshot.map_scan_distance_field_cells = map_scan_distance_field_cells_;
+    snapshot.map_scan_distance_field_resident_bytes =
+        map_scan_distance_field_resident_bytes_;
+    snapshot.map_scan_distance_field_load_count =
+        map_scan_distance_field_load_count_;
+    snapshot.map_scan_distance_field_load_failure_count =
+        map_scan_distance_field_load_failure_count_;
+    snapshot.map_scan_distance_field_last_load_source =
+        map_scan_distance_field_last_load_source_;
+    snapshot.map_scan_distance_field_last_load_result =
+        map_scan_distance_field_last_load_result_;
+    snapshot.map_scan_distance_field_last_load_duration_ms =
+        map_scan_distance_field_last_load_duration_ms_;
+    snapshot.map_scan_distance_field_build_count =
+        map_scan_distance_field_build_count_;
+    snapshot.map_scan_distance_field_build_failure_count =
+        map_scan_distance_field_build_failure_count_;
+    snapshot.map_scan_distance_field_build_published_count =
+        map_scan_distance_field_build_published_count_;
+    snapshot.map_scan_distance_field_build_unpublished_count =
+        map_scan_distance_field_build_unpublished_count_;
+    snapshot.map_scan_distance_field_last_build_source =
+        map_scan_distance_field_last_build_source_;
+    snapshot.map_scan_distance_field_last_build_result =
+        map_scan_distance_field_last_build_result_;
+    snapshot.map_scan_distance_field_last_build_published =
+        map_scan_distance_field_last_build_published_;
+    snapshot.map_scan_distance_field_last_build_duration_ms =
+        map_scan_distance_field_last_build_duration_ms_;
+    snapshot.map_scan_distance_field_invalidation_count =
+        map_scan_distance_field_invalidation_count_;
+    snapshot.map_scan_distance_field_last_invalidation_reason =
+        map_scan_distance_field_last_invalidation_reason_;
+    snapshot.map_scan_distance_field_query_count =
+        map_scan_distance_field_query_count_;
+    snapshot.map_scan_distance_field_last_query_duration_ms =
+        map_scan_distance_field_last_query_duration_ms_;
+    snapshot.map_scan_distance_field_mean_query_duration_ms =
+        map_scan_distance_field_query_count_ > 0
+            ? map_scan_distance_field_query_duration_sum_ms_ /
+                  static_cast<double>(map_scan_distance_field_query_count_)
+            : 0.0;
+    snapshot.map_scan_distance_field_max_query_duration_ms =
+        map_scan_distance_field_max_query_duration_ms_;
     snapshot.latest_recovery_full_search_submap_count =
         latest_recovery_full_search_submap_count_;
     snapshot.total_match_score_count = total_match_score_count_;
@@ -473,10 +666,9 @@ class LocalizationHealthStore {
     snapshot.total_map_scan_bad_count = total_map_scan_bad_count_;
     snapshot.total_recovery_full_search_count =
         total_recovery_full_search_count_;
-    snapshot.total_auto_relocation_trigger_count =
-        total_auto_relocation_trigger_count_;
-    snapshot.total_auto_relocation_success_count =
-        total_auto_relocation_success_count_;
+    snapshot.total_localization_loss_count = total_localization_loss_count_;
+    snapshot.total_auto_relocation_trigger_count = 0;
+    snapshot.total_auto_relocation_success_count = 0;
 
     if (!queue_sizes_.empty()) {
       snapshot.max_work_queue_size =
@@ -556,20 +748,16 @@ class LocalizationHealthStore {
           std::max(snapshot.max_active_submaps, event.active_submaps);
     }
 
-    snapshot.auto_relocation_trigger_count =
-        static_cast<int>(auto_relocation_triggers_.size());
-    for (const AutoRelocationTriggerEvent& event :
-         auto_relocation_triggers_) {
-      snapshot.max_auto_relocation_queue_size =
-          std::max(snapshot.max_auto_relocation_queue_size, event.queue_size);
-    }
-    snapshot.auto_relocation_result_count =
-        static_cast<int>(auto_relocation_results_.size());
-    for (const AutoRelocationResultEvent& event : auto_relocation_results_) {
-      if (event.success) {
-        ++snapshot.auto_relocation_success_count;
-      }
-    }
+    // Runtime background relocation is disabled. Keep the legacy keys stable
+    // for consumers, but make them independent of any stale internal state.
+    snapshot.auto_relocation_trigger_count = 0;
+    snapshot.auto_relocation_result_count = 0;
+    snapshot.auto_relocation_success_count = 0;
+    snapshot.latest_auto_relocation_queue_size = -1;
+    snapshot.max_auto_relocation_queue_size = -1;
+    snapshot.latest_auto_relocation_return_code = 0;
+    snapshot.total_auto_relocation_trigger_count = 0;
+    snapshot.total_auto_relocation_success_count = 0;
     return snapshot;
   }
 
@@ -650,6 +838,31 @@ class LocalizationHealthStore {
   int latest_recovery_full_search_submap_count_ = 0;
   std::string recovery_state_ = "OK";
   std::string recovery_reason_;
+  bool localization_lost_latched_ = false;
+  std::int64_t localization_loss_episode_ = 0;
+  std::string map_scan_distance_field_source_ = "unavailable";
+  int map_scan_distance_field_generation_ = 0;
+  std::uint64_t map_scan_distance_field_cells_ = 0;
+  std::uint64_t map_scan_distance_field_resident_bytes_ = 0;
+  std::int64_t map_scan_distance_field_load_count_ = 0;
+  std::int64_t map_scan_distance_field_load_failure_count_ = 0;
+  std::string map_scan_distance_field_last_load_source_;
+  std::string map_scan_distance_field_last_load_result_;
+  double map_scan_distance_field_last_load_duration_ms_ = 0.0;
+  std::int64_t map_scan_distance_field_build_count_ = 0;
+  std::int64_t map_scan_distance_field_build_failure_count_ = 0;
+  std::int64_t map_scan_distance_field_build_published_count_ = 0;
+  std::int64_t map_scan_distance_field_build_unpublished_count_ = 0;
+  std::string map_scan_distance_field_last_build_source_;
+  std::string map_scan_distance_field_last_build_result_;
+  bool map_scan_distance_field_last_build_published_ = false;
+  double map_scan_distance_field_last_build_duration_ms_ = 0.0;
+  std::int64_t map_scan_distance_field_invalidation_count_ = 0;
+  std::string map_scan_distance_field_last_invalidation_reason_;
+  std::int64_t map_scan_distance_field_query_count_ = 0;
+  double map_scan_distance_field_query_duration_sum_ms_ = 0.0;
+  double map_scan_distance_field_last_query_duration_ms_ = 0.0;
+  double map_scan_distance_field_max_query_duration_ms_ = 0.0;
   TimePoint last_active_frozen_accepted_constraint_time_;
   std::int64_t total_match_score_count_ = 0;
   std::int64_t total_backpressure_count_ = 0;
@@ -662,6 +875,7 @@ class LocalizationHealthStore {
   std::int64_t total_current_pose_scan_map_bad_count_ = 0;
   std::int64_t total_map_scan_bad_count_ = 0;
   std::int64_t total_recovery_full_search_count_ = 0;
+  std::int64_t total_localization_loss_count_ = 0;
   std::int64_t total_auto_relocation_trigger_count_ = 0;
   std::int64_t total_auto_relocation_success_count_ = 0;
 
@@ -758,6 +972,11 @@ void RecordLocalizationHealthRecoveryState(const std::string& state,
   Store().RecordRecoveryState(state, reason);
 }
 
+void RecordLocalizationHealthExplicitRelocationSuccess(
+    const std::string& reason) {
+  Store().RecordExplicitRelocationSuccess(reason);
+}
+
 void RecordLocalizationHealthRecoveryFullSearch(
     const int checked_submaps, const std::string& reason) {
   Store().RecordRecoveryFullSearch(checked_submaps, reason);
@@ -790,12 +1009,41 @@ void RecordLocalizationHealthPureLocalizationForceOptimization(
 
 void RecordLocalizationHealthAutoRelocationTrigger(
     const std::size_t queue_size) {
-  Store().RecordAutoRelocationTrigger(queue_size);
+  (void)queue_size;
 }
 
 void RecordLocalizationHealthAutoRelocationResult(const int return_code,
                                                   const bool success) {
-  Store().RecordAutoRelocationResult(return_code, success);
+  (void)return_code;
+  (void)success;
+}
+
+void RecordLocalizationHealthMapScanDistanceFieldInvalidation(
+    const int generation, const std::string& reason) {
+  Store().RecordMapScanDistanceFieldInvalidation(generation, reason);
+}
+
+void RecordLocalizationHealthMapScanDistanceFieldLoad(
+    const bool success, const std::string& source, const int generation,
+    const std::size_t cells, const std::size_t resident_bytes,
+    const double duration_ms) {
+  Store().RecordMapScanDistanceFieldLoad(success, source, generation, cells,
+                                         resident_bytes, duration_ms);
+}
+
+void RecordLocalizationHealthMapScanDistanceFieldBuild(
+    const bool success, const bool published, const std::string& source,
+    const int generation, const std::size_t cells,
+    const std::size_t resident_bytes, const double duration_ms,
+    const std::string& result) {
+  Store().RecordMapScanDistanceFieldBuild(
+      success, published, source, generation, cells, resident_bytes,
+      duration_ms, result);
+}
+
+void RecordLocalizationHealthMapScanDistanceFieldQuery(
+    const double duration_ms) {
+  Store().RecordMapScanDistanceFieldQuery(duration_ms);
 }
 
 LocalizationHealthSnapshot GetLocalizationHealthSnapshot(

@@ -309,11 +309,22 @@ def swath_endpoints_xyz(sw) -> Tuple[Optional[XYZ], Optional[XYZ]]:
 # =========================
 # Python snake sorted swaths
 # =========================
-def snake_sorted_swaths(swaths_b, mute: bool = True):
+def snake_sorted_swaths(
+    swaths_b,
+    mute: bool = True,
+    min_swath_length_m: float = 0.0,
+):
     del mute
     n = swaths_size(swaths_b)
     if n <= 0:
         return []
+
+    try:
+        min_length = float(min_swath_length_m)
+    except (TypeError, ValueError, OverflowError):
+        min_length = 0.0
+    if not math.isfinite(min_length) or min_length < 0.0:
+        min_length = 0.0
 
     items = []
     best_dir = (1.0, 0.0)
@@ -336,7 +347,7 @@ def snake_sorted_swaths(swaths_b, mute: bool = True):
         dx = float(b[0] - a[0])
         dy = float(b[1] - a[1])
         length = math.hypot(dx, dy)
-        if length <= 1e-9:
+        if length <= 1e-9 or length + 1e-12 < min_length:
             continue
         if length > best_len:
             best_len = length

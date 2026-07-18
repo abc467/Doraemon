@@ -25,7 +25,8 @@ options = {
   published_frame = "odom",
   odom_frame = "odom",--cartographer的里程计坐标系
   provide_odom_frame = false,-- cartographer是否发布里程计坐标
-  publish_frame_projected_to_2d = false,
+  -- Keep map/odom planar for the 2D navigation stack and RViz overlays.
+  publish_frame_projected_to_2d = true,
   publish_tracked_pose = true,-- 发布机器人globle pose --landmark必要的topic
   use_pose_extrapolator = false,
   use_odometry = false,

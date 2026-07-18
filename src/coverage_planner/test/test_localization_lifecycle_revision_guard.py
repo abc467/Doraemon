@@ -3,6 +3,7 @@
 
 import importlib.util
 import pathlib
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -62,6 +63,233 @@ class _FakeStore:
 
 
 class LocalizationLifecycleRevisionGuardTest(unittest.TestCase):
+    @staticmethod
+    def _localization_health_msg(*, confirmed, episode="7", reason="scan/map divergence", stamp=150.0):
+        values = [
+            SimpleNamespace(key="localization_lost_confirmed", value=str(bool(confirmed)).lower()),
+            SimpleNamespace(key="localization_lost_episode", value=str(episode)),
+            SimpleNamespace(key="localization_lost_reason", value=str(reason)),
+        ]
+        return SimpleNamespace(
+            header=SimpleNamespace(stamp=SimpleNamespace(to_sec=lambda: float(stamp))),
+            status=[
+                SimpleNamespace(
+                    name="cartographer/localization_health",
+                    values=values,
+                )
+            ],
+        )
+
+    def _health_guard_node(self):
+        node = LOCALIZATION_MODULE.LocalizationLifecycleManagerNode.__new__(
+            LOCALIZATION_MODULE.LocalizationLifecycleManagerNode
+        )
+        node.robot_id = "local_robot"
+        node.runtime_ns = "/cartographer/runtime"
+        node._service_lock = threading.Lock()
+        node._localization_transition_lock = threading.Lock()
+        node._localization_transition_epoch = 0
+        node._last_localization_lost_episode = ""
+        node._runtime_updates = []
+        node._update_runtime_state = lambda **kwargs: node._runtime_updates.append(dict(kwargs))
+        return node
+
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "logerr")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy.Time, "now")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "set_param")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "get_param")
+    def test_confirmed_loss_invalidates_localization_once_and_preserves_map_identity(
+        self,
+        get_param,
+        set_param,
+        time_now,
+        _logerr,
+    ):
+        node = self._health_guard_node()
+        params = {
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "localized",
+            "/cartographer/runtime/localization_valid": True,
+            "/cartographer/runtime/localization_stamp": 100.0,
+            "/cartographer/runtime/map_name": "map_72",
+            "/cartographer/runtime/current_map_revision_id": "rev_72_original",
+        }
+        get_param.side_effect = lambda key, default=None: params.get(key, default)
+        set_param.side_effect = lambda key, value: params.__setitem__(key, value)
+        time_now.return_value = SimpleNamespace(to_sec=lambda: 200.0)
+        msg = self._localization_health_msg(confirmed=True)
+
+        node._on_localization_health(msg)
+        node._on_localization_health(msg)
+
+        self.assertEqual(params["/cartographer/runtime/localization_state"], "manual_assist_required")
+        self.assertFalse(params["/cartographer/runtime/localization_valid"])
+        self.assertEqual(params["/cartographer/runtime/localization_lost_episode"], "7")
+        self.assertEqual(params["/cartographer/runtime/localization_lost_reason"], "scan/map divergence")
+        self.assertEqual(params["/cartographer/runtime/localization_lost_stamp"], 200.0)
+        self.assertEqual(params["/cartographer/runtime/map_name"], "map_72")
+        self.assertEqual(params["/cartographer/runtime/current_map_revision_id"], "rev_72_original")
+        self.assertEqual(
+            node._runtime_updates,
+            [
+                {
+                    "robot_id": "local_robot",
+                    "localization_state": "manual_assist_required",
+                    "localization_valid": False,
+                }
+            ],
+        )
+
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "set_param")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "get_param")
+    def test_confirmed_loss_is_ignored_outside_localization_mode(self, get_param, set_param):
+        node = self._health_guard_node()
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/current_mode": "mapping",
+            "/cartographer/runtime/localization_state": "localized",
+            "/cartographer/runtime/localization_valid": True,
+        }.get(key, default)
+
+        node._on_localization_health(self._localization_health_msg(confirmed=True))
+
+        set_param.assert_not_called()
+        self.assertEqual(node._runtime_updates, [])
+
+    def test_healthy_diagnostic_rearms_episode_after_cartographer_restart(self):
+        node = self._health_guard_node()
+        node._last_localization_lost_episode = "1"
+
+        node._on_localization_health(
+            self._localization_health_msg(confirmed=False, episode="1")
+        )
+
+        self.assertEqual(node._last_localization_lost_episode, "")
+
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "set_param")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "get_param")
+    def test_stale_confirmed_loss_does_not_override_newer_explicit_localization(self, get_param, set_param):
+        node = self._health_guard_node()
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "localized",
+            "/cartographer/runtime/localization_valid": True,
+            "/cartographer/runtime/localization_stamp": 300.0,
+        }.get(key, default)
+
+        node._on_localization_health(
+            self._localization_health_msg(confirmed=True, stamp=299.0)
+        )
+
+        set_param.assert_not_called()
+        self.assertEqual(node._runtime_updates, [])
+
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "logerr")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy.Time, "now")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "set_param")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "get_param")
+    def test_same_episode_repairs_partial_fail_closed_tuple_even_if_stamp_is_stale(
+        self,
+        get_param,
+        set_param,
+        time_now,
+        _logerr,
+    ):
+        node = self._health_guard_node()
+        node._last_localization_lost_episode = "7"
+        params = {
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "manual_assist_required",
+            # Simulates a process failure between the state and validity writes.
+            "/cartographer/runtime/localization_valid": True,
+            "/cartographer/runtime/localization_stamp": 300.0,
+            "/cartographer/runtime/localization_lost_episode": "7",
+        }
+        get_param.side_effect = lambda key, default=None: params.get(key, default)
+        set_param.side_effect = lambda key, value: params.__setitem__(key, value)
+        time_now.return_value = SimpleNamespace(to_sec=lambda: 400.0)
+
+        node._on_localization_health(
+            self._localization_health_msg(confirmed=True, episode="7", stamp=299.0)
+        )
+
+        self.assertEqual(params["/cartographer/runtime/localization_state"], "manual_assist_required")
+        self.assertFalse(params["/cartographer/runtime/localization_valid"])
+        self.assertEqual(node._localization_transition_epoch, 1)
+        self.assertEqual(len(node._runtime_updates), 1)
+
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "logerr")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy.Time, "now")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "set_param")
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "get_param")
+    def test_confirmed_loss_is_not_blocked_by_inflight_restart_lock(
+        self,
+        get_param,
+        set_param,
+        time_now,
+        _logerr,
+    ):
+        node = self._health_guard_node()
+        params = {
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "localized",
+            "/cartographer/runtime/localization_valid": True,
+            "/cartographer/runtime/localization_stamp": 100.0,
+        }
+        get_param.side_effect = lambda key, default=None: params.get(key, default)
+        set_param.side_effect = lambda key, value: params.__setitem__(key, value)
+        time_now.return_value = SimpleNamespace(to_sec=lambda: 200.0)
+
+        node._service_lock.acquire()
+        callback = threading.Thread(
+            target=node._on_localization_health,
+            args=(self._localization_health_msg(confirmed=True),),
+        )
+        try:
+            callback.start()
+            callback.join(timeout=0.5)
+            self.assertFalse(callback.is_alive())
+        finally:
+            node._service_lock.release()
+            callback.join(timeout=1.0)
+
+        self.assertEqual(params["/cartographer/runtime/localization_state"], "manual_assist_required")
+        self.assertFalse(params["/cartographer/runtime/localization_valid"])
+
+    @mock.patch.object(LOCALIZATION_MODULE.rospy, "get_param")
+    def test_restart_success_is_rejected_when_newer_loss_epoch_remains_active(self, get_param):
+        node = self._health_guard_node()
+        params = {
+            "/cartographer/runtime/localization_state": "manual_assist_required",
+            "/cartographer/runtime/localization_valid": False,
+        }
+        get_param.side_effect = lambda key, default=None: params.get(key, default)
+
+        def _delegate(**_kwargs):
+            with node._localization_transition_lock:
+                node._localization_transition_epoch += 1
+                node._last_localization_lost_episode = "8"
+            return SimpleNamespace(
+                success=True,
+                message="localized",
+                map_name="demo_map",
+                map_revision_id="rev_demo_01",
+                localization_state="localized",
+            )
+
+        node._delegate_restart_to_runtime_manager = _delegate
+        node._restart_response = lambda **kwargs: SimpleNamespace(**kwargs)
+        response = node._handle_restart(
+            SimpleNamespace(
+                robot_id="local_robot",
+                map_name="demo_map",
+                map_revision_id="rev_demo_01",
+            )
+        )
+
+        self.assertFalse(response.success)
+        self.assertEqual(response.localization_state, "manual_assist_required")
+        self.assertIn("newer confirmed localization loss", response.message)
+
     def test_resolve_asset_accepts_revision_only(self):
         node = LOCALIZATION_MODULE.LocalizationLifecycleManagerNode.__new__(LOCALIZATION_MODULE.LocalizationLifecycleManagerNode)
         node._plan_store = _FakeStore(

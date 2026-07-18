@@ -15,13 +15,21 @@
  *******************************************************************************/
 #include "ros/ros.h"
 #include "orbbec_camera/ob_camera_node_driver.h"
+#include <cstdio>
+#include <unistd.h>
 
 int main(int argc, char** argv) {
   ros::init(argc, argv, "orbbec_camera");
-  ros::NodeHandle nh;
-  ros::NodeHandle nh_private("~");
-  orbbec_camera::OBCameraNodeDriver ob_camera_node_factory(nh, nh_private);
-  ros::spin();
-  ros::shutdown();
-  return 0;
+  {
+    ros::NodeHandle nh;
+    ros::NodeHandle nh_private("~");
+    orbbec_camera::OBCameraNodeDriver ob_camera_node_factory(nh, nh_private);
+    ros::spin();
+    ros::shutdown();
+  }
+
+  // OpenCV imgcodecs pulls in GDAL/PROJ on this platform. Their process-exit destructors can
+  // abort after this node has already shut down cleanly, so skip global library teardown.
+  std::fflush(nullptr);
+  _exit(0);
 }

@@ -34,6 +34,10 @@ private:
     // --- 路径规划相关 ---
     std::vector<geometry_msgs::PoseStamped> global_plan_; // 全局路径容器
     int target_index_;    // 当前追踪的路径点索引
+    bool have_plan_;      // 是否已有上一条路径，用于判断是否同一目标刷新
+    double last_goal_x_;
+    double last_goal_y_;
+    double last_goal_yaw_;
 
     // --- 控制参数与变量 ---
     double current_vel_x_;      // 当前线速度 (用于平滑控制)

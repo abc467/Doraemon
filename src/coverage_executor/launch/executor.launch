@@ -1,6 +1,9 @@
 <launch>
   <!-- Executor 内置 AutoChargeManager：默认关闭，避免与 TaskManager 抢状态机 -->
   <arg name="auto_charge_enable" default="false"/>
+  <arg name="low_soc" default="0.15"/>
+  <arg name="resume_soc" default="0.95"/>
+  <arg name="rearm_soc" default="0.95"/>
   <arg name="load_mode_profiles_yaml" default="true"/>
   <arg name="mode_profiles_yaml" default="$(find coverage_task_manager)/config/mode_profiles.yaml"/>
   <arg name="load_actuator_profiles_yaml" default="true"/>
@@ -12,6 +15,19 @@
   <arg name="strict_resume_map_check" default="true"/>
   <arg name="respawn_node" default="true"/>
   <arg name="respawn_delay_s" default="2.0"/>
+  <arg name="mcore_connected_topic" default="/mcore_velocity_sender/connected"/>
+  <arg name="actuator_debug_lease_s" default="30.0"/>
+  <arg name="actuator_debug_watchdog_hz" default="5.0"/>
+  <arg name="actuator_debug_max_lin_mps" default="0.03"/>
+  <arg name="actuator_debug_max_ang_rps" default="0.05"/>
+  <arg name="actuator_debug_odom_stale_s" default="1.0"/>
+  <arg name="actuator_debug_telemetry_stale_s" default="2.0"/>
+  <arg name="actuator_debug_safety_status_stale_s" default="2.0"/>
+  <arg name="actuator_debug_require_safety_status" default="true"/>
+  <arg name="actuator_debug_unreadable_estop_ack_s" default="15.0"/>
+  <arg name="actuator_debug_post_off_status_wait_s" default="3.0"/>
+  <arg name="mcore_safety_status_bits_topic" default="/mcore_velocity_sender/safety_status_bits"/>
+  <arg name="mcore_telemetry_heartbeat_topic" default="/mcore_velocity_sender/telemetry_heartbeat"/>
 
   <group if="$(arg load_mode_profiles_yaml)">
     <rosparam command="load" file="$(arg mode_profiles_yaml)" ns="coverage_executor"/>
@@ -42,7 +58,7 @@
     <param name="mbf_connect_controller" value="MPPI_Connect_Controller"/>
     <param name="mbf_recovery" value=""/>
 
-    <param name="water_off_distance" value="2.0"/>
+    <param name="water_off_distance" value="6.0"/>
     <param name="vacuum_delay_s" value="1.5"/>
     <param name="keep_cleaning_on_during_connect" value="false"/>
 
@@ -54,19 +70,38 @@
     <param name="pause_hold_hz" value="10.0"/>
 
     <param name="cmd_vel_topic" value="/cmd_vel"/>
-    <param name="vel_water_pump" value="0"/>
-    <param name="vel_water_suction" value="0"/>
-    <param name="height_scrub" value="38"/>
+    <param name="side_brush_follows_brush" value="true"/>
+    <param name="side_brush_tool_id" value="3"/>
     <param name="clean_tool_cmd_interval_s" value="0.05"/>
     <param name="water_tap_cmd_interval_s" value="0.20"/>
-    <param name="mcore_connected_topic" value="/mcore_tcp_bridge/connected"/>
+    <param name="sewage_valve_tap_id" value="3"/>
+    <param name="mcore_connected_topic" value="$(arg mcore_connected_topic)"/>
     <param name="combined_status_topic" value="/combined_status"/>
+    <param name="charge_enable_topic" value="/mcore/charge_enable"/>
+    <param name="station_control_topic" value="/station/control"/>
     <param name="actuator_reconcile_hz" value="2.0"/>
     <param name="actuator_active_refresh_s" value="1.0"/>
     <param name="actuator_transition_retry_window_s" value="1.0"/>
     <param name="actuator_retry_interval_s" value="0.35"/>
+    <param name="actuator_retry_on_transition" value="true"/>
+    <param name="actuator_retry_off_transition" value="true"/>
+    <param name="actuator_force_off_repeat" value="2"/>
+    <param name="actuator_force_off_repeat_interval_s" value="0.20"/>
     <param name="actuator_feedback_retry_timeout_s" value="0.60"/>
     <param name="actuator_feedback_stale_s" value="2.0"/>
+    <!-- 前端执行机构调试：固定短租约，安全异常/超时自动全关 -->
+    <param name="actuator_debug_lease_s" value="$(arg actuator_debug_lease_s)"/>
+    <param name="actuator_debug_watchdog_hz" value="$(arg actuator_debug_watchdog_hz)"/>
+    <param name="actuator_debug_max_lin_mps" value="$(arg actuator_debug_max_lin_mps)"/>
+    <param name="actuator_debug_max_ang_rps" value="$(arg actuator_debug_max_ang_rps)"/>
+    <param name="actuator_debug_odom_stale_s" value="$(arg actuator_debug_odom_stale_s)"/>
+    <param name="actuator_debug_telemetry_stale_s" value="$(arg actuator_debug_telemetry_stale_s)"/>
+    <param name="actuator_debug_safety_status_stale_s" value="$(arg actuator_debug_safety_status_stale_s)"/>
+    <param name="actuator_debug_require_safety_status" value="$(arg actuator_debug_require_safety_status)"/>
+    <param name="actuator_debug_unreadable_estop_ack_s" value="$(arg actuator_debug_unreadable_estop_ack_s)"/>
+    <param name="actuator_debug_post_off_status_wait_s" value="$(arg actuator_debug_post_off_status_wait_s)"/>
+    <param name="mcore_safety_status_bits_topic" value="$(arg mcore_safety_status_bits_topic)"/>
+    <param name="mcore_telemetry_heartbeat_topic" value="$(arg mcore_telemetry_heartbeat_topic)"/>
     <param name="checkpoint_hz" value="1.0"/>
     <param name="startup_resume_run_id" value=""/>
     <param name="strict_map_check" value="$(arg strict_map_check)"/>
@@ -85,6 +120,9 @@
 
     <!-- 自动回充：由上层 launch 传参控制（默认 false） -->
     <param name="auto_charge_enable" value="$(arg auto_charge_enable)"/>
+    <param name="low_soc" value="$(arg low_soc)"/>
+    <param name="resume_soc" value="$(arg resume_soc)"/>
+    <param name="rearm_soc" value="$(arg rearm_soc)"/>
 
     <!-- AI spot cleaning for inspection/patrol mode -->
     <param name="ai_spot_enable" value="false"/>

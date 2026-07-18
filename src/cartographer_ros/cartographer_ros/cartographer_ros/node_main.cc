@@ -61,6 +61,24 @@ namespace
 constexpr int kWorkQueueWarnThreshold = 5000;
 constexpr int kWorkQueueErrorThreshold = 20000;
 constexpr double kLowMatchScoreThresholdPercent = 65.0;
+constexpr int kLowMatchScoreWarnMinCount = 3;
+constexpr double kLowMatchScoreWarnMinRatio = 0.20;
+// Keep the confirmed-loss fail-closed chain comfortably below its 2 s safety
+// budget even when the downstream SlamState publisher is between ticks.
+constexpr double kLocalizationHealthPublishPeriodSeconds = 0.2;
+
+bool HasLowMatchScoreWarning(
+    const cartographer::mapping::LocalizationHealthSnapshot &snapshot)
+{
+  if (snapshot.match_score_count <= 0 ||
+      snapshot.low_match_score_count < kLowMatchScoreWarnMinCount)
+  {
+    return false;
+  }
+  return static_cast<double>(snapshot.low_match_score_count) /
+             static_cast<double>(snapshot.match_score_count) >=
+         kLowMatchScoreWarnMinRatio;
+}
 
 std::string FormatDouble(const double value)
 {
@@ -104,6 +122,11 @@ diagnostic_msgs::DiagnosticArray BuildLocalizationHealthMessage()
     status.level = diagnostic_msgs::DiagnosticStatus::STALE;
     status.message = "waiting_for_cartographer_health_samples";
   }
+  else if (snapshot.localization_lost_confirmed)
+  {
+    status.level = diagnostic_msgs::DiagnosticStatus::ERROR;
+    status.message = "localization_lost_confirmed";
+  }
   else if (snapshot.latest_work_queue_size >= kWorkQueueErrorThreshold)
   {
     status.level = diagnostic_msgs::DiagnosticStatus::ERROR;
@@ -111,7 +134,7 @@ diagnostic_msgs::DiagnosticArray BuildLocalizationHealthMessage()
   }
   else if (snapshot.latest_work_queue_size >= kWorkQueueWarnThreshold ||
            snapshot.backpressure_count > 0 ||
-           snapshot.low_match_score_count > 0 ||
+           HasLowMatchScoreWarning(snapshot) ||
            snapshot.pure_localization_force_opt_count > 0 ||
            snapshot.active_frozen_ambiguous_reject_count > 0 ||
            snapshot.active_frozen_geometry_reject_count > 0 ||
@@ -150,6 +173,10 @@ diagnostic_msgs::DiagnosticArray BuildLocalizationHealthMessage()
   AddValue(&status, "match_score_count", snapshot.match_score_count);
   AddValue(&status, "low_match_score_count",
            snapshot.low_match_score_count);
+  AddValue(&status, "low_match_score_warn_min_count",
+           kLowMatchScoreWarnMinCount);
+  AddValue(&status, "low_match_score_warn_min_ratio",
+           FormatDouble(kLowMatchScoreWarnMinRatio));
   AddValue(&status, "latest_match_score_percent",
            FormatDouble(snapshot.latest_match_score_percent));
   AddValue(&status, "min_match_score_percent",
@@ -251,6 +278,67 @@ diagnostic_msgs::DiagnosticArray BuildLocalizationHealthMessage()
            snapshot.total_active_frozen_consistency_accept_count);
   AddValue(&status, "recovery_state", snapshot.recovery_state);
   AddValue(&status, "recovery_reason", snapshot.recovery_reason);
+  AddValue(&status, "automatic_relocation_enabled",
+           snapshot.automatic_relocation_enabled ? "true" : "false");
+  AddValue(&status, "localization_lost_confirmed",
+           snapshot.localization_lost_confirmed ? "true" : "false");
+  AddValue(&status, "localization_loss_episode",
+           snapshot.localization_loss_episode);
+  AddValue(&status, "localization_lost_reason", snapshot.recovery_reason);
+  AddValue(&status, "total_localization_loss_count",
+           snapshot.total_localization_loss_count);
+  AddValue(&status, "map_scan_distance_field_source",
+           snapshot.map_scan_distance_field_source);
+  AddValue(&status, "map_scan_distance_field_generation",
+           snapshot.map_scan_distance_field_generation);
+  AddValue(&status, "map_scan_distance_field_cells",
+           snapshot.map_scan_distance_field_cells);
+  AddValue(&status, "map_scan_distance_field_resident_bytes",
+           snapshot.map_scan_distance_field_resident_bytes);
+  AddValue(&status, "map_scan_distance_field_load_count",
+           snapshot.map_scan_distance_field_load_count);
+  AddValue(&status, "map_scan_distance_field_load_failure_count",
+           snapshot.map_scan_distance_field_load_failure_count);
+  AddValue(&status, "map_scan_distance_field_last_load_source",
+           snapshot.map_scan_distance_field_last_load_source);
+  AddValue(&status, "map_scan_distance_field_last_load_result",
+           snapshot.map_scan_distance_field_last_load_result);
+  AddValue(&status, "map_scan_distance_field_last_load_duration_ms",
+           FormatDouble(
+               snapshot.map_scan_distance_field_last_load_duration_ms));
+  AddValue(&status, "map_scan_distance_field_build_count",
+           snapshot.map_scan_distance_field_build_count);
+  AddValue(&status, "map_scan_distance_field_build_failure_count",
+           snapshot.map_scan_distance_field_build_failure_count);
+  AddValue(&status, "map_scan_distance_field_build_published_count",
+           snapshot.map_scan_distance_field_build_published_count);
+  AddValue(&status, "map_scan_distance_field_build_unpublished_count",
+           snapshot.map_scan_distance_field_build_unpublished_count);
+  AddValue(&status, "map_scan_distance_field_last_build_source",
+           snapshot.map_scan_distance_field_last_build_source);
+  AddValue(&status, "map_scan_distance_field_last_build_result",
+           snapshot.map_scan_distance_field_last_build_result);
+  AddValue(&status, "map_scan_distance_field_last_build_published",
+           snapshot.map_scan_distance_field_last_build_published ? "true"
+                                                                 : "false");
+  AddValue(&status, "map_scan_distance_field_last_build_duration_ms",
+           FormatDouble(
+               snapshot.map_scan_distance_field_last_build_duration_ms));
+  AddValue(&status, "map_scan_distance_field_invalidation_count",
+           snapshot.map_scan_distance_field_invalidation_count);
+  AddValue(&status, "map_scan_distance_field_last_invalidation_reason",
+           snapshot.map_scan_distance_field_last_invalidation_reason);
+  AddValue(&status, "map_scan_distance_field_query_count",
+           snapshot.map_scan_distance_field_query_count);
+  AddValue(&status, "map_scan_distance_field_last_query_duration_ms",
+           FormatDouble(
+               snapshot.map_scan_distance_field_last_query_duration_ms));
+  AddValue(&status, "map_scan_distance_field_mean_query_duration_ms",
+           FormatDouble(
+               snapshot.map_scan_distance_field_mean_query_duration_ms));
+  AddValue(&status, "map_scan_distance_field_max_query_duration_ms",
+           FormatDouble(
+               snapshot.map_scan_distance_field_max_query_duration_ms));
   AddValue(&status, "recovery_full_search_count",
            snapshot.recovery_full_search_count);
   AddValue(&status, "latest_recovery_full_search_submap_count",
@@ -300,7 +388,7 @@ int main(int argc, char **argv)
       node_handle.advertise<diagnostic_msgs::DiagnosticArray>(
           "/cartographer/localization_health", 1, true);
   auto localization_health_timer = node_handle.createWallTimer(
-      ::ros::WallDuration(1.0),
+      ::ros::WallDuration(kLocalizationHealthPublishPeriodSeconds),
       [&localization_health_publisher](const ::ros::WallTimerEvent &)
       {
         localization_health_publisher.publish(

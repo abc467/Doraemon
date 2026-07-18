@@ -29,4 +29,5 @@ install(DIRECTORY launch
 if(CATKIN_ENABLE_TESTING)
   find_package(rostest REQUIRED)
   add_rostest(test/mcore_actuator_packets.test)
+  catkin_add_nosetests(test/test_dock_supply_workflow.py)
 endif()

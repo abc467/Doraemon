@@ -59,7 +59,7 @@ def main():
     connect_controller = rospy.get_param("~mbf_connect_controller", "")
     recovery = rospy.get_param("~mbf_recovery", "")
 
-    water_off_distance = rospy.get_param("~water_off_distance", 2.0)
+    water_off_distance = rospy.get_param("~water_off_distance", 6.0)
     vacuum_delay_s = rospy.get_param("~vacuum_delay_s", 1.5)
     keep_cleaning_on_during_connect = rospy.get_param("~keep_cleaning_on_during_connect", True)
 
@@ -122,14 +122,37 @@ def main():
     speed_limit_scale_enable = rospy.get_param("~speed_limit_scale_enable", True)
     speed_limit_scale_when_actuating = rospy.get_param("~speed_limit_scale_when_actuating", 1.0)
 
+    # Exclusive actuator-debug lease (frontend engineering tool).
+    actuator_debug_lease_s = rospy.get_param("~actuator_debug_lease_s", 30.0)
+    actuator_debug_watchdog_hz = rospy.get_param("~actuator_debug_watchdog_hz", 5.0)
+    actuator_debug_max_lin_mps = rospy.get_param("~actuator_debug_max_lin_mps", 0.03)
+    actuator_debug_max_ang_rps = rospy.get_param("~actuator_debug_max_ang_rps", 0.05)
+    actuator_debug_odom_stale_s = rospy.get_param("~actuator_debug_odom_stale_s", 1.0)
+    actuator_debug_telemetry_stale_s = rospy.get_param(
+        "~actuator_debug_telemetry_stale_s", 2.0
+    )
+    actuator_debug_safety_status_stale_s = rospy.get_param(
+        "~actuator_debug_safety_status_stale_s",
+        rospy.get_param("~actuator_debug_combined_status_stale_s", 2.0),
+    )
+    actuator_debug_require_safety_status = rospy.get_param(
+        "~actuator_debug_require_safety_status", False
+    )
+    actuator_debug_unreadable_estop_ack_s = rospy.get_param(
+        "~actuator_debug_unreadable_estop_ack_s", 15.0
+    )
+    actuator_debug_post_off_status_wait_s = rospy.get_param(
+        "~actuator_debug_post_off_status_wait_s", 3.0
+    )
+
     # AutoCharge params
     auto_charge_enable = rospy.get_param("~auto_charge_enable", False)
     auto_charge_check_hz = rospy.get_param("~auto_charge_check_hz", 1.0)
     battery_topic = rospy.get_param("~battery_topic", "/battery_state")
     battery_stale_timeout_s = rospy.get_param("~battery_stale_timeout_s", 5.0)
 
-    low_soc = rospy.get_param("~low_soc", 0.2)
-    resume_soc = rospy.get_param("~resume_soc", 0.8)
+    low_soc = rospy.get_param("~low_soc", 0.15)
+    resume_soc = rospy.get_param("~resume_soc", 0.95)
     rearm_soc = rospy.get_param("~rearm_soc", 0.3)
 
     dock_timeout_s = rospy.get_param("~dock_timeout_s", 600.0)
@@ -201,6 +224,21 @@ def main():
         interlock_mask_vacuum=bool(interlock_mask_vacuum),
         speed_limit_scale_enable=bool(speed_limit_scale_enable),
         speed_limit_scale_when_actuating=float(speed_limit_scale_when_actuating),
+
+        actuator_debug_lease_s=float(actuator_debug_lease_s),
+        actuator_debug_watchdog_hz=float(actuator_debug_watchdog_hz),
+        actuator_debug_max_lin_mps=float(actuator_debug_max_lin_mps),
+        actuator_debug_max_ang_rps=float(actuator_debug_max_ang_rps),
+        actuator_debug_odom_stale_s=float(actuator_debug_odom_stale_s),
+        actuator_debug_telemetry_stale_s=float(actuator_debug_telemetry_stale_s),
+        actuator_debug_safety_status_stale_s=float(actuator_debug_safety_status_stale_s),
+        actuator_debug_require_safety_status=bool(
+            actuator_debug_require_safety_status
+        ),
+        actuator_debug_unreadable_estop_ack_s=float(
+            actuator_debug_unreadable_estop_ack_s
+        ),
+        actuator_debug_post_off_status_wait_s=float(actuator_debug_post_off_status_wait_s),
 
         connect_retry_max=int(connect_retry_max),
         follow_retry_max=int(follow_retry_max),

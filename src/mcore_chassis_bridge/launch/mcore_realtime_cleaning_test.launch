@@ -1,0 +1,81 @@
+<launch>
+  <arg name="transport" default="tcp"/>
+  <arg name="tcp_host" default="192.168.127.10"/>
+  <arg name="tcp_port" default="8080"/>
+  <arg name="send_rate_hz" default="10.0"/>
+
+  <arg name="cmd_vel_rate_hz" default="10.0"/>
+  <arg name="cmd_vel_linear_x" default="0.0"/>
+  <arg name="cmd_vel_angular_z" default="0.0"/>
+  <arg name="active_duration_sec" default="20.0"/>
+  <arg name="post_stop_hold_sec" default="3.0"/>
+
+  <arg name="profile_name" default="standard_test"/>
+  <arg name="main_brush_speed" default="40"/>
+  <arg name="side_brush_speed" default="10"/>
+  <arg name="side_brush_enable" default="true"/>
+  <arg name="brush_down_distance" default="1000"/>
+  <arg name="vel_water_pump" default="5"/>
+  <arg name="suction_machine_pwm" default="70"/>
+  <arg name="vacuum_motor_pwm" default="70"/>
+
+  <arg name="clean_tool_cmd_interval_s" default="0.05"/>
+  <arg name="water_tap_cmd_interval_s" default="0.20"/>
+  <arg name="actuator_transition_retry_window_s" default="1.0"/>
+  <arg name="actuator_retry_interval_s" default="0.35"/>
+  <arg name="actuator_active_refresh_s" default="1.0"/>
+  <arg name="enable_on_transition_retry" default="true"/>
+  <arg name="enable_stop_transition_retry" default="true"/>
+
+  <include file="$(find mcore_chassis_bridge)/launch/mcore_velocity_sender.launch">
+    <arg name="transport" value="$(arg transport)"/>
+    <arg name="tcp_host" value="$(arg tcp_host)"/>
+    <arg name="tcp_port" value="$(arg tcp_port)"/>
+    <arg name="send_rate_hz" value="$(arg send_rate_hz)"/>
+    <arg name="send_immediately" value="true"/>
+    <arg name="repeat_last_cmd_vel" value="false"/>
+    <arg name="rx_poll_hz" value="100.0"/>
+    <arg name="enable_battery_remaining_poll" value="true"/>
+    <arg name="enable_water_level_poll" value="true"/>
+    <arg name="telemetry_poll_interval_sec" value="1.3"/>
+    <arg name="telemetry_velocity_quiet_sec" value="0.0"/>
+    <arg name="telemetry_control_cooldown_sec" value="0.3"/>
+    <arg name="enable_tx_log" value="true"/>
+    <arg name="enable_rx_log" value="true"/>
+    <arg name="send_cleaning_stop_on_shutdown" value="false"/>
+    <arg name="main_brush_speed" value="$(arg main_brush_speed)"/>
+    <arg name="side_brush_on_value" value="$(arg side_brush_speed)"/>
+    <arg name="brush_down_distance" value="$(arg brush_down_distance)"/>
+    <arg name="vel_water_pump" value="$(arg vel_water_pump)"/>
+    <arg name="vel_water_suction" value="$(arg vacuum_motor_pwm)"/>
+  </include>
+
+  <node pkg="mcore_chassis_bridge"
+        type="mcore_realtime_cleaning_test_node.py"
+        name="mcore_realtime_cleaning_test"
+        output="screen"
+        required="true">
+    <param name="cmd_vel_rate_hz" value="$(arg cmd_vel_rate_hz)"/>
+    <param name="cmd_vel_linear_x" value="$(arg cmd_vel_linear_x)"/>
+    <param name="cmd_vel_angular_z" value="$(arg cmd_vel_angular_z)"/>
+    <param name="active_duration_sec" value="$(arg active_duration_sec)"/>
+    <param name="post_stop_hold_sec" value="$(arg post_stop_hold_sec)"/>
+
+    <param name="profile_name" value="$(arg profile_name)"/>
+    <param name="main_brush_speed" value="$(arg main_brush_speed)"/>
+    <param name="side_brush_speed" value="$(arg side_brush_speed)"/>
+    <param name="side_brush_enable" value="$(arg side_brush_enable)"/>
+    <param name="brush_down_distance" value="$(arg brush_down_distance)"/>
+    <param name="vel_water_pump" value="$(arg vel_water_pump)"/>
+    <param name="suction_machine_pwm" value="$(arg suction_machine_pwm)"/>
+    <param name="vacuum_motor_pwm" value="$(arg vacuum_motor_pwm)"/>
+
+    <param name="clean_tool_cmd_interval_s" value="$(arg clean_tool_cmd_interval_s)"/>
+    <param name="water_tap_cmd_interval_s" value="$(arg water_tap_cmd_interval_s)"/>
+    <param name="actuator_transition_retry_window_s" value="$(arg actuator_transition_retry_window_s)"/>
+    <param name="actuator_retry_interval_s" value="$(arg actuator_retry_interval_s)"/>
+    <param name="actuator_active_refresh_s" value="$(arg actuator_active_refresh_s)"/>
+    <param name="enable_on_transition_retry" value="$(arg enable_on_transition_retry)"/>
+    <param name="enable_stop_transition_retry" value="$(arg enable_stop_transition_retry)"/>
+  </node>
+</launch>

@@ -24,11 +24,11 @@ default_no_go_long_edge_normal_buffer_m: 0.15
 default_no_go_short_edge_normal_buffer_m: 0.40
 robot:
   # Fields2Cover 使用的覆盖条带宽度；它更接近相邻清扫路径间距，而不是路径点间距，单位米。
-  cov_width: 0.60
+  cov_width: 0.54
   # 机器人物理宽度，单位米。
   width: 0.65
   # 机器人最小转弯半径，单位米。
-  min_turning_radius: 0.40
+  min_turning_radius: 0.32
   # 曲率变化约束上限；值越小，转弯通常越平滑。
   max_diff_curv: 0.30
 
@@ -52,11 +52,14 @@ planner:
   # 生成覆盖路径前，路径中心相对墙体 / 边界的收缩安全距离，单位米。
   # 狭窄区域如果无法满足该安全边距，应规划失败，而不是自动降低安全距离。
   wall_margin_m: 0.38
-  # 在插入转弯前，从每条覆盖条带两端裁掉的预留距离，单位米。
+  # 从源 Cell / 内接矩形边界到条带裁剪端点的总退让目标，单位米。
+  # 内接矩形已在四边预先应用 wall_margin，实际条带裁剪量会自动减去该部分：1.20-0.38=0.82m。
   turn_margin_m: 1.20
   # 约束切分后的子区域短边小于该值时，不送入 Fields2Cover，单位米。
   # 0 表示使用动态估算；这里使用小正数，只过滤明显退化区域，让实际规划结果决定是否可用。
   min_plannable_span_m: 0.05
+  # Fields2Cover 生成的条带低于此长度时不参与 Snake 排序和 Dubins 连接，用于剔除孔洞端部的数值尖刺。
+  min_swath_length_m: 0.40
   # 边缘收边环路使用的圆角半径；实际生效值不会小于 min_turning_radius。
   edge_corner_radius_m: 0.40
   # 边缘收边圆角的 Bezier 拉伸系数；会影响圆角看起来更紧还是更舒展。
