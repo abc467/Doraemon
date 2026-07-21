@@ -33,7 +33,7 @@ if ! commercial_verify_release_git_identity "${REPO_ROOT}" \
     "${DORAEMON_BACKEND_GIT_URL}"; then
   exit 1
 fi
-BUILD_GIT_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+BUILD_GIT_COMMIT="$(commercial_release_git_readonly "${REPO_ROOT}" head-commit)"
 BUILD_SOURCE_ATTESTATION=remote
 if ! commercial_verify_remote_deployment_tag \
     "${DORAEMON_BACKEND_GIT_URL}" \
@@ -145,7 +145,8 @@ fi
   printf 'DORAEMON_BUILD_REPO_ROOT=%s\n' "${REPO_ROOT}"
   printf 'DORAEMON_BUILD_GIT_TAG=%s\n' "${DORAEMON_BACKEND_DEPLOYMENT_TAG}"
   printf 'DORAEMON_BUILD_GIT_COMMIT=%s\n' "${BUILD_GIT_COMMIT}"
-  printf 'DORAEMON_BUILD_GIT_TREE=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+  printf 'DORAEMON_BUILD_GIT_TREE=%s\n' \
+    "$(commercial_release_git_readonly "${REPO_ROOT}" head-tree)"
   printf 'DORAEMON_BUILD_HOSTNAME=%s\n' "$(hostname)"
   printf 'DORAEMON_BUILD_MACHINE_ID_SHA256=%s\n' "$(sha256sum /etc/machine-id | awk '{print $1}')"
   printf 'DORAEMON_BUILD_CMAKE_BIN=%s\n' "$(realpath -e -- "${DORAEMON_CMAKE_BIN}")"

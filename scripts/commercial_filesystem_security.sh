@@ -93,11 +93,238 @@ commercial_find_forbidden_release_artifact() {
     \) -print -quit
 }
 
+declare -Ag COMMERCIAL_FROZEN_RELEASE_GIT_AUDIT=()
+
+commercial_validate_frozen_release_for_root_git() {
+  local root="$1"
+  local ancestor=""
+  local relative=""
+  local offender=""
+  local config_keys=""
+  local key=""
+
+  relative="${root#/opt/doraemon/releases/}"
+  if [[ "${relative}" == "${root}" || "${relative}" == */* || \
+        ! "${relative}" =~ ^[A-Za-z0-9][-A-Za-z0-9._]*$ ]]; then
+    echo "[ERROR] frozen release Git root is outside the canonical release directory" >&2
+    return 1
+  fi
+  for ancestor in /opt /opt/doraemon /opt/doraemon/releases; do
+    if [[ ! -d "${ancestor}" || -L "${ancestor}" || \
+          "$(stat -c '%U:%G %a' "${ancestor}" 2>/dev/null || true)" != \
+            "root:root 755" ]]; then
+      echo "[ERROR] frozen release ancestor must be a real root:root mode 0755 directory: ${ancestor}" >&2
+      return 1
+    fi
+  done
+  if [[ "$(stat -c '%U:%G' "${root}" 2>/dev/null || true)" != "root:root" ]]; then
+    echo "[ERROR] frozen release Git root must be root:root" >&2
+    return 1
+  fi
+  if ! offender="$(find "${root}" -xdev \
+      \( -type f -o -type d -o -type l \) \
+      \( ! -user root -o ! -group root \) -print -quit 2>&1)"; then
+    echo "[ERROR] failed to audit frozen release ownership: ${offender}" >&2
+    return 1
+  fi
+  if [[ -n "${offender}" ]]; then
+    echo "[ERROR] root Git inspection refused a partially frozen release: ${offender}" >&2
+    return 1
+  fi
+  if ! offender="$(find "${root}" -xdev \( -type f -o -type d \) \
+      -perm /022 -print -quit 2>&1)"; then
+    echo "[ERROR] failed to audit frozen release permissions: ${offender}" >&2
+    return 1
+  fi
+  if [[ -n "${offender}" ]]; then
+    echo "[ERROR] root Git inspection refused a writable release path: ${offender}" >&2
+    return 1
+  fi
+  if ! offender="$(find "${root}" -xdev ! -type f ! -type d ! -type l \
+      -print -quit 2>&1)"; then
+    echo "[ERROR] failed to audit frozen release file types: ${offender}" >&2
+    return 1
+  fi
+  if [[ -n "${offender}" ]]; then
+    echo "[ERROR] root Git inspection refused a special file: ${offender}" >&2
+    return 1
+  fi
+  if offender="$(commercial_find_mount_below "${root}" 0)"; then
+    echo "[ERROR] root Git inspection refused a nested release mount: ${offender}" >&2
+    return 1
+  fi
+  if offender="$(commercial_find_unsafe_release_symlink "${root}")"; then
+    echo "[ERROR] root Git inspection refused an unsafe release symlink: ${offender}" >&2
+    return 1
+  fi
+  for offender in \
+    "${root}/.git/objects/info/alternates" \
+    "${root}/.git/info/grafts" \
+    "${root}/.git/config.worktree" \
+    "${root}/.git/commondir"; do
+    if [[ -e "${offender}" || -L "${offender}" ]]; then
+      echo "[ERROR] root Git inspection refused alternate repository metadata: ${offender}" >&2
+      return 1
+    fi
+  done
+  if [[ ! -f "${root}/.git/config" || -L "${root}/.git/config" || \
+        "$(stat -c '%U:%G %a' "${root}/.git/config" 2>/dev/null || true)" != \
+          "root:root 644" ]]; then
+    echo "[ERROR] frozen release Git config must be root:root mode 0644" >&2
+    return 1
+  fi
+  if ! config_keys="$(env -i HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 LC_ALL=C \
+      /usr/bin/timeout --signal=TERM --kill-after=2s 15s \
+      /usr/bin/git config --file "${root}/.git/config" --no-includes \
+      --name-only --get-regexp '.*' 2>&1)"; then
+    echo "[ERROR] failed to inspect frozen release Git config: ${config_keys}" >&2
+    return 1
+  fi
+  while IFS= read -r key; do
+    case "${key}" in
+      core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|\
+      remote.origin.url|remote.origin.fetch)
+        ;;
+      *)
+        echo "[ERROR] frozen release Git config contains an unsafe key: ${key}" >&2
+        return 1
+        ;;
+    esac
+  done <<<"${config_keys}"
+
+  COMMERCIAL_FROZEN_RELEASE_GIT_AUDIT["${root}"]=1
+}
+
+commercial_prepare_release_git_readonly() {
+  local root="$1"
+  local canonical_root=""
+  local root_uid=""
+  local current_uid=""
+
+  canonical_root="$(realpath -e -- "${root}" 2>/dev/null)" || {
+    echo "[ERROR] release Git root does not exist: ${root}" >&2
+    return 1
+  }
+  if [[ "${canonical_root}" != "${root}" || ! -d "${root}/.git" || \
+        -L "${root}/.git" ]]; then
+    echo "[ERROR] release Git root must be a canonical worktree with real metadata" >&2
+    return 1
+  fi
+  root_uid="$(stat -c '%u' "${root}" 2>/dev/null || true)"
+  current_uid="$(id -u)"
+  if [[ "${root_uid}" == "${current_uid}" && "${current_uid}" != "0" ]]; then
+    return 0
+  fi
+  if [[ "${root_uid}" != "0" ]]; then
+    echo "[ERROR] release Git root is owned by neither the deployment user nor root" >&2
+    return 1
+  fi
+  if [[ -z "${COMMERCIAL_FROZEN_RELEASE_GIT_AUDIT[${root}]+x}" ]]; then
+    commercial_validate_frozen_release_for_root_git "${root}" || return 1
+  fi
+}
+
+commercial_release_git_readonly() {
+  local root="${1:-}"
+  local operation="${2:-}"
+  local value="${3:-}"
+  local root_uid=""
+  local current_uid=""
+  local -a git_args=()
+  local -a git_command=()
+
+  if [[ -z "${root}" || -z "${operation}" || "${#}" -gt 3 ]]; then
+    echo "[ERROR] read-only release Git inspection received invalid arguments" >&2
+    return 1
+  fi
+  case "${operation}" in
+    is-shallow)
+      [[ "${#}" -eq 2 ]] || return 1
+      git_args=(rev-parse --is-shallow-repository)
+      ;;
+    exact-tag)
+      [[ "${#}" -eq 3 && "${value}" =~ ^[A-Za-z0-9][-A-Za-z0-9._]*$ ]] || return 1
+      git_args=(describe --tags --exact-match)
+      ;;
+    tag-object-type)
+      [[ "${#}" -eq 3 && "${value}" =~ ^[A-Za-z0-9][-A-Za-z0-9._]*$ ]] || return 1
+      git_args=(cat-file -t "refs/tags/${value}")
+      ;;
+    origin-url)
+      [[ "${#}" -eq 2 ]] || return 1
+      git_args=(remote get-url --all origin)
+      ;;
+    head-commit)
+      [[ "${#}" -eq 2 ]] || return 1
+      git_args=(rev-parse HEAD)
+      ;;
+    tag-commit)
+      [[ "${#}" -eq 3 && "${value}" =~ ^[A-Za-z0-9][-A-Za-z0-9._]*$ ]] || return 1
+      git_args=(rev-list -n 1 "refs/tags/${value}")
+      ;;
+    clean-status)
+      [[ "${#}" -eq 2 ]] || return 1
+      git_args=(status --porcelain=v1 --untracked-files=all)
+      ;;
+    head-tree)
+      [[ "${#}" -eq 2 ]] || return 1
+      git_args=(rev-parse 'HEAD^{tree}')
+      ;;
+    *)
+      echo "[ERROR] release Git inspection operation is not allowed: ${operation}" >&2
+      return 1
+      ;;
+  esac
+
+  commercial_prepare_release_git_readonly "${root}" || return 1
+
+  git_command=(
+    /usr/bin/timeout
+    --signal=TERM
+    --kill-after=2s
+    15s
+    /usr/bin/git
+    --no-pager
+    --no-optional-locks
+    --no-replace-objects
+    -c "safe.directory=${root}"
+    -c core.hooksPath=/dev/null
+    -c core.fsmonitor=false
+    -c submodule.recurse=false
+    -C "${root}"
+    "${git_args[@]}"
+  )
+  root_uid="$(stat -c '%u' "${root}" 2>/dev/null || true)"
+  current_uid="$(id -u)"
+  if [[ "${root_uid}" == "${current_uid}" ]]; then
+    env -i \
+      HOME=/nonexistent \
+      GIT_CONFIG_NOSYSTEM=1 \
+      GIT_OPTIONAL_LOCKS=0 \
+      GIT_TERMINAL_PROMPT=0 \
+      LC_ALL=C \
+      "${git_command[@]}"
+    return
+  fi
+  if ! /usr/bin/sudo -n -- /usr/bin/env -i \
+    HOME=/nonexistent \
+    GIT_CONFIG_NOSYSTEM=1 \
+    GIT_OPTIONAL_LOCKS=0 \
+    GIT_TERMINAL_PROMPT=0 \
+    LC_ALL=C \
+    "${git_command[@]}"; then
+    echo "[ERROR] frozen release Git inspection failed; if sudo authorization expired, run sudo -v manually" >&2
+    return 1
+  fi
+}
+
 commercial_verify_release_git_identity() {
   local root="$1"
   local expected_tag="$2"
   local expected_origin="${3:-}"
   local actual=""
+  local actual_head=""
+  local actual_tag_commit=""
   local status_output=""
 
   if [[ "$(basename -- "${root}")" != "${expected_tag}" ]]; then
@@ -109,35 +336,38 @@ commercial_verify_release_git_identity() {
     echo "[ERROR] backend release must be a shallow Git clone with real .git metadata" >&2
     return 1
   fi
-  if ! actual="$(git -c safe.directory="${root}" -C "${root}" \
-      rev-parse --is-shallow-repository 2>/dev/null)" || [[ "${actual}" != "true" ]]; then
+  commercial_prepare_release_git_readonly "${root}" || return 1
+  if ! actual="$(commercial_release_git_readonly "${root}" \
+      is-shallow)" || [[ "${actual}" != "true" ]]; then
     echo "[ERROR] backend release repository is not shallow" >&2
     return 1
   fi
-  if ! actual="$(git -c safe.directory="${root}" -C "${root}" \
-      describe --tags --exact-match 2>/dev/null)" || [[ "${actual}" != "${expected_tag}" ]]; then
+  if ! actual="$(commercial_release_git_readonly "${root}" \
+      exact-tag "${expected_tag}" 2>/dev/null)" || [[ "${actual}" != "${expected_tag}" ]]; then
     echo "[ERROR] backend release HEAD is not exact tag ${expected_tag}" >&2
     return 1
   fi
-  if [[ "$(git -c safe.directory="${root}" -C "${root}" \
-      cat-file -t "refs/tags/${expected_tag}" 2>/dev/null || true)" != "tag" ]]; then
+  if [[ "$(commercial_release_git_readonly "${root}" \
+      tag-object-type "${expected_tag}" 2>/dev/null || true)" != "tag" ]]; then
     echo "[ERROR] deployment tag must be an annotated tag object: ${expected_tag}" >&2
     return 1
   fi
   if [[ -n "${expected_origin}" ]]; then
-    if ! actual="$(git -c safe.directory="${root}" -C "${root}" \
-        remote get-url --all origin 2>/dev/null)" || [[ "${actual}" != "${expected_origin}" ]]; then
+    if ! actual="$(commercial_release_git_readonly "${root}" \
+        origin-url 2>/dev/null)" || [[ "${actual}" != "${expected_origin}" ]]; then
       echo "[ERROR] backend origin must be exactly ${expected_origin} (actual=${actual:-missing})" >&2
       return 1
     fi
   fi
-  if [[ "$(git -c safe.directory="${root}" -C "${root}" rev-parse HEAD 2>/dev/null)" != \
-        "$(git -c safe.directory="${root}" -C "${root}" rev-list -n 1 "${expected_tag}" 2>/dev/null)" ]]; then
+  if ! actual_head="$(commercial_release_git_readonly "${root}" head-commit 2>/dev/null)" || \
+      ! actual_tag_commit="$(commercial_release_git_readonly "${root}" \
+        tag-commit "${expected_tag}" 2>/dev/null)" || \
+      [[ "${actual_head}" != "${actual_tag_commit}" ]]; then
     echo "[ERROR] deployment tag ${expected_tag} does not resolve to release HEAD" >&2
     return 1
   fi
-  if ! status_output="$(git -c safe.directory="${root}" -C "${root}" \
-      status --porcelain=v1 --untracked-files=all 2>&1)"; then
+  if ! status_output="$(commercial_release_git_readonly "${root}" \
+      clean-status 2>&1)"; then
     echo "[ERROR] failed to inspect backend release Git status: ${status_output}" >&2
     return 1
   fi
@@ -389,8 +619,8 @@ commercial_validate_workspace_build_provenance() {
     fi
   done
 
-  actual_commit="$(git -c safe.directory="${root}" -C "${root}" rev-parse HEAD 2>/dev/null)" || return 1
-  actual_tree="$(git -c safe.directory="${root}" -C "${root}" rev-parse 'HEAD^{tree}' 2>/dev/null)" || return 1
+  actual_commit="$(commercial_release_git_readonly "${root}" head-commit 2>/dev/null)" || return 1
+  actual_tree="$(commercial_release_git_readonly "${root}" head-tree 2>/dev/null)" || return 1
   actual_hostname="$(hostname)"
   actual_machine_id_sha256="$(sha256sum /etc/machine-id | awk '{print $1}')"
   if [[ "${marker_values[DORAEMON_BUILD_PROVENANCE_VERSION]}" != "1" ||

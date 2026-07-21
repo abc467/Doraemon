@@ -1,6 +1,6 @@
 # 清洁机器人 x86 Ubuntu 20.04 商业部署手册
 
-版本：2026-07-21 v3
+版本：2026-07-21 v4
 
 本文用于把 Doraemon 清洁机器人后端、清洁机器人前端和 Site Gateway
 部署到全新的 x86 主板。目标系统为 Ubuntu 20.04，部署操作用户为 `a`。
@@ -11,7 +11,7 @@
 
 | 工程 | GitHub | 部署标签 |
 | --- | --- | --- |
-| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-21-x86-ubuntu20-v3` |
+| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-21-x86-ubuntu20-v4` |
 | 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-21-frontend-v2` |
 
 不要用仓库默认分支或 `latest` 做批量生产。部署标签、依赖清单和验收记录
@@ -88,7 +88,7 @@ group/other 写权限。`current` 符号链接本身也必须为 `root:root`。
 | --- | --- |
 | 车辆资产编号 | `<公司资产系统中的唯一编号>` |
 | hostname | `clean-robot-<唯一序号>` |
-| 后端标签 | `deployment-2026-07-21-x86-ubuntu20-v3` |
+| 后端标签 | `deployment-2026-07-21-x86-ubuntu20-v4` |
 | 前端标签 | `deployment-2026-07-21-frontend-v2` |
 | 机器人内部网口 | 现场识别，例如 `eno1` |
 | A-box 地址 | `192.168.127.11/24` |
@@ -177,7 +177,7 @@ Ubuntu 维护方案和受控 APT/ROS 镜像，保存安装包与校验值，不�
 sudo install -d -o root -g root -m 0755 /opt/doraemon/releases
 sudo install -d -o root -g root -m 0755 /opt/doraemon/deps
 sudo install -d -o a -g a -m 0755 \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 ```
 
@@ -187,21 +187,21 @@ stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-21-x86-ubuntu20-v3 \
+  --branch deployment-2026-07-21-x86-ubuntu20-v4 \
   https://github.com/abc467/Doraemon.git \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 ```
 
 验证：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
 git rev-parse HEAD
 git rev-parse --is-shallow-repository
 du -sh . .git
-release=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+release=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 find "${release}" -xdev \
   -path "${release}/.git" -prune -o \
   \( \
@@ -261,7 +261,7 @@ FLIRT 兼容源码已小体积纳入 `third_party/flirt`，来源和修改说明
 依赖编译可能较久。并发数应按主板内存调整；首次部署建议从 4 开始：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 DORAEMON_BUILD_JOBS=4 ./scripts/install_x86_ubuntu20_dependencies.sh
 ```
 
@@ -292,7 +292,7 @@ reset/clean，也不得改成任意新版本来绕过错误。
 ### 6.3 依赖验收
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 cat /etc/doraemon/deps.env
 source /etc/profile.d/doraemon-deps.sh
 /opt/doraemon/deps/cmake-3.20.6/bin/cmake --version
@@ -371,7 +371,7 @@ test -z "$(find /opt/doraemon/deps -xdev \
 ## 7. 阶段 D：编译后端工作空间
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 ```
 
@@ -382,7 +382,7 @@ Fields2Cover、`coverage_planner`、`coverage_task_manager` 和
 检查：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source devel/setup.bash
@@ -481,7 +481,7 @@ udevadm info --query=property --name=/dev/ttyUSB0
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3/deploy/udev/99-doraemon-a26022-serial.rules.example \
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4/deploy/udev/99-doraemon-a26022-serial.rules.example \
   /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 sudoedit /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 ```
@@ -503,7 +503,7 @@ ls -l /dev/imu /dev/wheel_odom /dev/mcore
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
   /etc/udev/rules.d/99-obsensor-ros1-libusb.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -533,7 +533,7 @@ systemctl is-enabled doraemon-runtime.service || true
 清理或替换 `build/`、`devel/`：
 
 ```bash
-release=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+release=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 cd "${release}"
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
@@ -556,37 +556,37 @@ test -z "$(find "${release}" -xdev \
       -iname export.log -o -iname '*.db' -o -iname '*.sqlite*' \) \
   \) -print -quit)"
 sudo chown -hR root:root \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 sudo chmod -R go-w \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 sudo chown root:root /opt/doraemon/releases
 sudo chmod 0755 /opt/doraemon/releases
 sudo ln -sfn \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
+  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
   /opt/doraemon/current
 sudo chown -h root:root /opt/doraemon/current
 
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
   -xdev \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
   -xdev \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/doraemon/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/doraemon/current)" = 'root:root'
 test "$(readlink -f /opt/doraemon/current)" = \
-  '/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3'
+  '/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4'
 test "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
-  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
+  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
   describe --tags --exact-match)" = \
-  'deployment-2026-07-21-x86-ubuntu20-v3'
+  'deployment-2026-07-21-x86-ubuntu20-v4'
 test -z "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
-  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
+  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
   status --porcelain=v1 --untracked-files=all)"
 sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
-  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
+  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4 \
   rev-parse HEAD
 ```
 
@@ -596,13 +596,19 @@ sudo git \
 冻结后的 Git 检查必须使用上面的单次
 `sudo git -c safe.directory=<物理-release> -C <物理-release> ...` 形式；不要把生产目录
 永久加入任一用户的全局 `safe.directory`。
+Ubuntu 20.04 当前 Git 2.25.1 不接受部署用户通过命令行 `-c safe.directory` 直接读取
+root-owned worktree。商业安装器和 verifier 会先确认物理 release 为规范单层路径、全树
+`root:root`、无 group/other 写权限、无嵌套挂载和危险 Git 本地配置，再通过固定操作
+allowlist 执行一次性 `sudo -n git` 只读检查；它们不得改用全局 `safe.directory`，也不得
+把 release owner 改回 `a`。若 sudo 凭据已失效，先停止并由操作员在终端手动执行
+`sudo -v`，再从未产生安装写入的入口重试。
 保留 `build/`、`devel/` 的前提是它们确由本新主板从精确标签干净生成，并和整个 child
 一起冻结；任何来自旧主板或候选工作区的构建目录仍属于 `[停止条件]`。
 
 只从这个已冻结的物理 release 安装，显式保持“不启用”：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v3
+cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v4
 DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
 ```
 

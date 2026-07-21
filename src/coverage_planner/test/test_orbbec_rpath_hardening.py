@@ -113,7 +113,7 @@ class OrbbecRpathHardeningTest(unittest.TestCase):
                 [
                     "patchelf",
                     "--set-rpath",
-                    "/var/tmp/doraemon-v3-work/lib::.",
+                    "/var/tmp/doraemon-candidate-work/lib::.",
                     str(candidate),
                 ],
                 check=True,

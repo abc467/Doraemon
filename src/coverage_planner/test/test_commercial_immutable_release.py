@@ -28,7 +28,7 @@ class CommercialImmutableReleaseTest(unittest.TestCase):
     def test_manifest_pins_backend_and_frontend_release_identities(self):
         text = MANIFEST.read_text(encoding="utf-8")
         self.assertIn(
-            "DORAEMON_BACKEND_DEPLOYMENT_TAG=deployment-2026-07-21-x86-ubuntu20-v3",
+            "DORAEMON_BACKEND_DEPLOYMENT_TAG=deployment-2026-07-21-x86-ubuntu20-v4",
             text,
         )
         self.assertIn(
@@ -134,6 +134,41 @@ class CommercialImmutableReleaseTest(unittest.TestCase):
             "/usr/bin/timeout --signal=TERM --kill-after=5s 20s", source
         )
         self.assertIn("remote deployment tag check timed out after 20 seconds", source)
+
+    def test_release_git_checks_are_fixed_read_only_operations(self):
+        source = FILESYSTEM_SECURITY.read_text(encoding="utf-8")
+        self.assertIn("commercial_release_git_readonly", source)
+        self.assertIn("commercial_validate_frozen_release_for_root_git", source)
+        self.assertIn("COMMERCIAL_FROZEN_RELEASE_GIT_AUDIT", source)
+        for operation in (
+            "is-shallow",
+            "exact-tag",
+            "tag-object-type",
+            "origin-url",
+            "head-commit",
+            "tag-commit",
+            "clean-status",
+            "head-tree",
+        ):
+            self.assertIn(f"{operation})", source)
+        self.assertIn("/usr/bin/sudo -n -- /usr/bin/env -i", source)
+        self.assertIn("--no-optional-locks", source)
+        self.assertIn("--no-replace-objects", source)
+        self.assertIn("/usr/bin/timeout", source)
+        self.assertIn("core.hooksPath=/dev/null", source)
+        self.assertIn("core.fsmonitor=false", source)
+        self.assertIn("submodule.recurse=false", source)
+        self.assertIn("for ancestor in /opt /opt/doraemon /opt/doraemon/releases", source)
+        self.assertIn("! -type f ! -type d ! -type l", source)
+        self.assertNotIn("git config --global", source)
+
+    def test_release_git_operation_allowlist_rejects_mutation(self):
+        for operation in ("config", "fetch", "checkout", "reset", "clean"):
+            rejected = _call_security_function(
+                f'commercial_release_git_readonly "{REPO_ROOT}" {operation}'
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("operation is not allowed", rejected.stderr)
 
     def test_nonempty_slam_override_requires_complete_layout(self):
         source = FILESYSTEM_SECURITY.read_text(encoding="utf-8")
