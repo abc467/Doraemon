@@ -4,8 +4,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/commercial_vehicle_identity.sh"
 
-DORAEMON_RUNTIME_CONFIG_FILE="${DORAEMON_RUNTIME_CONFIG_FILE:-${REPO_ROOT}/config/runtime.a26022.env}"
+DORAEMON_PRODUCTION_ENTRY="false"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  DORAEMON_PRODUCTION_ENTRY="true"
+  if [[ "${DORAEMON_RUNTIME_CONFIG_FILE:-/etc/doraemon/runtime.env}" != "/etc/doraemon/runtime.env" ]]; then
+    echo "[ERROR] commercial runtime config path is fixed at /etc/doraemon/runtime.env" >&2
+    exit 1
+  fi
+  DORAEMON_RUNTIME_CONFIG_FILE="/etc/doraemon/runtime.env"
+  if [[ "$(stat -c '%U %a' "${DORAEMON_RUNTIME_CONFIG_FILE}" 2>/dev/null || true)" != "root 640" ]]; then
+    echo "[ERROR] /etc/doraemon/runtime.env must be root-owned mode 0640" >&2
+    exit 1
+  fi
+  commercial_validate_runtime_env_file "${DORAEMON_RUNTIME_CONFIG_FILE}" || exit 1
+else
+  DORAEMON_RUNTIME_CONFIG_FILE="${DORAEMON_RUNTIME_CONFIG_FILE:-${REPO_ROOT}/config/runtime.a26022.env}"
+fi
 DORAEMON_RUNTIME_CONFIG_LOADED="false"
 if [[ -f "${DORAEMON_RUNTIME_CONFIG_FILE}" ]]; then
   set -a
@@ -14,13 +31,20 @@ if [[ -f "${DORAEMON_RUNTIME_CONFIG_FILE}" ]]; then
   set +a
   DORAEMON_RUNTIME_CONFIG_LOADED="true"
 fi
+if [[ "${DORAEMON_PRODUCTION_ENTRY}" == "true" ]]; then
+  export DORAEMON_REPO_ROOT="${REPO_ROOT}"
+  export DORAEMON_RUNTIME_CONFIG_FILE="/etc/doraemon/runtime.env"
+  export DORAEMON_ROS_SETUP="/opt/ros/noetic/setup.bash"
+  export ROS_HOME="/var/lib/doraemon/ros"
+  unset LD_PRELOAD LD_AUDIT LD_ORIGIN_PATH LIBRARY_PATH
+fi
 
-LOG_DIR="${LOG_DIR:-${REPO_ROOT}/log/startup}"
+LOG_DIR="${LOG_DIR:-/var/log/doraemon/startup}"
 STATUS_LOG="${STATUS_LOG:-${LOG_DIR}/startup_status.log}"
 RESTART_LOCALIZATION_OUT="${RESTART_LOCALIZATION_OUT:-${LOG_DIR}/restart_localization.out}"
 TMUX_SESSION="${TMUX_SESSION:-doraemon_task_ready}"
 FRONTEND_TMUX_SESSION="${FRONTEND_TMUX_SESSION:-doraemon_frontend_services}"
-ROBOT_ID="${ROBOT_ID:-local_robot}"
+ROBOT_ID="${ROBOT_ID:-}"
 PLAN_DB_PATH="${PLAN_DB_PATH:-/data/coverage/planning.db}"
 OPS_DB_PATH="${OPS_DB_PATH:-/data/coverage/operations.db}"
 MAPS_ROOT="${MAPS_ROOT:-/data/maps}"
@@ -34,6 +58,9 @@ ENABLE_SITE_EDITOR_SERVICE="${ENABLE_SITE_EDITOR_SERVICE:-true}"
 ENABLE_RECT_ZONE_PLANNER="${ENABLE_RECT_ZONE_PLANNER:-false}"
 FRONTEND_DIR="${FRONTEND_DIR:-}"
 START_FRONTEND_DEV="${START_FRONTEND_DEV:-0}"
+RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE="${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE:-false}"
+DORAEMON_NO_ACTION_ACCEPTANCE="${DORAEMON_NO_ACTION_ACCEPTANCE:-true}"
+DORAEMON_ACTION_TEST_APPROVED="${DORAEMON_ACTION_TEST_APPROVED:-false}"
 FRONTEND_URL="${FRONTEND_URL:-http://127.0.0.1:5173/}"
 ATTACH="${ATTACH:-0}"
 CONTRACT_WAIT_TIMEOUT="${CONTRACT_WAIT_TIMEOUT:-30}"
@@ -126,6 +153,14 @@ RUNTIME_IMU_PUBLISH_RAW="${RUNTIME_IMU_PUBLISH_RAW:-true}"
 RUNTIME_IMU_PUBLISH_DURING_CALIBRATION="${RUNTIME_IMU_PUBLISH_DURING_CALIBRATION:-true}"
 RUNTIME_START_AHRS="${RUNTIME_START_AHRS:-${DEFAULT_RUNTIME_START_AHRS}}"
 RUNTIME_START_DEPTH_CAMERAS="${RUNTIME_START_DEPTH_CAMERAS:-${DEFAULT_RUNTIME_START_DEPTH_CAMERAS}}"
+RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER:-}"
+RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER:-}"
+RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}"
+RUNTIME_ORBBEC_CAMERA1_USB_PORT="${RUNTIME_ORBBEC_CAMERA1_USB_PORT:-}"
+RUNTIME_ORBBEC_CAMERA2_USB_PORT="${RUNTIME_ORBBEC_CAMERA2_USB_PORT:-}"
+RUNTIME_ORBBEC_CAMERA3_USB_PORT="${RUNTIME_ORBBEC_CAMERA3_USB_PORT:-}"
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}"
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}"
 RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING="${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING:-${DEFAULT_RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING}}"
 RUNTIME_ENABLE_DEPTH_UP_CAM="${RUNTIME_ENABLE_DEPTH_UP_CAM:-false}"
 RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK:-${DEFAULT_RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}}"
@@ -154,6 +189,8 @@ ODOM_SERIAL_BAUDRATE="${ODOM_SERIAL_BAUDRATE:-115200}"
 ODOM_PROTOCOL_MODE="${ODOM_PROTOCOL_MODE:-framed_434c}"
 ODOM_USE_DEVICE_TIMESTAMP="${ODOM_USE_DEVICE_TIMESTAMP:-false}"
 ODOM_PUBLISH_RAW_ODOM_TF="${ODOM_PUBLISH_RAW_ODOM_TF:-false}"
+ODOM_FRAME_ID="${ODOM_FRAME_ID:-odom}"
+ODOM_CHILD_FRAME_ID="${ODOM_CHILD_FRAME_ID:-base_footprint}"
 ODOM_WHEEL_SEPARATION="${ODOM_WHEEL_SEPARATION:-0.46}"
 ODOM_WHEEL_DIAMETER="${ODOM_WHEEL_DIAMETER:-0.165}"
 ODOM_GEAR_RATIO="${ODOM_GEAR_RATIO:-9.0}"
@@ -187,6 +224,7 @@ START_STATION_BRIDGE="${START_STATION_BRIDGE:-${DEFAULT_START_STATION_BRIDGE}}"
 START_DOCK_SUPPLY_MANAGER="${START_DOCK_SUPPLY_MANAGER:-${DEFAULT_START_DOCK_SUPPLY_MANAGER}}"
 START_DOCKING_STACK="${START_DOCKING_STACK:-${DEFAULT_START_DOCKING_STACK}}"
 HARDWARE_BRIDGES_EXTRA_ARGS="${HARDWARE_BRIDGES_EXTRA_ARGS:-}"
+ENABLE_MANUAL_DRIVE_SERVICE="${ENABLE_MANUAL_DRIVE_SERVICE:-false}"
 MANUAL_DRIVE_REQUIRE_ROLE="${MANUAL_DRIVE_REQUIRE_ROLE:-false}"
 MANUAL_DRIVE_REQUIRE_SLAM_STATE="${MANUAL_DRIVE_REQUIRE_SLAM_STATE:-false}"
 MANUAL_DRIVE_REQUIRE_TASK_STATE="${MANUAL_DRIVE_REQUIRE_TASK_STATE:-false}"
@@ -256,9 +294,6 @@ BACKEND_PRODUCTION_ACCEPTANCE_PROFILE="${BACKEND_PRODUCTION_ACCEPTANCE_PROFILE:-
 BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS="${BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS:-0}"
 BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS="${BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS:-}"
 
-mkdir -p "${LOG_DIR}"
-: > "${STATUS_LOG}"
-
 usage() {
   cat <<'EOF'
 Usage: start_runtime.sh [--attach]
@@ -281,8 +316,13 @@ Environment highlights:
   RUN_BACKEND_PRODUCTION_ACCEPTANCE=0
   BACKEND_PRODUCTION_ACCEPTANCE_PROFILE=
   BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS=0
+  DORAEMON_NO_ACTION_ACCEPTANCE=true
+  DORAEMON_ACTION_TEST_APPROVED=false
+  ENABLE_MANUAL_DRIVE_SERVICE=false
   START_WHEEL_ODOM=true
   ODOM_SERIAL_DEVICE=/dev/wheel_odom
+  ODOM_FRAME_ID=odom
+  ODOM_CHILD_FRAME_ID=base_footprint
   START_MCORE_VELOCITY_SENDER=true
   MCORE_TRANSPORT=tcp
   MCORE_TCP_HOST=192.168.127.10
@@ -344,8 +384,8 @@ append_shell_words() {
   fi
 
   # shellcheck disable=SC2206
-  local extra_args=( ${raw_words} )
-  target_ref+=("${extra_args[@]}")
+  local parsed_words=( ${raw_words} )
+  target_ref+=("${parsed_words[@]}")
 }
 
 join_shell_words() {
@@ -353,6 +393,396 @@ join_shell_words() {
   local joined=""
   printf -v joined '%q ' "${words_ref[@]}"
   printf '%s' "${joined% }"
+}
+
+normalize_boolean_variable() {
+  local variable_name="$1"
+  local raw_value="${!variable_name:-}"
+  local normalized
+  normalized="$(printf '%s' "${raw_value}" | tr '[:upper:]' '[:lower:]')"
+  case "${normalized}" in
+    1|true|yes|on)
+      printf -v "${variable_name}" '%s' true
+      ;;
+    0|false|no|off)
+      printf -v "${variable_name}" '%s' false
+      ;;
+    *)
+      echo "[ERROR] ${variable_name} must be an explicit boolean" >&2
+      return 1
+      ;;
+  esac
+}
+
+runtime_is_positive_finite_number() {
+  local raw_value="${1:-}"
+  LC_ALL=C awk -v raw="${raw_value}" '
+    BEGIN {
+      if (raw !~ /^\+?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/) {
+        exit 1
+      }
+      number = raw + 0
+      rendered = sprintf("%.17g", number)
+      if (rendered ~ /[Ii][Nn][Ff]|[Nn][Aa][Nn]/) {
+        exit 1
+      }
+      exit !(number > 0)
+    }
+  '
+}
+
+runtime_value_is_placeholder() {
+  commercial_value_is_placeholder "${1:-}"
+}
+
+validate_commercial_vehicle_identity() {
+  if runtime_value_is_placeholder "${ROBOT_ID}" || [[ "${ROBOT_ID}" == "local_robot" ]]; then
+    echo "[ERROR] ROBOT_ID must be the explicit vehicle asset identifier" >&2
+    return 1
+  fi
+  if runtime_value_is_placeholder "${DORAEMON_A_BOX_IFACE:-}"; then
+    echo "[ERROR] DORAEMON_A_BOX_IFACE must be the explicit internal wired interface" >&2
+    return 1
+  fi
+  if [[ "${ROSBRIDGE_ADDRESS}" != "127.0.0.1" ]]; then
+    echo "[ERROR] commercial rosbridge must bind only to 127.0.0.1" >&2
+    return 1
+  fi
+  if [[ "${ROSBRIDGE_PORT}" != "9090" || "${START_ROSBRIDGE}" != "true" ]]; then
+    echo "[ERROR] commercial rosbridge must be enabled on fixed loopback port 9090" >&2
+    return 1
+  fi
+  if [[ "${START_FRONTEND_DEV}" != "0" || -n "${FRONTEND_DIR}" ]]; then
+    echo "[ERROR] mutable frontend development mode is forbidden in the commercial runtime" >&2
+    return 1
+  fi
+
+  normalize_boolean_variable RUNTIME_START_DEPTH_CAMERAS
+  normalize_boolean_variable RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS
+  normalize_boolean_variable DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES
+  normalize_boolean_variable DORAEMON_NO_ACTION_ACCEPTANCE
+  normalize_boolean_variable DORAEMON_ACTION_TEST_APPROVED
+  normalize_boolean_variable ENABLE_MANUAL_DRIVE_SERVICE
+  normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE
+  normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE
+  normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE
+  normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE
+  normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS
+  if [[ "${DORAEMON_NO_ACTION_ACCEPTANCE}" == "true" ]]; then
+    if [[ "${DORAEMON_ACTION_TEST_APPROVED}" != "false" ]]; then
+      echo "[ERROR] no-action acceptance requires DORAEMON_ACTION_TEST_APPROVED=false" >&2
+      return 1
+    fi
+  elif [[ "${DORAEMON_ACTION_TEST_APPROVED}" != "true" ]]; then
+    echo "[ERROR] action-capable runtime requires DORAEMON_ACTION_TEST_APPROVED=true" >&2
+    return 1
+  else
+    local velocity_limit_name
+    for velocity_limit_name in \
+      MCORE_MAX_ABS_LINEAR_VELOCITY \
+      MCORE_MAX_ABS_ANGULAR_VELOCITY; do
+      if ! runtime_is_positive_finite_number "${!velocity_limit_name:-}"; then
+        echo "[ERROR] action-capable runtime requires ${velocity_limit_name} to be finite and > 0" >&2
+        return 1
+      fi
+    done
+
+    if [[ "${ENABLE_MANUAL_DRIVE_SERVICE}" == "true" ]]; then
+      local manual_drive_gate_name
+      for manual_drive_gate_name in \
+        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE \
+        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE \
+        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE \
+        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE \
+        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS; do
+        if [[ "${!manual_drive_gate_name}" != "true" ]]; then
+          echo "[ERROR] action-capable manual drive requires ${manual_drive_gate_name}=true" >&2
+          return 1
+        fi
+      done
+    fi
+  fi
+
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "true" ]]; then
+    echo "[ERROR] commercial runtime requires RUNTIME_START_DEPTH_CAMERAS=true" >&2
+    return 1
+  fi
+  if [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" != "true" || \
+        "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" != "true" ]]; then
+    echo "[ERROR] enabled depth cameras require both topic and identity commercial gates" >&2
+    return 1
+  fi
+
+  if ! commercial_validate_required_orbbec_identities \
+    "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" \
+    "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" \
+    "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" \
+    "${RUNTIME_ORBBEC_CAMERA1_USB_PORT}" \
+    "${RUNTIME_ORBBEC_CAMERA2_USB_PORT}" \
+    "${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"; then
+    echo "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique" >&2
+    return 1
+  fi
+
+  local extra_args=()
+  append_shell_words extra_args "${RUNTIME_BASE_EXTRA_ARGS}"
+  local extra_arg
+  for extra_arg in "${extra_args[@]}"; do
+    case "${extra_arg}" in
+      start_depth_cameras:=*|camera[123]_bind_by_usb_port:=*|camera[123]_serial_number:=*|camera[123]_usb_port:=*)
+        echo "[ERROR] RUNTIME_BASE_EXTRA_ARGS may not override protected camera argument: ${extra_arg%%:=*}" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  extra_args=()
+  append_shell_words extra_args "${WHEEL_ODOM_EXTRA_ARGS}"
+  for extra_arg in "${extra_args[@]}"; do
+    case "${extra_arg}" in
+      serial_device:=*|serial_baudrate:=*|protocol_mode:=*|use_device_timestamp:=*|publish_raw_odom_tf:=*|frame_id:=*|child_frame_id:=*|wheel_separation:=*|wheel_diameter:=*|gear_ratio:=*|encoder_pulses_per_motor_revolution:=*|left_encoder_sign:=*|right_encoder_sign:=*|left_wheel_scale:=*|right_wheel_scale:=*|angular_velocity_sign:=*)
+        echo "[ERROR] WHEEL_ODOM_EXTRA_ARGS may not override protected vehicle argument: ${extra_arg%%:=*}" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  extra_args=()
+  append_shell_words extra_args "${MCORE_VELOCITY_EXTRA_ARGS}"
+  for extra_arg in "${extra_args[@]}"; do
+    case "${extra_arg}" in
+      transport:=*|serial_device:=*|serial_baudrate:=*|tcp_host:=*|tcp_port:=*|cmd_vel_topic:=*|linear_velocity_scale:=*|angular_velocity_scale:=*|linear_velocity_sign:=*|angular_velocity_sign:=*|max_abs_linear_velocity:=*|max_abs_angular_velocity:=*|enable_tx_log:=*|enable_rx_log:=*)
+        echo "[ERROR] MCORE_VELOCITY_EXTRA_ARGS may not override protected vehicle argument: ${extra_arg%%:=*}" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ "${DORAEMON_NO_ACTION_ACCEPTANCE}" == "true" ]]; then
+    extra_args=()
+    append_shell_words extra_args "${HARDWARE_BRIDGES_EXTRA_ARGS}"
+    for extra_arg in "${extra_args[@]}"; do
+      case "${extra_arg}" in
+        enable_mcore_bridge:=*|mcore_enable_cmd_vel:=*|enable_station_bridge:=*|enable_dock_supply_manager:=*|enable_docking_stack:=*|mechanical_connect_enable:=*|direct_charge_after_precise_docking:=*|dock_supply_enable_drain:=*|dock_supply_enable_refill:=*|charge_voltage_confirm_enable:=*)
+          echo "[ERROR] HARDWARE_BRIDGES_EXTRA_ARGS may not override protected no-action argument: ${extra_arg%%:=*}" >&2
+          return 1
+          ;;
+      esac
+    done
+
+    if [[ -n "${BACKEND_RUNTIME_SMOKE_ACTIONS}" ]]; then
+      echo "[ERROR] BACKEND_RUNTIME_SMOKE_ACTIONS must be empty in no-action mode" >&2
+      return 1
+    fi
+    if [[ -n "${BACKEND_RUNTIME_SMOKE_EXTRA_ARGS}" ]]; then
+      echo "[ERROR] BACKEND_RUNTIME_SMOKE_EXTRA_ARGS must be empty in no-action mode" >&2
+      return 1
+    fi
+    if [[ "${RUN_BACKEND_PRODUCTION_ACCEPTANCE}" == "1" && \
+          "${BACKEND_PRODUCTION_ACCEPTANCE_PROFILE}" != "read_only_gate" ]]; then
+      echo "[ERROR] no-action production acceptance only permits profile=read_only_gate" >&2
+      return 1
+    fi
+    case "${BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS,,}" in
+      ""|0|false|no|off)
+        ;;
+      *)
+        echo "[ERROR] BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS must be disabled in no-action mode" >&2
+        return 1
+        ;;
+    esac
+    if [[ -n "${BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS}" ]]; then
+      echo "[ERROR] BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS must be empty in no-action mode" >&2
+      return 1
+    fi
+  fi
+}
+
+apply_no_action_acceptance_overrides() {
+  [[ "${DORAEMON_NO_ACTION_ACCEPTANCE}" == "true" ]] || return 0
+  TASK_AUTO_CHARGE_ENABLE=false
+  EXECUTOR_AUTO_CHARGE_ENABLE=false
+  AUTO_CHARGE_MONITOR_ENABLE=false
+  AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false
+  DEFAULT_RETURN_TO_DOCK_ON_FINISH=false
+  MCORE_ENABLE_CMD_VEL=false
+  START_MCORE_BRIDGE=false
+  START_MCORE_VELOCITY_SENDER=false
+  START_WHEELTEC_BASE=false
+  START_STATION_BRIDGE=false
+  START_DOCK_SUPPLY_MANAGER=false
+  START_DOCKING_STACK=false
+  MECHANICAL_CONNECT_ENABLE=false
+  DIRECT_CHARGE_AFTER_PRECISE_DOCKING=false
+  DOCK_SUPPLY_ENABLE_DRAIN=false
+  DOCK_SUPPLY_ENABLE_REFILL=false
+  CHARGE_VOLTAGE_CONFIRM_ENABLE=false
+  RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE=false
+  ENABLE_MANUAL_DRIVE_SERVICE=false
+}
+
+assert_no_action_runtime_isolated() {
+  [[ "${DORAEMON_NO_ACTION_ACCEPTANCE}" == "true" ]] || return 0
+
+  local active_nodes=""
+  local active_services=""
+  local forbidden=""
+  local auto_charge=""
+  local active_topics=""
+  local cmd_vel_info=""
+  local publisher=""
+  local subscriber=""
+  active_nodes="$(runtime_run_ros_cli rosnode list 2>/dev/null)" || {
+    runtime_log_status "[ERROR] unable to verify no-action ROS node isolation"
+    return 1
+  }
+  for forbidden in \
+    /mcore_velocity_sender \
+    /mcore_tcp_bridge \
+    /station_tcp_bridge \
+    /dock_supply_manager \
+    /dock_tracker \
+    /docking_controller \
+    /auto_charge_monitor \
+    /manual_drive_service \
+    /wheeltec_robot; do
+    if grep -Fxq -- "${forbidden}" <<<"${active_nodes}"; then
+      runtime_log_status "[ERROR] forbidden action transport is active in no-action mode: ${forbidden}"
+      return 1
+    fi
+  done
+
+  active_services="$(runtime_run_ros_cli rosservice list 2>/dev/null)" || {
+    runtime_log_status "[ERROR] unable to verify no-action ROS service isolation"
+    return 1
+  }
+  for forbidden in \
+    /dock_supply/start \
+    /dock_supply/exit \
+    /dock_supply/recovery_retreat \
+    /clean_robot_server/app/manual_drive_command \
+    /clean_robot_server/app/get_manual_drive_status; do
+    if grep -Fxq -- "${forbidden}" <<<"${active_services}"; then
+      runtime_log_status "[ERROR] forbidden action service is active in no-action mode: ${forbidden}"
+      return 1
+    fi
+  done
+
+  auto_charge="$(runtime_get_rosparam_value /coverage_task_manager/auto_charge_enable || true)"
+  if [[ "${auto_charge,,}" != "false" ]]; then
+    runtime_log_status "[ERROR] auto-charge parameter must be false in no-action mode: ${auto_charge:-missing}"
+    return 1
+  fi
+
+  active_topics="$(runtime_run_ros_cli rostopic list 2>/dev/null)" || {
+    runtime_log_status "[ERROR] unable to verify no-action ROS topic isolation"
+    return 1
+  }
+  if grep -Fxq -- /cmd_vel <<<"${active_topics}"; then
+    cmd_vel_info="$(runtime_run_ros_cli rostopic info /cmd_vel 2>/dev/null)" || {
+      runtime_log_status "[ERROR] unable to inspect /cmd_vel publishers in no-action mode"
+      return 1
+    }
+    while IFS= read -r publisher; do
+      [[ -n "${publisher}" ]] || continue
+      case "${publisher}" in
+        /coverage_executor|/move_base_flex)
+          ;;
+        *)
+          runtime_log_status "[ERROR] unapproved /cmd_vel publisher is active in no-action mode: ${publisher}"
+          return 1
+          ;;
+      esac
+    done < <(
+      awk '
+        /^Publishers:$/ { in_publishers=1; next }
+        /^Subscribers:$/ { in_publishers=0 }
+        in_publishers && /^[[:space:]]*\*[[:space:]]+\// {
+          line=$0
+          sub(/^[[:space:]]*\*[[:space:]]+/, "", line)
+          sub(/[[:space:]].*$/, "", line)
+          print line
+        }
+      ' <<<"${cmd_vel_info}"
+    )
+    while IFS= read -r subscriber; do
+      [[ -n "${subscriber}" ]] || continue
+      runtime_log_status "[ERROR] /cmd_vel has an active subscriber in no-action mode: ${subscriber}"
+      return 1
+    done < <(
+      awk '
+        /^Subscribers:$/ { in_subscribers=1; next }
+        in_subscribers && /^[[:space:]]*\*[[:space:]]+\// {
+          line=$0
+          sub(/^[[:space:]]*\*[[:space:]]+/, "", line)
+          sub(/[[:space:]].*$/, "", line)
+          print line
+        }
+      ' <<<"${cmd_vel_info}"
+    )
+  fi
+  runtime_log_status "[OK] no-action transport and manual-drive isolation verified"
+}
+
+validate_external_runtime_log_paths() {
+  local commercial_log_root="/var/log/doraemon"
+  local actual_log_root=""
+  local name
+  local value
+  local resolved
+  if [[ -L "${commercial_log_root}" || ( -e "${commercial_log_root}" && ! -d "${commercial_log_root}" ) ]]; then
+    echo "[ERROR] /var/log/doraemon must be a real non-symlink directory" >&2
+    return 1
+  fi
+  if [[ -e "${commercial_log_root}" ]] && mountpoint -q "${commercial_log_root}"; then
+    echo "[ERROR] /var/log/doraemon must not be an unreviewed bind/mount point" >&2
+    return 1
+  fi
+  actual_log_root="$(realpath -m "${commercial_log_root}")"
+  if [[ "${actual_log_root}" != "${commercial_log_root}" ]]; then
+    echo "[ERROR] /var/log/doraemon resolves outside its fixed external path: ${actual_log_root}" >&2
+    return 1
+  fi
+  for name in LOG_DIR STATUS_LOG RESTART_LOCALIZATION_OUT; do
+    value="${!name}"
+    resolved="$(realpath -m "${value}")"
+    case "${resolved}" in
+      "${commercial_log_root}"|"${commercial_log_root}"/*)
+        ;;
+      *)
+        echo "[ERROR] ${name} must stay under /var/log/doraemon: ${resolved}" >&2
+        return 1
+        ;;
+    esac
+    case "${resolved}" in
+      /opt/doraemon/releases|/opt/doraemon/releases/*)
+        echo "[ERROR] ${name} resolves into an immutable release: ${resolved}" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+runtime_require_orbbec_serial() {
+  local camera_name="$1"
+  local expected_serial="$2"
+  local service_name="/${camera_name}/get_serial"
+  local response=""
+  local actual_serial=""
+  local success=""
+
+  runtime_wait_for_service "${service_name}" 20
+  response="$(runtime_run_ros_cli rosservice call "${service_name}" '{}')" || {
+    runtime_log_status "[ERROR] unable to query ${service_name}"
+    return 1
+  }
+  actual_serial="$(runtime_extract_yaml_scalar "${response}" data)"
+  success="$(runtime_extract_yaml_scalar "${response}" success | tr '[:upper:]' '[:lower:]')"
+  if [[ "${success}" != "true" || "${actual_serial}" != "${expected_serial}" ]]; then
+    runtime_log_status "[ERROR] ${camera_name} serial mismatch expected=${expected_serial} actual=${actual_serial:-missing}"
+    return 1
+  fi
+  runtime_log_status "[OK] ${camera_name} serial=${actual_serial}"
 }
 
 allow_no_active_map_startup_enabled() {
@@ -386,6 +816,8 @@ log_effective_runtime_parameters() {
   dock_threshold="$(awk -v target="${DOCK_TARGET_DIST}" -v tol="${DOCK_XY_TOLERANCE}" 'BEGIN { printf "%.3f", target + tol }' 2>/dev/null || printf 'unknown')"
 
   runtime_log_status "station bridge: ${STATION_SERVER_IP}:${STATION_SERVER_PORT}"
+  runtime_log_status "no-action acceptance: ${DORAEMON_NO_ACTION_ACCEPTANCE} action_test_approved=${DORAEMON_ACTION_TEST_APPROVED} manual_drive=${ENABLE_MANUAL_DRIVE_SERVICE} mcore_sender=${START_MCORE_VELOCITY_SENDER} cmd_vel=${MCORE_ENABLE_CMD_VEL} station_bridge=${START_STATION_BRIDGE} dock_supply=${START_DOCK_SUPPLY_MANAGER} docking_stack=${START_DOCKING_STACK} task_auto_charge=${TASK_AUTO_CHARGE_ENABLE} monitor=${AUTO_CHARGE_MONITOR_ENABLE} gateway_auto_start=${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE}"
+  runtime_log_status "Orbbec identities: left=${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA1_USB_PORT} right=${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA2_USB_PORT} front=${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA3_USB_PORT} require_topics=${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}"
   runtime_log_status "dock tuning: target=${DOCK_TARGET_DIST} xy_tolerance=${DOCK_XY_TOLERANCE} yaw_tolerance=${DOCK_YAW_TOLERANCE} threshold=${dock_threshold} score_thresh=${DOCK_POSE_SCORE_THRESH}"
   runtime_log_status "auto charge: task=${TASK_AUTO_CHARGE_ENABLE} executor=${EXECUTOR_AUTO_CHARGE_ENABLE} low=${AUTO_CHARGE_LOW_SOC} resume=${AUTO_CHARGE_RESUME_SOC} rearm=${AUTO_CHARGE_REARM_SOC} target=${AUTO_CHARGE_TARGET_SOC}"
   runtime_log_status "dock supply: post_charge_drain=${DOCK_SUPPLY_ENABLE_DRAIN} refill=${DOCK_SUPPLY_ENABLE_REFILL} drain_timeout_s=${DOCK_SUPPLY_DRAIN_TIMEOUT_S} drain_settle_s=${DOCK_SUPPLY_DRAIN_SETTLE_S} combined_status_wait_s=${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S} combined_status_stale_s=${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
@@ -480,9 +912,6 @@ start_runtime_session() {
   if [[ "${RUNTIME_START_AHRS}" != "false" ]]; then
     base_cmd_words+=(start_ahrs:="${RUNTIME_START_AHRS}")
   fi
-  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "false" ]]; then
-    base_cmd_words+=(start_depth_cameras:="${RUNTIME_START_DEPTH_CAMERAS}")
-  fi
   if [[ "${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}" != "false" ]]; then
     base_cmd_words+=(
       publish_base_footprint_to_base_link:="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}"
@@ -493,12 +922,26 @@ start_runtime_session() {
     base_cmd_words+=(publish_base_footprint_to_gyro_link:="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_GYRO_LINK}")
   fi
   append_shell_words base_cmd_words "${RUNTIME_BASE_EXTRA_ARGS}"
+  # Append protected commercial identity arguments last. The validator rejects
+  # duplicates in RUNTIME_BASE_EXTRA_ARGS; this final ordering is defense in depth.
+  base_cmd_words+=(
+    start_depth_cameras:="${RUNTIME_START_DEPTH_CAMERAS}"
+    camera1_bind_by_usb_port:=false
+    camera2_bind_by_usb_port:=false
+    camera3_bind_by_usb_port:=false
+    camera1_serial_number:="${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}"
+    camera2_serial_number:="${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}"
+    camera3_serial_number:="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}"
+    camera1_usb_port:="${RUNTIME_ORBBEC_CAMERA1_USB_PORT}"
+    camera2_usb_port:="${RUNTIME_ORBBEC_CAMERA2_USB_PORT}"
+    camera3_usb_port:="${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"
+  )
 
   local base_cmd
   base_cmd="$(join_shell_words base_cmd_words)"
 
   tmux new-session -d -s "${TMUX_SESSION}" -n base \
-    "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; ${base_cmd}'"
+    "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; export ROS_IP=127.0.0.1; unset ROS_HOSTNAME; ${base_cmd}'"
 
   if [[ "${START_WHEELTEC_BASE}" == "true" ]]; then
     local wheeltec_cmd_words=(
@@ -526,9 +969,28 @@ start_runtime_session() {
       roslaunch
       wheel_speed_odom_bridge
       wheel_speed_odom.launch
-      serial_device:="${ODOM_SERIAL_DEVICE}"
     )
     append_shell_words odom_cmd_words "${WHEEL_ODOM_EXTRA_ARGS}"
+    # Per-vehicle odometry parameters are protected by the startup validator
+    # and appended last as an additional defense against accidental overrides.
+    odom_cmd_words+=(
+      serial_device:="${ODOM_SERIAL_DEVICE}"
+      serial_baudrate:="${ODOM_SERIAL_BAUDRATE}"
+      protocol_mode:="${ODOM_PROTOCOL_MODE}"
+      use_device_timestamp:="${ODOM_USE_DEVICE_TIMESTAMP}"
+      publish_raw_odom_tf:="${ODOM_PUBLISH_RAW_ODOM_TF}"
+      frame_id:="${ODOM_FRAME_ID}"
+      child_frame_id:="${ODOM_CHILD_FRAME_ID}"
+      wheel_separation:="${ODOM_WHEEL_SEPARATION}"
+      wheel_diameter:="${ODOM_WHEEL_DIAMETER}"
+      gear_ratio:="${ODOM_GEAR_RATIO}"
+      encoder_pulses_per_motor_revolution:="${ODOM_ENCODER_PPR}"
+      left_encoder_sign:="${ODOM_LEFT_ENCODER_SIGN}"
+      right_encoder_sign:="${ODOM_RIGHT_ENCODER_SIGN}"
+      left_wheel_scale:="${ODOM_LEFT_WHEEL_SCALE}"
+      right_wheel_scale:="${ODOM_RIGHT_WHEEL_SCALE}"
+      angular_velocity_sign:="${ODOM_ANGULAR_VELOCITY_SIGN}"
+    )
     runtime_tmux_window "${TMUX_SESSION}" odom "$(join_shell_words odom_cmd_words)"
   else
     runtime_log_status "[INFO] skip wheel odom bridge: START_WHEEL_ODOM=${START_WHEEL_ODOM}; expecting another node to provide /odom"
@@ -540,13 +1002,26 @@ start_runtime_session() {
       roslaunch
       mcore_chassis_bridge
       mcore_velocity_sender.launch
+    )
+    append_shell_words mcore_velocity_cmd_words "${MCORE_VELOCITY_EXTRA_ARGS}"
+    # The action transport must use the reviewed vehicle values. Append these
+    # protected arguments last in addition to rejecting duplicate extra args.
+    mcore_velocity_cmd_words+=(
       transport:="${MCORE_TRANSPORT}"
       serial_device:="${MCORE_SERIAL_DEVICE}"
       serial_baudrate:="${MCORE_SERIAL_BAUDRATE}"
       tcp_host:="${MCORE_TCP_HOST}"
       tcp_port:="${MCORE_TCP_PORT}"
+      cmd_vel_topic:="${MCORE_CMD_VEL_TOPIC}"
+      linear_velocity_scale:="${MCORE_LINEAR_VELOCITY_SCALE}"
+      angular_velocity_scale:="${MCORE_ANGULAR_VELOCITY_SCALE}"
+      linear_velocity_sign:="${MCORE_LINEAR_VELOCITY_SIGN}"
+      angular_velocity_sign:="${MCORE_ANGULAR_VELOCITY_SIGN}"
+      max_abs_linear_velocity:="${MCORE_MAX_ABS_LINEAR_VELOCITY}"
+      max_abs_angular_velocity:="${MCORE_MAX_ABS_ANGULAR_VELOCITY}"
+      enable_tx_log:="${MCORE_ENABLE_TX_LOG}"
+      enable_rx_log:="${MCORE_ENABLE_RX_LOG}"
     )
-    append_shell_words mcore_velocity_cmd_words "${MCORE_VELOCITY_EXTRA_ARGS}"
     runtime_tmux_window "${TMUX_SESSION}" mcore_velocity "$(join_shell_words mcore_velocity_cmd_words)"
   else
     runtime_log_status "[INFO] skip M-core velocity sender: START_MCORE_VELOCITY_SENDER=${START_MCORE_VELOCITY_SENDER}"
@@ -559,6 +1034,7 @@ start_runtime_session() {
       robot_hw_bridge
       hardware_bridges.launch
       enable_mcore_bridge:="${START_MCORE_BRIDGE}"
+      mcore_enable_cmd_vel:="${MCORE_ENABLE_CMD_VEL}"
       enable_station_bridge:="${START_STATION_BRIDGE}"
       enable_dock_supply_manager:="${START_DOCK_SUPPLY_MANAGER}"
       enable_docking_stack:="${START_DOCKING_STACK}"
@@ -581,6 +1057,20 @@ start_runtime_session() {
       charge_voltage_confirm_enable:="${CHARGE_VOLTAGE_CONFIRM_ENABLE}"
     )
     append_shell_words hardware_cmd_words "${HARDWARE_BRIDGES_EXTRA_ARGS}"
+    if [[ "${DORAEMON_NO_ACTION_ACCEPTANCE}" == "true" ]]; then
+      hardware_cmd_words+=(
+        enable_mcore_bridge:=false
+        mcore_enable_cmd_vel:=false
+        enable_station_bridge:=false
+        enable_dock_supply_manager:=false
+        enable_docking_stack:=false
+        mechanical_connect_enable:=false
+        direct_charge_after_precise_docking:=false
+        dock_supply_enable_drain:=false
+        dock_supply_enable_refill:=false
+        charge_voltage_confirm_enable:=false
+      )
+    fi
     runtime_tmux_window "${TMUX_SESSION}" hardware "$(join_shell_words hardware_cmd_words)"
   else
     runtime_log_status "[INFO] skip legacy hardware bridges: all hardware bridge switches are false"
@@ -634,14 +1124,16 @@ start_runtime_session() {
 
 clear_previous_runtime() {
   runtime_log_status "clear previous runtime"
-  runtime_kill_runtime_tmux_sessions
+  runtime_graceful_stop_runtime
+  runtime_kill_runtime_nodes
   runtime_kill_runtime_processes
+  runtime_kill_runtime_tmux_sessions
 }
 
 clear_residual_state() {
   runtime_log_status "clear residual task and dock state"
   runtime_stop_task_execution_if_available
-  rosservice call /dock_supply/cancel '{}' >/dev/null 2>&1 || true
+  runtime_run_ros_cli rosservice call /dock_supply/cancel '{}' >/dev/null 2>&1 || true
 }
 
 restart_localization_to_active_map() {
@@ -785,6 +1277,11 @@ run_post_ready_acceptance_if_enabled() {
 }
 
 main() {
+  validate_commercial_vehicle_identity
+  apply_no_action_acceptance_overrides
+  validate_external_runtime_log_paths
+  mkdir -p "${LOG_DIR}"
+  : > "${STATUS_LOG}"
   runtime_common_init
 
   runtime_log_status "startup begin"
@@ -792,6 +1289,7 @@ main() {
   runtime_log_status "workspace layout: ${DORAEMON_WORKSPACE_LAYOUT:-unknown}"
   runtime_log_status "runtime config: ${DORAEMON_RUNTIME_CONFIG_FILE} loaded=${DORAEMON_RUNTIME_CONFIG_LOADED}"
   log_effective_runtime_parameters
+  STARTUP_TRANSACTION_STARTED=1
   runtime_ensure_frontend_service_session
   runtime_log_status "wait frontend roscore"
   runtime_wait_for_master 20
@@ -811,12 +1309,27 @@ main() {
   runtime_wait_for_topic "${WAIT_FOR_ODOM_TOPIC}" 40
 
   if [[ "${RUNTIME_START_DEPTH_CAMERAS}" == "true" ]]; then
-    runtime_log_status "检查双奥比中光深度相机（仅提示，不阻塞启动）"
-    runtime_warn_if_optional_topic_missing /gemini_cf/depth/image_raw "左奥比中光深度图像" 8 3
-    runtime_warn_if_optional_topic_missing /gemini_nj/depth/image_raw "右奥比中光深度图像" 8 3
-    runtime_warn_if_optional_topic_missing /gemini_cf/depth/points "左奥比中光点云" 8 3
-    runtime_warn_if_optional_topic_missing /gemini_nj/depth/points "右奥比中光点云" 8 3
-    runtime_log_status "[INFO] 若相机硬件暂未上电，可先继续使用系统，其余链路不会被阻塞"
+    if [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" == "true" ]]; then
+      runtime_log_status "检查三台奥比中光深度相机（商业启动硬门）"
+      runtime_wait_for_topic /gemini_cf/depth/image_raw 30 5
+      runtime_wait_for_topic /gemini_nj/depth/image_raw 30 5
+      runtime_wait_for_topic /gemini_front/depth/image_raw 30 5
+      runtime_wait_for_topic /gemini_cf/depth/points 30 5
+      runtime_wait_for_topic /gemini_nj/depth/points 30 5
+      runtime_wait_for_topic /gemini_front/depth/points 30 5
+      runtime_require_orbbec_serial gemini_cf "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}"
+      runtime_require_orbbec_serial gemini_nj "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}"
+      runtime_require_orbbec_serial gemini_front "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}"
+      runtime_log_status "[OK] 三台深度相机图像与点云均就绪"
+    else
+      runtime_log_status "检查三台奥比中光深度相机（仅提示，不阻塞启动）"
+      runtime_warn_if_optional_topic_missing /gemini_cf/depth/image_raw "左奥比中光深度图像" 8 3
+      runtime_warn_if_optional_topic_missing /gemini_nj/depth/image_raw "右奥比中光深度图像" 8 3
+      runtime_warn_if_optional_topic_missing /gemini_front/depth/image_raw "前低障奥比中光深度图像" 8 3
+      runtime_warn_if_optional_topic_missing /gemini_cf/depth/points "左奥比中光点云" 8 3
+      runtime_warn_if_optional_topic_missing /gemini_nj/depth/points "右奥比中光点云" 8 3
+      runtime_warn_if_optional_topic_missing /gemini_front/depth/points "前低障奥比中光点云" 8 3
+    fi
   else
     runtime_log_status "[INFO] skip depth camera checks: RUNTIME_START_DEPTH_CAMERAS=${RUNTIME_START_DEPTH_CAMERAS}"
   fi
@@ -836,6 +1349,7 @@ main() {
   runtime_wait_for_service /cartographer/runtime/app/restart_localization 30
   runtime_log_status "检查后端 contracts（canonical app/site 主链）"
   runtime_run_contract_check "${CONTRACT_WAIT_TIMEOUT}" "${CONTRACT_WAIT_INTERVAL}"
+  assert_no_action_runtime_isolated
 
   clear_residual_state
   sleep 2
@@ -927,7 +1441,25 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   # shellcheck disable=SC1091
   source "${SCRIPT_DIR}/runtime_common.sh"
 
+  STARTUP_COMMITTED=0
+  STARTUP_TRANSACTION_STARTED=0
+  cleanup_failed_startup() {
+    local exit_code="$?"
+    trap - EXIT INT TERM
+    if (( exit_code != 0 && STARTUP_COMMITTED == 0 && STARTUP_TRANSACTION_STARTED == 1 )); then
+      set +e
+      runtime_log_status "[ERROR] startup failed; cleaning ROS nodes before tmux sessions"
+      STOP_MASTER=1 "${SCRIPT_DIR}/stop_all_backend.sh"
+    fi
+    exit "${exit_code}"
+  }
+  trap cleanup_failed_startup EXIT
+  trap 'exit 143' TERM
+  trap 'exit 130' INT
+
   main
+  STARTUP_COMMITTED=1
+  trap - EXIT INT TERM
 fi
 
 true

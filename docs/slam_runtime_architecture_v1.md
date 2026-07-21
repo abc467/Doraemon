@@ -15,19 +15,19 @@
 
 如果你要看具体 service / topic 名称，继续看：
 
-- [frontend_backend_interface_v1.md](/home/sunnybaer/Doraemon/docs/frontend_backend_interface_v1.md)
+- [frontend_backend_interface_v1.md](frontend_backend_interface_v1.md)
 
 ## 本轮内容校验依据
 
 本轮已按当前运行主链代码与 launch 默认值核对这份架构说明，重点依据包括：
 
-- [planner_server.launch](/home/sunnybaer/Doraemon/src/coverage_planner/launch/planner_server.launch)
-- [task_system.launch](/home/sunnybaer/Doraemon/src/coverage_task_manager/launch/task_system.launch)
-- [start_runtime.sh](/home/sunnybaer/Doraemon/scripts/start_runtime.sh)
-- [slam_runtime_manager_node.py](/home/sunnybaer/Doraemon/src/coverage_planner/scripts/slam_runtime_manager_node.py)
-- [slam_api_service_node.py](/home/sunnybaer/Doraemon/src/coverage_planner/scripts/slam_api_service_node.py)
-- [localization_lifecycle_manager_node.py](/home/sunnybaer/Doraemon/src/coverage_planner/scripts/localization_lifecycle_manager_node.py)
-- [task_manager.py](/home/sunnybaer/Doraemon/src/coverage_task_manager/src/coverage_task_manager/task_manager.py)
+- [planner_server.launch](../src/coverage_planner/launch/planner_server.launch)
+- [task_system.launch](../src/coverage_task_manager/launch/task_system.launch)
+- [start_runtime.sh](../scripts/start_runtime.sh)
+- [slam_runtime_manager_node.py](../src/coverage_planner/scripts/slam_runtime_manager_node.py)
+- [slam_api_service_node.py](../src/coverage_planner/scripts/slam_api_service_node.py)
+- [localization_lifecycle_manager_node.py](../src/coverage_planner/scripts/localization_lifecycle_manager_node.py)
+- [task_manager.py](../src/coverage_task_manager/src/coverage_task_manager/task_manager.py)
 
 ## 1. 文档目的
 
@@ -52,7 +52,7 @@
 当前商用清洁机器人后端中，SLAM/runtime 的 canonical 主链是：
 
 1. 配置入口：
-   - 部署覆盖：`/data/config/slam/cartographer`
+   - 可选、经审查的部署覆盖：`/data/config/slam/cartographer`
    - 源码默认：`src/cleanrobot/config/slam/cartographer`
 2. 低层 runtime flag 总线：`src/robot_runtime_flags`
 3. 正式 runtime owner：`src/coverage_planner/scripts/slam_runtime_manager_node.py`
@@ -612,13 +612,22 @@ sequenceDiagram
 
 当前 `Cartographer` 配置已经收口成一套正式体系，只认两层 sanctioned config root：
 
-1. 部署覆盖入口：`/data/config/slam/cartographer`
+1. 可选、经审查的部署覆盖入口：`/data/config/slam/cartographer`
 2. 源码默认真源：`src/cleanrobot/config/slam/cartographer`
 
 运行时统一通过 `SLAM_CONFIG_ROOT` 传入配置目录，优先级规则是：
 
-1. 如果 `/data/config/slam/cartographer` 存在且布局完整，优先使用它
-2. 否则回退到 `src/cleanrobot/config/slam/cartographer`
+1. 如果 `/data/config/slam/cartographer` 非空、布局完整且通过商业文件系统安全校验，
+   优先使用它
+2. 如果该目录为空，回退到 release 内的
+   `src/cleanrobot/config/slam/cartographer`
+3. 如果外置目录非空但布局、身份或权限校验失败，fail closed，不得静默回退
+
+外置覆盖目录不是服务可写数据目录。它和所有子项必须为 `root:a`；根目录及所有子目录
+精确为 `0750`，所有普通文件精确为 `0640`，且不得包含符号链接、挂载点、特殊文件或
+group/other 写权限。非空覆盖至少必须包含 `slam/config.lua`、
+`pure_location_odom/config.lua` 和 `relocalization/global_relocation.sml`，并经过代码审查、
+SHA256 归档和现场批准。运行时不得在该目录生成日志、数据库或临时文件。
 
 源码默认真源下当前正式子目录包括：
 
@@ -652,7 +661,8 @@ sequenceDiagram
 维护时只保留两条规则：
 
 1. 正式 `Cartographer` 参数改动，只改 `src/cleanrobot/config/slam/cartographer/`
-2. 现场差异化覆盖，只放 `/data/config/slam/cartographer`
+2. 现场差异化覆盖只放入 `/data/config/slam/cartographer`，并遵守上述审查、布局、
+   所有权和只读权限要求；没有经审查的覆盖时保持该目录为空
 
 ### 8.2 地图资产
 
@@ -735,6 +745,13 @@ sequenceDiagram
 - `scripts/stop_all_backend.sh`
   - 停止 Doraemon 后端整套会话
   - 在 Doraemon tmux 会话都不存在时可顺带停止 `roscore`
+
+正式部署的 SLAM runtime 日志根目录为 `/var/log/doraemon/slam-runtime`。发布工作区是
+不可变资产，`slam_runtime_manager` 会拒绝指向工作区内部的 `log_root`。
+
+停止顺序必须保持为“业务停止请求、ROS node、残留进程、tmux/PTY”。首次启动门禁失败
+时启动脚本按同样顺序事务回滚；systemd 使用 `Restart=no` 保持 fail-closed，避免在现场
+安全检查失败后自动重复启动。
 
 `start_runtime.sh` 当前默认还会顺手做：
 

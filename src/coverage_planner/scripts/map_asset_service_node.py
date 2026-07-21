@@ -3,7 +3,6 @@
 
 import json
 import os
-import shutil
 import time
 
 import rospy
@@ -15,6 +14,16 @@ from cleanrobot_app_msgs.srv import (
 )
 from coverage_planner.map_asset_import import register_imported_map_asset
 from coverage_planner.map_io import write_occupancy_to_yaml_pgm, yaml_pgm_to_occupancy
+from coverage_planner.map_path_security import (
+    MapPathSecurityError,
+    copy_regular_file_exclusive,
+    ensure_secure_parent_directory,
+    map_asset_target_paths,
+    validate_commercial_map_roots,
+    validate_existing_regular_file,
+    validate_map_name,
+    validate_revision_id,
+)
 from coverage_planner.ops_store.store import OperationsStore
 from coverage_planner.plan_store.store import PlanStore
 from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
@@ -109,10 +118,12 @@ class MapAssetServiceNode:
         self.external_maps_root = os.path.expanduser(
             str(rospy.get_param("~external_maps_root", "/data/maps/imports")).strip() or "/data/maps/imports"
         )
-        os.makedirs(self.external_maps_root, exist_ok=True)
+        validate_commercial_map_roots(
+            self.maps_root,
+            external_maps_root=self.external_maps_root,
+        )
         self.map_topic = str(rospy.get_param("~map_topic", "/map")).strip() or "/map"
         self.map_timeout_s = max(0.5, float(rospy.get_param("~map_timeout_s", 5.0)))
-        os.makedirs(self.maps_root, exist_ok=True)
         self.store = PlanStore(self.plan_db_path)
         self.ops = OperationsStore(self.ops_db_path)
         self._app_contract_report = self._prepare_app_contract_report()
@@ -162,40 +173,26 @@ class MapAssetServiceNode:
         return response_cls(success=bool(success), message=str(message or ""), map=map_cls(), maps=[])
 
     def _resolve_req_name(self, req):
-        map_name = str(req.map_name or "").strip()
-        if (not map_name) and getattr(req, "map", None):
-            map_name = str(req.map.map_name or "").strip()
-        if map_name.endswith(".pbstream"):
-            map_name = map_name[:-len(".pbstream")]
-        return map_name
+        map_name = str(req.map_name or "")
+        if (not map_name.strip()) and getattr(req, "map", None):
+            map_name = str(req.map.map_name or "")
+        return validate_map_name(map_name, allow_empty=True)
 
     def _resolve_req_revision_id(self, req):
         if not getattr(req, "map", None):
             return ""
-        return str(getattr(req.map, "map_revision_id", "") or "").strip()
+        return validate_revision_id(
+            getattr(req.map, "map_revision_id", ""),
+            allow_empty=True,
+        )
 
     def _target_paths(self, map_name: str, revision_id: str = ""):
-        normalized_map_name = str(map_name or "").strip()
-        normalized_revision_id = str(revision_id or "").strip()
-        base_dir = self.maps_root
-        if normalized_revision_id:
-            base_dir = os.path.join(
-                self.maps_root,
-                "revisions",
-                normalized_map_name,
-                normalized_revision_id,
-            )
-        base = os.path.join(base_dir, normalized_map_name)
-        return {
-            "pbstream_path": base + ".pbstream",
-            "yaml_path": base + ".yaml",
-            "pgm_path": base + ".pgm",
-        }
+        return map_asset_target_paths(self.maps_root, map_name, revision_id)
 
     def _cleanup_paths(self, *paths: str):
         for path in paths:
             pp = str(path or "").strip()
-            if not pp or not os.path.exists(pp):
+            if not pp or not os.path.lexists(pp):
                 continue
             try:
                 os.remove(pp)
@@ -769,38 +766,49 @@ class MapAssetServiceNode:
         return active_map or self.store.get_active_map(robot_id=self.robot_id)
 
     def _import_external_map(self, *, map_name: str, set_active: bool, description: str = ""):
-        map_name = str(map_name or "").strip()
-        if not map_name:
-            raise ValueError("map_name is required")
+        map_name = validate_map_name(map_name)
         description = str(description or "")
 
-        source_pbstream = os.path.join(self.external_maps_root, map_name + ".pbstream")
-        if not os.path.exists(source_pbstream):
-            raise FileNotFoundError("external pbstream not found: %s" % source_pbstream)
-        source_yaml = os.path.join(self.external_maps_root, map_name + ".yaml")
-        if not os.path.exists(source_yaml):
-            raise FileNotFoundError("external yaml not found: %s" % source_yaml)
+        source_pbstream = validate_existing_regular_file(
+            self.external_maps_root,
+            os.path.join(self.external_maps_root, map_name + ".pbstream"),
+            suffix=".pbstream",
+            label="external pbstream",
+        )
+        source_yaml = validate_existing_regular_file(
+            self.external_maps_root,
+            os.path.join(self.external_maps_root, map_name + ".yaml"),
+            suffix=".yaml",
+            label="external yaml",
+        )
 
         revision_id = self.store.generate_map_revision_id(map_name)
         target_paths = self._target_paths(map_name, revision_id=revision_id)
         for path in target_paths.values():
-            if os.path.exists(path):
+            if os.path.lexists(path):
                 raise ValueError("target asset path already exists: %s" % path)
 
-        occ = yaml_pgm_to_occupancy(source_yaml)
+        occ = yaml_pgm_to_occupancy(source_yaml, allowed_root=self.external_maps_root)
         pgm_path = ""
         yaml_path = ""
         pbstream_path = target_paths["pbstream_path"]
         try:
             artifact_dir = os.path.dirname(pbstream_path)
             if artifact_dir:
-                os.makedirs(artifact_dir, exist_ok=True)
+                ensure_secure_parent_directory(self.maps_root, pbstream_path)
             pgm_path, yaml_path = write_occupancy_to_yaml_pgm(
                 occ,
                 artifact_dir or self.maps_root,
                 base_name=map_name,
+                allowed_root=self.maps_root,
             )
-            shutil.copy2(source_pbstream, pbstream_path)
+            copy_regular_file_exclusive(
+                self.external_maps_root,
+                source_pbstream,
+                self.maps_root,
+                pbstream_path,
+                suffix=".pbstream",
+            )
             asset, _snapshot_md5 = register_imported_map_asset(
                 self.store,
                 map_name=map_name,
@@ -877,7 +885,10 @@ class MapAssetServiceNode:
         if include_map_data:
             yaml_path = str(asset.get("yaml_path") or "").strip()
             if yaml_path:
-                msg.map_data = yaml_pgm_to_occupancy(yaml_path)
+                msg.map_data = yaml_pgm_to_occupancy(
+                    yaml_path,
+                    allowed_root=self.maps_root,
+                )
         return msg
 
     def _list_map_views(self, *, msg_cls=AppPgmData):
@@ -919,8 +930,16 @@ class MapAssetServiceNode:
 
     def _handle(self, req, *, response_cls=AppOperateMapResponse, map_cls=AppPgmData):
         op = int(req.operation)
-        map_name = self._resolve_req_name(req)
-        map_revision_id = self._resolve_req_revision_id(req)
+        try:
+            map_name = self._resolve_req_name(req)
+            map_revision_id = self._resolve_req_revision_id(req)
+        except MapPathSecurityError as exc:
+            return self._empty_resp(
+                success=False,
+                message="%s: %s" % (str(exc.code or "invalid_map_path"), str(exc)),
+                response_cls=response_cls,
+                map_cls=map_cls,
+            )
         active_map = self.store.get_active_map(robot_id=self.robot_id) or {}
 
         if op == int(req.getAll):

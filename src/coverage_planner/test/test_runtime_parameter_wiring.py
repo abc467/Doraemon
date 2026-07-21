@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+
+import os
+import subprocess
+import unittest
+import xml.etree.ElementTree as ET
+
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_DIR)))
+
+
+def read_repo_file(relative_path):
+    with open(os.path.join(REPO_ROOT, relative_path), "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def read_env_defaults(relative_path):
+    values = {}
+    for raw_line in read_repo_file(relative_path).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
+
+
+def run_start_runtime_snippet(snippet):
+    env = {
+        "DORAEMON_RUNTIME_CONFIG_FILE": "/dev/null",
+        "HOME": os.environ.get("HOME", "/tmp"),
+        "LANG": "C.UTF-8",
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+    }
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\nsource scripts/start_runtime.sh\n" + snippet,
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+
+
+VALID_COMMERCIAL_IDENTITY = r"""
+ROBOT_ID=CR-TEST
+DORAEMON_A_BOX_IFACE=enp1s0
+ROSBRIDGE_ADDRESS=127.0.0.1
+RUNTIME_START_DEPTH_CAMERAS=true
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=true
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=true
+RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER=S1
+RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER=S2
+RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER=S3
+RUNTIME_ORBBEC_CAMERA1_USB_PORT=1-1
+RUNTIME_ORBBEC_CAMERA2_USB_PORT=1-2
+RUNTIME_ORBBEC_CAMERA3_USB_PORT=1-3
+RUNTIME_BASE_EXTRA_ARGS=
+WHEEL_ODOM_EXTRA_ARGS=
+MCORE_VELOCITY_EXTRA_ARGS=
+HARDWARE_BRIDGES_EXTRA_ARGS=
+BACKEND_RUNTIME_SMOKE_ACTIONS=
+BACKEND_RUNTIME_SMOKE_EXTRA_ARGS=
+BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS=
+"""
+
+
+class RuntimeParameterWiringTest(unittest.TestCase):
+    def test_odometry_vehicle_parameters_are_explicit_launch_arguments(self):
+        source = read_repo_file("scripts/start_runtime.sh")
+        block_start = source.index('if [[ "${START_WHEEL_ODOM}" == "true" ]]')
+        block_end = source.index(
+            'if [[ "${START_MCORE_VELOCITY_SENDER}" == "true" ]]', block_start
+        )
+        block = source[block_start:block_end]
+        expected_bindings = {
+            "serial_device": "ODOM_SERIAL_DEVICE",
+            "serial_baudrate": "ODOM_SERIAL_BAUDRATE",
+            "protocol_mode": "ODOM_PROTOCOL_MODE",
+            "use_device_timestamp": "ODOM_USE_DEVICE_TIMESTAMP",
+            "publish_raw_odom_tf": "ODOM_PUBLISH_RAW_ODOM_TF",
+            "frame_id": "ODOM_FRAME_ID",
+            "child_frame_id": "ODOM_CHILD_FRAME_ID",
+            "wheel_separation": "ODOM_WHEEL_SEPARATION",
+            "wheel_diameter": "ODOM_WHEEL_DIAMETER",
+            "gear_ratio": "ODOM_GEAR_RATIO",
+            "encoder_pulses_per_motor_revolution": "ODOM_ENCODER_PPR",
+            "left_encoder_sign": "ODOM_LEFT_ENCODER_SIGN",
+            "right_encoder_sign": "ODOM_RIGHT_ENCODER_SIGN",
+            "left_wheel_scale": "ODOM_LEFT_WHEEL_SCALE",
+            "right_wheel_scale": "ODOM_RIGHT_WHEEL_SCALE",
+            "angular_velocity_sign": "ODOM_ANGULAR_VELOCITY_SIGN",
+        }
+        launch_root = ET.parse(
+            os.path.join(
+                REPO_ROOT,
+                "src/wheel_speed_odom_bridge/launch/wheel_speed_odom.launch",
+            )
+        ).getroot()
+        launch_args = {node.get("name") for node in launch_root.findall("arg")}
+        for launch_name, variable_name in expected_bindings.items():
+            with self.subTest(launch_name=launch_name):
+                self.assertIn(launch_name, launch_args)
+                self.assertIn(
+                    '%s:="${%s}"' % (launch_name, variable_name), block
+                )
+
+        self.assertLess(
+            block.index('append_shell_words odom_cmd_words "${WHEEL_ODOM_EXTRA_ARGS}"'),
+            block.index('serial_device:="${ODOM_SERIAL_DEVICE}"'),
+        )
+
+    def test_mcore_vehicle_parameters_are_explicit_launch_arguments(self):
+        source = read_repo_file("scripts/start_runtime.sh")
+        block_start = source.index(
+            'if [[ "${START_MCORE_VELOCITY_SENDER}" == "true" ]]'
+        )
+        block_end = source.index(
+            'if [[ "${START_MCORE_BRIDGE}" == "true"', block_start
+        )
+        block = source[block_start:block_end]
+        expected_bindings = {
+            "transport": "MCORE_TRANSPORT",
+            "serial_device": "MCORE_SERIAL_DEVICE",
+            "serial_baudrate": "MCORE_SERIAL_BAUDRATE",
+            "tcp_host": "MCORE_TCP_HOST",
+            "tcp_port": "MCORE_TCP_PORT",
+            "cmd_vel_topic": "MCORE_CMD_VEL_TOPIC",
+            "linear_velocity_scale": "MCORE_LINEAR_VELOCITY_SCALE",
+            "angular_velocity_scale": "MCORE_ANGULAR_VELOCITY_SCALE",
+            "linear_velocity_sign": "MCORE_LINEAR_VELOCITY_SIGN",
+            "angular_velocity_sign": "MCORE_ANGULAR_VELOCITY_SIGN",
+            "max_abs_linear_velocity": "MCORE_MAX_ABS_LINEAR_VELOCITY",
+            "max_abs_angular_velocity": "MCORE_MAX_ABS_ANGULAR_VELOCITY",
+            "enable_tx_log": "MCORE_ENABLE_TX_LOG",
+            "enable_rx_log": "MCORE_ENABLE_RX_LOG",
+        }
+        launch_root = ET.parse(
+            os.path.join(
+                REPO_ROOT,
+                "src/mcore_chassis_bridge/launch/mcore_velocity_sender.launch",
+            )
+        ).getroot()
+        launch_args = {node.get("name") for node in launch_root.findall("arg")}
+        for launch_name, variable_name in expected_bindings.items():
+            with self.subTest(launch_name=launch_name):
+                self.assertIn(launch_name, launch_args)
+                self.assertIn(
+                    '%s:="${%s}"' % (launch_name, variable_name), block
+                )
+
+        self.assertLess(
+            block.index(
+                'append_shell_words mcore_velocity_cmd_words "${MCORE_VELOCITY_EXTRA_ARGS}"'
+            ),
+            block.index('transport:="${MCORE_TRANSPORT}"'),
+        )
+
+    def test_vehicle_extra_args_cannot_override_wired_parameters(self):
+        script = VALID_COMMERCIAL_IDENTITY + r"""
+DORAEMON_NO_ACTION_ACCEPTANCE=true
+DORAEMON_ACTION_TEST_APPROVED=false
+odom_protected=(
+  serial_device serial_baudrate protocol_mode use_device_timestamp
+  publish_raw_odom_tf frame_id child_frame_id wheel_separation wheel_diameter
+  gear_ratio encoder_pulses_per_motor_revolution left_encoder_sign
+  right_encoder_sign left_wheel_scale right_wheel_scale angular_velocity_sign
+)
+for name in "${odom_protected[@]}"; do
+  WHEEL_ODOM_EXTRA_ARGS="${name}:=OVERRIDE"
+  if validate_commercial_vehicle_identity; then
+    exit 20
+  fi
+done
+WHEEL_ODOM_EXTRA_ARGS=
+mcore_protected=(
+  transport serial_device serial_baudrate tcp_host tcp_port cmd_vel_topic
+  linear_velocity_scale angular_velocity_scale linear_velocity_sign
+  angular_velocity_sign max_abs_linear_velocity max_abs_angular_velocity
+  enable_tx_log enable_rx_log
+)
+for name in "${mcore_protected[@]}"; do
+  MCORE_VELOCITY_EXTRA_ARGS="${name}:=OVERRIDE"
+  if validate_commercial_vehicle_identity; then
+    exit 21
+  fi
+done
+MCORE_VELOCITY_EXTRA_ARGS=
+validate_commercial_vehicle_identity
+"""
+        result = run_start_runtime_snippet(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn(
+            "WHEEL_ODOM_EXTRA_ARGS may not override protected vehicle argument",
+            result.stderr,
+        )
+        self.assertIn(
+            "MCORE_VELOCITY_EXTRA_ARGS may not override protected vehicle argument",
+            result.stderr,
+        )
+
+    def test_action_mode_requires_positive_finite_velocity_limits(self):
+        script = VALID_COMMERCIAL_IDENTITY + r"""
+DORAEMON_NO_ACTION_ACCEPTANCE=false
+DORAEMON_ACTION_TEST_APPROVED=true
+MCORE_MAX_ABS_ANGULAR_VELOCITY=1.2
+for invalid in 0 -0.1 nan inf 1e309; do
+  MCORE_MAX_ABS_LINEAR_VELOCITY="${invalid}"
+  if validate_commercial_vehicle_identity; then
+    exit 30
+  fi
+done
+MCORE_MAX_ABS_LINEAR_VELOCITY=0.4
+for invalid in 0 -0.1 nan inf 1e309; do
+  MCORE_MAX_ABS_ANGULAR_VELOCITY="${invalid}"
+  if validate_commercial_vehicle_identity; then
+    exit 31
+  fi
+done
+MCORE_MAX_ABS_ANGULAR_VELOCITY=1.2
+validate_commercial_vehicle_identity
+"""
+        result = run_start_runtime_snippet(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn(
+            "action-capable runtime requires MCORE_MAX_ABS_LINEAR_VELOCITY "
+            "to be finite and > 0",
+            result.stderr,
+        )
+        self.assertIn(
+            "action-capable runtime requires MCORE_MAX_ABS_ANGULAR_VELOCITY "
+            "to be finite and > 0",
+            result.stderr,
+        )
+
+    def test_no_action_mode_keeps_zero_limit_template_and_disables_sender(self):
+        defaults = read_env_defaults("config/runtime.a26022.env")
+        self.assertEqual(defaults.get("MCORE_MAX_ABS_LINEAR_VELOCITY"), "0.0")
+        self.assertEqual(defaults.get("MCORE_MAX_ABS_ANGULAR_VELOCITY"), "0.0")
+        self.assertEqual(defaults.get("ODOM_FRAME_ID"), "odom")
+        self.assertEqual(defaults.get("ODOM_CHILD_FRAME_ID"), "base_footprint")
+
+        script = VALID_COMMERCIAL_IDENTITY + r"""
+DORAEMON_NO_ACTION_ACCEPTANCE=true
+DORAEMON_ACTION_TEST_APPROVED=false
+MCORE_MAX_ABS_LINEAR_VELOCITY=0.0
+MCORE_MAX_ABS_ANGULAR_VELOCITY=0.0
+START_MCORE_VELOCITY_SENDER=true
+validate_commercial_vehicle_identity
+apply_no_action_acceptance_overrides
+[[ "${START_MCORE_VELOCITY_SENDER}" == false ]]
+"""
+        result = run_start_runtime_snippet(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

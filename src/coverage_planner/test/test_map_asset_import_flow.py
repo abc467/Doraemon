@@ -14,6 +14,7 @@ from nav_msgs.msg import OccupancyGrid
 from coverage_planner.map_asset_import import register_imported_map_asset
 from coverage_planner.map_asset_import import normalize_import_verification_mode
 from coverage_planner.map_io import write_occupancy_to_yaml_pgm
+from coverage_planner.map_path_security import MapPathSecurityError
 from coverage_planner.ops_store.store import OperationsStore
 from coverage_planner.plan_store.store import PlanStore
 
@@ -235,6 +236,55 @@ def _attach_gc_business_refs(store, ops, *, revision_id: str, map_name: str = "g
 
 
 class MapAssetImportFlowTest(unittest.TestCase):
+    def test_offline_map_tools_reject_unsafe_basename_symlink_and_fifo_sources(self):
+        for module, tool_name in (
+            (IMPORT_MAP_ASSETS_MODULE, "import_map_assets.py"),
+            (MIGRATE_MAP_ASSETS_MODULE, "migrate_map_assets.py"),
+        ):
+            for source_kind in ("unsafe_name", "symlink", "fifo"):
+                with self.subTest(tool=tool_name, source_kind=source_kind), tempfile.TemporaryDirectory() as tmpdir:
+                    source_root = os.path.join(tmpdir, "source")
+                    maps_root = os.path.join(tmpdir, "managed")
+                    os.makedirs(source_root, exist_ok=True)
+                    os.makedirs(maps_root, exist_ok=True)
+                    if source_kind == "unsafe_name":
+                        source_path = os.path.join(source_root, ("a" * 129) + ".yaml")
+                        with open(source_path, "w", encoding="utf-8") as handle:
+                            handle.write("image: demo.pgm\n")
+                    elif source_kind == "symlink":
+                        real_path = os.path.join(source_root, "real.yaml")
+                        with open(real_path, "w", encoding="utf-8") as handle:
+                            handle.write("image: demo.pgm\n")
+                        source_path = os.path.join(source_root, "linked.yaml")
+                        os.symlink(real_path, source_path)
+                    else:
+                        source_path = os.path.join(source_root, "fifo.yaml")
+                        os.mkfifo(source_path)
+
+                    argv = [
+                        tool_name,
+                        "--plan-db-path",
+                        os.path.join(tmpdir, "planning.db"),
+                        "--maps-root",
+                        maps_root,
+                        "--src-glob",
+                        source_path,
+                    ]
+                    patches = [
+                        mock.patch.object(module, "PlanStore", return_value=mock.Mock()),
+                        mock.patch.object(sys, "argv", argv),
+                    ]
+                    if module is MIGRATE_MAP_ASSETS_MODULE:
+                        patches.append(mock.patch.object(module, "OperationsStore", return_value=mock.Mock()))
+                    with patches[0], patches[1]:
+                        if len(patches) == 3:
+                            with patches[2]:
+                                with self.assertRaises(MapPathSecurityError):
+                                    module.main()
+                        else:
+                            with self.assertRaises(MapPathSecurityError):
+                                module.main()
+
     def test_normalize_import_verification_mode_rejects_old_alias(self):
         with self.assertRaises(ValueError):
             normalize_import_verification_mode("legacy_verified")
@@ -1419,6 +1469,7 @@ class MapAssetImportFlowTest(unittest.TestCase):
             src_dir = os.path.join(tmpdir, "src")
             maps_root = os.path.join(tmpdir, "managed")
             os.makedirs(src_dir, exist_ok=True)
+            os.makedirs(maps_root, exist_ok=True)
             yaml_path = os.path.join(src_dir, "demo.yaml")
             with open(yaml_path, "w", encoding="utf-8") as fh:
                 fh.write("image: demo.pgm\nresolution: 0.05\norigin: [0.0, 0.0, 0.0]\n")
@@ -1481,6 +1532,7 @@ class MapAssetImportFlowTest(unittest.TestCase):
             src_dir = os.path.join(tmpdir, "src")
             maps_root = os.path.join(tmpdir, "managed")
             os.makedirs(src_dir, exist_ok=True)
+            os.makedirs(maps_root, exist_ok=True)
             yaml_path = os.path.join(src_dir, "demo.yaml")
             with open(yaml_path, "w", encoding="utf-8") as fh:
                 fh.write("image: demo.pgm\nresolution: 0.05\norigin: [0.0, 0.0, 0.0]\n")
@@ -1518,7 +1570,12 @@ class MapAssetImportFlowTest(unittest.TestCase):
             ) as register_asset, mock.patch.object(sys, "argv", argv):
                 MIGRATE_MAP_ASSETS_MODULE.main()
 
-        write_occ.assert_called_once_with(mock.ANY, expected_out_root, base_name="demo")
+        write_occ.assert_called_once_with(
+            mock.ANY,
+            expected_out_root,
+            base_name="demo",
+            allowed_root=maps_root,
+        )
         self.assertEqual(register_asset.call_args.kwargs["revision_id"], "rev_demo_new")
 
     def test_import_map_assets_allows_same_name_new_revision_with_revision_scoped_paths(self):
@@ -1537,6 +1594,7 @@ class MapAssetImportFlowTest(unittest.TestCase):
             src_dir = os.path.join(tmpdir, "src")
             maps_root = os.path.join(tmpdir, "managed")
             os.makedirs(src_dir, exist_ok=True)
+            os.makedirs(maps_root, exist_ok=True)
             yaml_path = os.path.join(src_dir, "demo.yaml")
             with open(yaml_path, "w", encoding="utf-8") as fh:
                 fh.write("image: demo.pgm\nresolution: 0.05\norigin: [0.0, 0.0, 0.0]\n")
@@ -1570,7 +1628,12 @@ class MapAssetImportFlowTest(unittest.TestCase):
             ) as register_asset, mock.patch.object(sys, "argv", argv):
                 IMPORT_MAP_ASSETS_MODULE.main()
 
-        write_occ.assert_called_once_with(mock.ANY, expected_out_root, base_name="demo")
+        write_occ.assert_called_once_with(
+            mock.ANY,
+            expected_out_root,
+            base_name="demo",
+            allowed_root=maps_root,
+        )
         self.assertEqual(register_asset.call_args.kwargs["revision_id"], "rev_demo_new")
 
 

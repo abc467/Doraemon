@@ -1,18 +1,12 @@
 <launch>
-  <!-- Production mapping corrected from field left/right test on 2026-06-19
-       Default binding mode: serial_number
-       USB port values are kept as a fallback/debug option.
+  <!-- Commercial binding mode is serial_number. Per-vehicle values are required
+       through the environment or explicit launch arguments; this release must
+       never silently inherit another vehicle's identities. USB-port binding is
+       an explicit engineering-only mode and is never selected automatically.
        ROS topic semantics:
          gemini_cf: left depth camera
          gemini_nj: right depth camera
-         gemini_front: front low-obstacle depth camera
-       Orbbec list_devices_node port ids:
-         gemini_cf: SN=AY2816200E7, usb_port=2-2.4.2
-         gemini_nj: SN=AY2816200SB, usb_port=2-2.2.2
-         gemini_front: SN=CPAX16300EJ, usb_port=1-3
-       Linux sysfs/UVC paths:
-         gemini_cf: color=1-2.4.1, depth=2-2.4.2
-         gemini_nj: color=1-2.2.1, depth=2-2.2.2 -->
+         gemini_front: front low-obstacle depth camera -->
   <arg name="device_num" default="3"/>
   <arg name="connection_delay" default="800"/>
   <arg name="camera2_connection_delay" default="1800"/>
@@ -25,12 +19,12 @@
   <arg name="camera1_bind_by_usb_port" default="false"/>
   <arg name="camera2_bind_by_usb_port" default="false"/>
   <arg name="camera3_bind_by_usb_port" default="false"/>
-  <arg name="camera1_serial_number" default="AY2816200E7"/>
-  <arg name="camera2_serial_number" default="AY2816200SB"/>
-  <arg name="camera3_serial_number" default="CPAX16300EJ"/>
-  <arg name="camera1_usb_port" default="2-2.4.2"/>
-  <arg name="camera2_usb_port" default="2-2.2.2"/>
-  <arg name="camera3_usb_port" default="1-3"/>
+  <arg name="camera1_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER '')"/>
+  <arg name="camera2_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER '')"/>
+  <arg name="camera3_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER '')"/>
+  <arg name="camera1_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA1_USB_PORT '')"/>
+  <arg name="camera2_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA2_USB_PORT '')"/>
+  <arg name="camera3_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA3_USB_PORT '')"/>
 
   <arg name="depth_width" default="640"/>
   <arg name="depth_height" default="400"/>

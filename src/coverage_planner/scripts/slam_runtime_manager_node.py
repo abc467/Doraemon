@@ -8,6 +8,7 @@ from typing import Dict
 import rospy
 import tf2_ros
 
+from coverage_planner.map_path_security import validate_commercial_map_roots
 from coverage_planner.ops_store.store import OperationsStore
 from coverage_planner.plan_store.store import PlanStore
 from coverage_planner.slam_workflow import (
@@ -32,8 +33,10 @@ class SlamRuntimeManagerNode:
     def __init__(self):
         apply_bootstrap(self, load_slam_runtime_manager_bootstrap(__file__))
 
-        os.makedirs(self.maps_root, exist_ok=True)
-        os.makedirs(self.repo_map_root, exist_ok=True)
+        validate_commercial_map_roots(
+            self.maps_root,
+            repo_map_root=self.repo_map_root,
+        )
         os.makedirs(self.log_root, exist_ok=True)
 
         self._plan_store = PlanStore(self.plan_db_path)

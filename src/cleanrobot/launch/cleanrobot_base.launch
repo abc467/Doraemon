@@ -13,6 +13,15 @@
    <arg name="imu_slave_address" default="1"/>
    <arg name="start_ahrs" default="false"/>
    <arg name="start_depth_cameras" default="false"/>
+   <arg name="camera1_bind_by_usb_port" default="false"/>
+   <arg name="camera2_bind_by_usb_port" default="false"/>
+   <arg name="camera3_bind_by_usb_port" default="false"/>
+   <arg name="camera1_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER '')"/>
+   <arg name="camera2_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER '')"/>
+   <arg name="camera3_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER '')"/>
+   <arg name="camera1_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA1_USB_PORT '')"/>
+   <arg name="camera2_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA2_USB_PORT '')"/>
+   <arg name="camera3_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA3_USB_PORT '')"/>
    <arg name="publish_a26022_static_tf" default="true"/>
    <arg name="publish_base_footprint_to_base_link" default="false"/>
    <arg name="base_footprint_to_base_link_z" default="0.0"/>
@@ -71,6 +80,16 @@
       <include file="$(find fdilink_ahrs)/launch/ahrs_data.launch"/>
    </group>
    <group if="$(arg start_depth_cameras)">
-      <include file="$(find cleanrobot)/launch/orbbec_dual_depth_ground.launch"/>
+      <include file="$(find cleanrobot)/launch/orbbec_dual_depth_ground.launch">
+         <arg name="camera1_bind_by_usb_port" value="$(arg camera1_bind_by_usb_port)"/>
+         <arg name="camera2_bind_by_usb_port" value="$(arg camera2_bind_by_usb_port)"/>
+         <arg name="camera3_bind_by_usb_port" value="$(arg camera3_bind_by_usb_port)"/>
+         <arg name="camera1_serial_number" value="$(arg camera1_serial_number)"/>
+         <arg name="camera2_serial_number" value="$(arg camera2_serial_number)"/>
+         <arg name="camera3_serial_number" value="$(arg camera3_serial_number)"/>
+         <arg name="camera1_usb_port" value="$(arg camera1_usb_port)"/>
+         <arg name="camera2_usb_port" value="$(arg camera2_usb_port)"/>
+         <arg name="camera3_usb_port" value="$(arg camera3_usb_port)"/>
+      </include>
    </group>
 </launch>

@@ -20,7 +20,7 @@ BLUESEA ROS driver is specially designed to connect to the lidar products produc
 
 4.Using ROS launch to run drivers
 
-	sudo chmod 777 /dev/ttyUSB0 (uart)			//  /dev/ttyUSB0  refers to the serial port name. If it is a serial/virtual serial port model, it needs to be authorized
+	For UART models, install a reviewed udev rule with `GROUP:="dialout", MODE:="0660"`, add the service user to `dialout`, and physically replug the device. Never use `chmod 777` on a serial device. Commercial vehicles must bind a stable alias from the serial identity verified on that board; VID/PID alone is not a unique identity.
     
     roslaunch bluesea2 [launch file]    		//The specific launch file description is as follows
 

@@ -1,2 +1,6 @@
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE:="0666", SYMLINK+="LHLiDAR"
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE:="0666", SYMLINK+="LHLiDAR"
+# Vendor convenience permissions only. These VID/PID pairs are shared by many
+# USB-serial devices, so they are not sufficient for a stable commercial alias.
+# Commercial vehicles must create a per-board, per-device identity rule after
+# physical unplug/replug verification instead of using a generic LHLiDAR link.
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", GROUP:="dialout", MODE:="0660"
+KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", GROUP:="dialout", MODE:="0660"

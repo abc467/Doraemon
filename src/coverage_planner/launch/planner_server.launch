@@ -2,6 +2,7 @@
   <arg name="plan_db_path" default="/data/coverage/planning.db"/>
   <arg name="ops_db_path" default="/data/coverage/operations.db"/>
   <arg name="maps_root" default="/data/maps"/>
+  <arg name="slam_runtime_log_root" default="/var/log/doraemon/slam-runtime"/>
   <arg name="planner_defaults_yaml" default="$(find coverage_planner)/config/planner_server_defaults.yaml"/>
   <arg name="robot_id" default="local_robot"/>
   <arg name="map_topic" default="/map"/>
@@ -10,7 +11,9 @@
   <arg name="enable_rect_zone_planner" default="true"/>
   <arg name="enable_slam_runtime_manager" default="true"/>
   <arg name="enable_slam_api_service" default="true"/>
-  <arg name="enable_manual_drive_service" default="true"/>
+  <arg name="enable_manual_drive_service" default="false"/>
+  <arg name="manual_drive_no_action_acceptance" default="true"/>
+  <arg name="manual_drive_action_test_approved" default="false"/>
   <arg name="enable_odometry_health" default="false"/>
   <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
   <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
@@ -176,6 +179,8 @@
       <param name="task_state_topic" value="$(arg task_state_topic_name)"/>
       <param name="odometry_state_topic" value="$(arg odometry_state_topic_name)"/>
       <param name="combined_status_topic" value="$(arg manual_drive_combined_status_topic)"/>
+      <param name="commercial_no_action_acceptance" value="$(arg manual_drive_no_action_acceptance)"/>
+      <param name="commercial_action_test_approved" value="$(arg manual_drive_action_test_approved)"/>
       <param name="require_role" value="$(arg manual_drive_require_role)"/>
       <param name="require_slam_state" value="$(arg manual_drive_require_slam_state)"/>
       <param name="require_task_state" value="$(arg manual_drive_require_task_state)"/>
@@ -189,6 +194,7 @@
       <param name="plan_db_path" value="$(arg plan_db_path)"/>
       <param name="ops_db_path" value="$(arg ops_db_path)"/>
       <param name="maps_root" value="$(arg maps_root)"/>
+      <param name="log_root" value="$(arg slam_runtime_log_root)"/>
       <param name="robot_id" value="$(arg robot_id)"/>
       <param name="runtime_ns" value="$(arg runtime_ns)"/>
       <param name="app_service_name" value="$(arg slam_runtime_manager_app_service_name)"/>

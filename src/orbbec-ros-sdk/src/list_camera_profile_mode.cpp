@@ -1,4 +1,5 @@
 #include <orbbec_camera/ob_camera_node.h>
+#include <orbbec_camera/logging.h>
 #include <memory>
 #include <iostream>
 
@@ -68,7 +69,8 @@ void printPreset(const std::shared_ptr<ob::Device>& device) {
 }
 int main() {
   try {
-    ob::Context::setLoggerSeverity(OBLogSeverity::OB_LOG_SEVERITY_NONE);
+    orbbec_camera::disableOrbbecSdkFileLogging();
+    ob::Context::setLoggerToConsole(OBLogSeverity::OB_LOG_SEVERITY_OFF);
     auto pipeline = std::make_shared<ob::Pipeline>();
     auto device = initializeDevice(pipeline);
     if (!device) {

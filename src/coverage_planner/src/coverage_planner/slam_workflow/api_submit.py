@@ -14,6 +14,11 @@ from cleanrobot_app_msgs.srv import (
 )
 from coverage_planner.app_msg_clone import clone_app_slam_job_state
 from coverage_planner.map_asset_status import map_asset_is_verified
+from coverage_planner.map_path_security import (
+    MapPathSecurityError,
+    validate_map_name,
+    validate_revision_id,
+)
 from coverage_planner.slam_workflow.api import (
     ASSET_MUST_EXIST_OPERATIONS,
     ASSET_MUST_NOT_EXIST_OPERATIONS,
@@ -21,7 +26,6 @@ from coverage_planner.slam_workflow.api import (
     SUPPORTED_SUBMIT_OPERATIONS,
     STOP_MAPPING,
     SubmitValidationContext,
-    normalize_map_name,
     validate_submit_request,
 )
 
@@ -73,15 +77,46 @@ class SlamApiSubmitController:
         state_controller = backend._state_controller
         robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
         operation = int(req.operation)
-        map_name = normalize_map_name(req.map_name)
-        map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
-        save_map_name = normalize_map_name(getattr(req, "save_map_name", ""))
+        try:
+            map_name = validate_map_name(req.map_name, allow_empty=True)
+            map_revision_id = validate_revision_id(
+                getattr(req, "map_revision_id", ""),
+                allow_empty=True,
+            )
+            save_map_name = validate_map_name(
+                getattr(req, "save_map_name", ""),
+                allow_empty=True,
+            )
+        except MapPathSecurityError as exc:
+            return self._submit_response(
+                response_cls,
+                job_cls,
+                job_converter,
+                accepted=False,
+                message=str(exc),
+                error_code=str(exc.code or "invalid_map_name"),
+                job_id="",
+                operation=operation,
+                map_name="",
+            )
         if map_revision_id and operation != STOP_MAPPING:
             try:
                 resolved_revision_asset = backend._runtime_assets.resolve_asset(
                     robot_id=robot_id,
                     map_name=map_name,
                     map_revision_id=map_revision_id,
+                )
+            except MapPathSecurityError as exc:
+                return self._submit_response(
+                    response_cls,
+                    job_cls,
+                    job_converter,
+                    accepted=False,
+                    message=str(exc),
+                    error_code=str(exc.code or "invalid_map_name"),
+                    job_id="",
+                    operation=operation,
+                    map_name="",
                 )
             except ValueError as exc:
                 return self._submit_response(
@@ -96,7 +131,23 @@ class SlamApiSubmitController:
                     map_name=map_name,
                 )
             if resolved_revision_asset is not None:
-                resolved_map_name = normalize_map_name(str(resolved_revision_asset.get("map_name") or ""))
+                try:
+                    resolved_map_name = validate_map_name(
+                        str(resolved_revision_asset.get("map_name") or ""),
+                        allow_empty=True,
+                    )
+                except MapPathSecurityError as exc:
+                    return self._submit_response(
+                        response_cls,
+                        job_cls,
+                        job_converter,
+                        accepted=False,
+                        message=str(exc),
+                        error_code=str(exc.code or "invalid_map_name"),
+                        job_id="",
+                        operation=operation,
+                        map_name="",
+                    )
                 if map_name and resolved_map_name and resolved_map_name != map_name:
                     return self._submit_response(
                         response_cls,
@@ -173,6 +224,18 @@ class SlamApiSubmitController:
                     map_name=effective_map_name,
                     map_revision_id=map_revision_id,
                 )
+            except MapPathSecurityError as exc:
+                return self._submit_response(
+                    response_cls,
+                    job_cls,
+                    job_converter,
+                    accepted=False,
+                    message=str(exc),
+                    error_code=str(exc.code or "invalid_map_name"),
+                    job_id="",
+                    operation=operation,
+                    map_name="",
+                )
             except ValueError as exc:
                 return self._submit_response(
                     response_cls,
@@ -190,7 +253,7 @@ class SlamApiSubmitController:
         if effective_map_name and operation in PATH_CONFLICT_CHECK_OPERATIONS and not map_asset_exists:
             target_paths = backend._runtime_assets.target_paths(effective_map_name)
             for path in target_paths.values():
-                if os.path.exists(path):
+                if os.path.lexists(path):
                     asset_path_conflict = path
                     break
         validation = validate_submit_request(

@@ -9,11 +9,11 @@
         <!--Global log output level-->
         <LogLevel>0</LogLevel>
         <!--File log output level-->
-        <FileLogLevel>0</FileLogLevel>
+        <FileLogLevel>5</FileLogLevel>
         <!--Console log output level-->
         <ConsoleLogLevel>1</ConsoleLogLevel>
-        <!--Default log output file path, string type. If this item is not configured, the default path will be used: Win/Linux: "./Log"; Android: "/sdcard/Orbbec/Log"-->
-        <!--<OutputDir>./log</OutputDir>-->
+        <!--Commercial runtime logs must stay outside the immutable release root.-->
+        <OutputDir>/var/log/doraemon/orbbec</OutputDir>
         <!--Default log output file size, int type, unit: MB-->
         <MaxFileSize>100</MaxFileSize>
         <!--Default log output file number (circular overwrite), int type-->

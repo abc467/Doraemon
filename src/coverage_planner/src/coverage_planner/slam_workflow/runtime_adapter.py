@@ -16,6 +16,12 @@ from coverage_planner.canonical_contract_types import APP_GET_ODOMETRY_STATUS_SE
 
 from coverage_planner.map_asset_status import map_asset_is_verified
 from coverage_planner.map_io import compute_occupancy_grid_md5, origin_to_jsonable, write_occupancy_to_yaml_pgm
+from coverage_planner.map_path_security import (
+    MapPathSecurityError,
+    ensure_secure_parent_directory,
+    validate_existing_regular_file,
+    validate_map_name,
+)
 from coverage_planner.runtime_gate_messages import (
     manual_assist_recovery_message,
     runtime_map_identity_unavailable_message,
@@ -31,10 +37,7 @@ from coverage_planner.slam_workflow_semantics import (
 
 
 def _normalize_runtime_map_name(map_name: str) -> str:
-    value = str(map_name or "").strip()
-    if value.endswith(".pbstream"):
-        value = value[:-len(".pbstream")]
-    return str(value or "").strip()
+    return validate_map_name(map_name, allow_empty=True)
 
 
 def _map_id_from_md5(map_md5: str) -> str:
@@ -994,7 +997,18 @@ class CartographerRuntimeAdapter:
         transport = self._transport
         assets = backend._asset_helper
         service_api = backend._service_api
-        normalized_map_name = _normalize_runtime_map_name(map_name)
+        try:
+            normalized_map_name = _normalize_runtime_map_name(map_name)
+        except MapPathSecurityError as exc:
+            return service_api.response(
+                success=False,
+                message=str(exc),
+                error_code="invalid_map_name",
+                operation=operation,
+                map_name="",
+                localization_state="mapping",
+                current_mode="mapping",
+            )
         if not normalized_map_name:
             return service_api.response(
                 success=False,
@@ -1005,13 +1019,24 @@ class CartographerRuntimeAdapter:
                 localization_state="mapping",
                 current_mode="mapping",
             )
-        candidate_revision_id = backend._plan_store.generate_map_revision_id(normalized_map_name)
-        target_paths = assets.target_paths(
-            normalized_map_name,
-            revision_id=candidate_revision_id,
-        )
+        try:
+            candidate_revision_id = backend._plan_store.generate_map_revision_id(normalized_map_name)
+            target_paths = assets.target_paths(
+                normalized_map_name,
+                revision_id=candidate_revision_id,
+            )
+        except MapPathSecurityError as exc:
+            return service_api.response(
+                success=False,
+                message=str(exc),
+                error_code=str(exc.code or "invalid_map_name"),
+                operation=operation,
+                map_name=normalized_map_name,
+                localization_state="mapping",
+                current_mode="mapping",
+            )
         for path in target_paths.values():
-            if os.path.exists(path):
+            if os.path.lexists(path):
                 return service_api.response(
                     success=False,
                     message="target asset path already exists: %s" % path,
@@ -1029,7 +1054,7 @@ class CartographerRuntimeAdapter:
         try:
             artifact_dir = os.path.dirname(pbstream_path)
             if artifact_dir:
-                os.makedirs(artifact_dir, exist_ok=True)
+                ensure_secure_parent_directory(backend.maps_root, pbstream_path)
             occ = rospy.wait_for_message(
                 backend.map_topic,
                 OccupancyGrid,
@@ -1045,13 +1070,18 @@ class CartographerRuntimeAdapter:
             )
             if not ok:
                 raise RuntimeError(str(msg or "save_state failed"))
-            if not os.path.exists(pbstream_path):
-                raise RuntimeError("pbstream save did not produce file: %s" % pbstream_path)
+            validate_existing_regular_file(
+                backend.maps_root,
+                pbstream_path,
+                suffix=".pbstream",
+                label="saved pbstream",
+            )
 
             pgm_path, yaml_path = write_occupancy_to_yaml_pgm(
                 occ,
                 artifact_dir or backend.maps_root,
                 base_name=normalized_map_name,
+                allowed_root=backend.maps_root,
             )
             backend._plan_store.register_map_asset(
                 map_name=normalized_map_name,

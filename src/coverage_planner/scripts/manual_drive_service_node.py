@@ -44,6 +44,18 @@ def _positive_float_param(name: str, default: float, minimum: float) -> float:
     return max(float(minimum), value)
 
 
+def _strict_bool_param(name: str, default: bool) -> bool:
+    value = rospy.get_param(name, default)
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise RuntimeError("%s must be an explicit boolean" % name)
+
+
 def _contract_param_for_service_name(service_name: str) -> str:
     name = str(service_name or "").strip()
     if "/app/" in name:
@@ -84,8 +96,36 @@ class ManualDriveServiceNode:
         self.odometry_state_topic = str(rospy.get_param("~odometry_state_topic", "/clean_robot_server/odometry_state")).strip()
         self.combined_status_topic = str(rospy.get_param("~combined_status_topic", "/combined_status")).strip()
 
+        enabled = _strict_bool_param("~enabled", True)
+        no_action_acceptance = _strict_bool_param("~commercial_no_action_acceptance", True)
+        action_test_approved = _strict_bool_param("~commercial_action_test_approved", False)
+        require_role = _strict_bool_param("~require_role", False)
+        require_slam_state = _strict_bool_param("~require_slam_state", False)
+        require_task_state = _strict_bool_param("~require_task_state", False)
+        require_odometry_state = _strict_bool_param("~require_odometry_state", False)
+        require_combined_status = _strict_bool_param("~require_combined_status", False)
+        if not enabled:
+            raise RuntimeError("disabled manual-drive node must not be started")
+        if no_action_acceptance or not action_test_approved:
+            raise RuntimeError(
+                "manual drive requires action-capable mode and explicit action-test approval"
+            )
+        required_safety_gates = {
+            "require_role": require_role,
+            "require_slam_state": require_slam_state,
+            "require_task_state": require_task_state,
+            "require_odometry_state": require_odometry_state,
+            "require_combined_status": require_combined_status,
+        }
+        disabled_gates = sorted(name for name, value in required_safety_gates.items() if not value)
+        if disabled_gates:
+            raise RuntimeError(
+                "manual drive requires all commercial safety gates: %s"
+                % ", ".join(disabled_gates)
+            )
+
         config = ManualDriveConfig(
-            enabled=bool(rospy.get_param("~enabled", True)),
+            enabled=enabled,
             cmd_vel_topic=str(rospy.get_param("~cmd_vel_topic", "/cmd_vel")).strip() or "/cmd_vel",
             linear_mps_limit=max(0.01, float(rospy.get_param("~linear_mps_limit", 0.3))),
             angular_radps_limit=max(0.05, float(rospy.get_param("~angular_radps_limit", 0.5))),
@@ -94,16 +134,16 @@ class ManualDriveServiceNode:
             watchdog_timeout_ms=max(100, int(rospy.get_param("~watchdog_timeout_ms", 1000))),
             min_duration_ms=max(50, int(rospy.get_param("~min_duration_ms", 100))),
             publish_hz=_positive_float_param("~publish_hz", 20.0, 1.0),
-            require_role=bool(rospy.get_param("~require_role", False)),
+            require_role=require_role,
             allowed_roles=_csv_param("~allowed_roles", ("operator", "service", "engineer", "admin")),
             allowed_capabilities=_csv_param(
                 "~allowed_capabilities",
                 ("manual_drive", "manual-drive", "robot:manual_drive"),
             ),
-            require_slam_state=bool(rospy.get_param("~require_slam_state", False)),
-            require_task_state=bool(rospy.get_param("~require_task_state", False)),
-            require_odometry_state=bool(rospy.get_param("~require_odometry_state", False)),
-            require_combined_status=bool(rospy.get_param("~require_combined_status", False)),
+            require_slam_state=require_slam_state,
+            require_task_state=require_task_state,
+            require_odometry_state=require_odometry_state,
+            require_combined_status=require_combined_status,
             slam_state_stale_timeout_s=max(0.2, float(rospy.get_param("~slam_state_stale_timeout_s", 2.0))),
             task_state_stale_timeout_s=max(0.2, float(rospy.get_param("~task_state_stale_timeout_s", 2.0))),
             odometry_state_stale_timeout_s=max(0.2, float(rospy.get_param("~odometry_state_stale_timeout_s", 2.0))),

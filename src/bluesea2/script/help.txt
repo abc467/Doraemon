@@ -1,13 +1,16 @@
 1.lsusb  
 Find the list of serial ports that require fixed mapping and find the VID and PID
-2.vim /etc/udev/rules.d
-open the file that need to edit,and Content reference LHLiDAR.rules
-3.sudo service udev reload
-4.sudo service udev restart
+2.Install a reviewed rule under /etc/udev/rules.d with root:root mode 0644.
+  Use GROUP:="dialout", MODE:="0660" and a board-local physical identity.
+  VID/PID alone is not a stable commercial device identity.
+3.sudo udevadm control --reload-rules
+4.Physically unplug/replug the device, then verify its alias, owner, group and mode.
 
 
 
 for example
 cmd：lsusb
 print:Bus 003 Device 007: ID 1a86:7523 QinHeng Electronics HL-340 USB-Serial adapter
-need write:KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE:="0666", SYMLINK+="LHLiDAR"
+Do not create a generic world-writable LHLiDAR alias from this VID/PID. Use the
+commercial deployment manual to identify this board's device and create a
+unique rule with GROUP:="dialout", MODE:="0660".

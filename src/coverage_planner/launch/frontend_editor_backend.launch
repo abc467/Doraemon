@@ -14,7 +14,9 @@
   <arg name="start_map_asset_service" default="true"/>
   <arg name="enable_site_editor_service" default="true"/>
   <arg name="enable_rect_zone_planner" default="false"/>
-  <arg name="enable_manual_drive_service" default="true"/>
+  <arg name="enable_manual_drive_service" default="false"/>
+  <arg name="manual_drive_no_action_acceptance" default="true"/>
+  <arg name="manual_drive_action_test_approved" default="false"/>
   <arg name="enable_odometry_health" default="true"/>
   <arg name="odometry_health_imu_topic" default="/imu_corrected"/>
   <arg name="odometry_health_ekf_node_name" default="/wheel_speed_odom_ekf"/>
@@ -90,6 +92,8 @@
     <arg name="enable_rect_zone_planner" value="$(arg enable_rect_zone_planner)"/>
     <arg name="enable_site_editor_service" value="$(arg enable_site_editor_service)"/>
     <arg name="enable_manual_drive_service" value="$(arg enable_manual_drive_service)"/>
+    <arg name="manual_drive_no_action_acceptance" value="$(arg manual_drive_no_action_acceptance)"/>
+    <arg name="manual_drive_action_test_approved" value="$(arg manual_drive_action_test_approved)"/>
     <arg name="enable_odometry_health" value="$(arg enable_odometry_health)"/>
     <arg name="odometry_health_imu_topic" value="$(arg odometry_health_imu_topic)"/>
     <arg name="odometry_health_ekf_node_name" value="$(arg odometry_health_ekf_node_name)"/>

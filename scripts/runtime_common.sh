@@ -1,28 +1,116 @@
 #!/usr/bin/env bash
 
-_RUNTIME_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_RUNTIME_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck disable=SC1091
 source "${_RUNTIME_COMMON_DIR}/source_slam_runtime_env.sh"
 
+# stop_all_backend.sh runs these waits more than once while shutting down the
+# runtime and frontend sessions.  Keep their hard maxima at the validated
+# defaults so an external runtime.env cannot extend the combined stop path
+# beyond doraemon-runtime.service's TimeoutStopSec=90.  Positive smaller values
+# remain supported for diagnostics and tests.
+_RUNTIME_ROS_CLI_TIMEOUT_DEFAULT_SEC=2
+_RUNTIME_ROS_CLI_TIMEOUT_MAX_SEC=2
+_RUNTIME_SHUTDOWN_NODE_BUDGET_DEFAULT_SEC=12
+_RUNTIME_SHUTDOWN_NODE_BUDGET_MAX_SEC=12
+_RUNTIME_SHUTDOWN_PROCESS_BUDGET_DEFAULT_SEC=8
+_RUNTIME_SHUTDOWN_PROCESS_BUDGET_MAX_SEC=8
+
+runtime_bounded_positive_integer() {
+  local raw_value="${1:-}"
+  local default_value="$2"
+  local max_value="$3"
+
+  if [[ ! "${raw_value}" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s\n' "${default_value}"
+    return 0
+  fi
+
+  # Avoid shell-integer overflow for an arbitrarily large value supplied by
+  # runtime.env.  Equal-length decimal strings are safe to compare below.
+  if (( ${#raw_value} > ${#max_value} )); then
+    printf '%s\n' "${max_value}"
+    return 0
+  fi
+  if (( ${#raw_value} == ${#max_value} && 10#${raw_value} > 10#${max_value} )); then
+    printf '%s\n' "${max_value}"
+    return 0
+  fi
+
+  printf '%s\n' "${raw_value}"
+}
+
+runtime_ros_cli_timeout_sec() {
+  runtime_bounded_positive_integer \
+    "${DORAEMON_ROS_CLI_TIMEOUT_SEC:-}" \
+    "${_RUNTIME_ROS_CLI_TIMEOUT_DEFAULT_SEC}" \
+    "${_RUNTIME_ROS_CLI_TIMEOUT_MAX_SEC}"
+}
+
+runtime_shutdown_node_budget_sec() {
+  runtime_bounded_positive_integer \
+    "${DORAEMON_SHUTDOWN_NODE_BUDGET_SEC:-}" \
+    "${_RUNTIME_SHUTDOWN_NODE_BUDGET_DEFAULT_SEC}" \
+    "${_RUNTIME_SHUTDOWN_NODE_BUDGET_MAX_SEC}"
+}
+
+runtime_shutdown_process_budget_sec() {
+  runtime_bounded_positive_integer \
+    "${DORAEMON_SHUTDOWN_PROCESS_BUDGET_SEC:-}" \
+    "${_RUNTIME_SHUTDOWN_PROCESS_BUDGET_DEFAULT_SEC}" \
+    "${_RUNTIME_SHUTDOWN_PROCESS_BUDGET_MAX_SEC}"
+}
+
 runtime_common_init() {
   local common_dir
+  local expected_repo_root
+  local provided_repo_root
   local resolved_workspace_setup=""
   local resolved_workspace_layout=""
-  common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  expected_repo_root="$(cd "${common_dir}/.." && pwd -P)"
+  provided_repo_root="$(realpath -e "${DORAEMON_REPO_ROOT:-${expected_repo_root}}" 2>/dev/null || true)"
+  if [[ "${provided_repo_root}" != "${expected_repo_root}" ]]; then
+    echo "[ERROR] DORAEMON_REPO_ROOT must match the executing release: ${expected_repo_root}" >&2
+    return 1
+  fi
 
   export DORAEMON_SCRIPT_DIR="${common_dir}"
-  export DORAEMON_REPO_ROOT="${DORAEMON_REPO_ROOT:-$(cd "${common_dir}/.." && pwd)}"
-  export DORAEMON_ROS_SETUP="${DORAEMON_ROS_SETUP:-/opt/ros/noetic/setup.bash}"
-  if [[ -n "${DORAEMON_WORKSPACE_SETUP:-}" ]]; then
-    resolved_workspace_setup="${DORAEMON_WORKSPACE_SETUP}"
-  else
-    resolved_workspace_setup="$(resolve_workspace_setup "${DORAEMON_REPO_ROOT}")" || return 1
+  export DORAEMON_REPO_ROOT="${expected_repo_root}"
+  if [[ -n "${DORAEMON_ROS_SETUP:-}" && "${DORAEMON_ROS_SETUP}" != "/opt/ros/noetic/setup.bash" ]]; then
+    echo "[ERROR] DORAEMON_ROS_SETUP may not override /opt/ros/noetic/setup.bash" >&2
+    return 1
   fi
+  export DORAEMON_ROS_SETUP="/opt/ros/noetic/setup.bash"
+  if [[ -n "${DORAEMON_WORKSPACE_SETUP:-}" ]]; then
+    resolved_workspace_setup="$(realpath -ms "${DORAEMON_WORKSPACE_SETUP}")"
+    case "${resolved_workspace_setup}" in
+      "${expected_repo_root}/devel/setup.bash"|"${expected_repo_root}/install/setup.bash")
+        ;;
+      *)
+        echo "[ERROR] DORAEMON_WORKSPACE_SETUP must stay inside the executing release" >&2
+        return 1
+        ;;
+    esac
+  else
+    resolved_workspace_setup="$(resolve_workspace_setup "${expected_repo_root}")" || return 1
+  fi
+  local canonical_workspace_setup=""
+  canonical_workspace_setup="$(realpath -e "${resolved_workspace_setup}" 2>/dev/null || true)"
+  case "${canonical_workspace_setup}" in
+    "${expected_repo_root}"/*)
+      ;;
+    *)
+      echo "[ERROR] workspace setup symlink target escapes the executing release" >&2
+      return 1
+      ;;
+  esac
   export DORAEMON_WORKSPACE_SETUP="${resolved_workspace_setup}"
   resolved_workspace_layout="$(workspace_layout_from_setup "${resolved_workspace_setup}")"
   export DORAEMON_WORKSPACE_LAYOUT="${resolved_workspace_layout}"
-  export ROS_MASTER_URI="${ROS_MASTER_URI:-http://localhost:11311}"
-  unset ROS_IP
+  export ROS_HOME="/var/lib/doraemon/ros"
+  export ROS_MASTER_URI="http://127.0.0.1:11311"
+  export ROS_IP="127.0.0.1"
   unset ROS_HOSTNAME
 
   if [[ ! -f "${DORAEMON_ROS_SETUP}" ]]; then
@@ -41,6 +129,9 @@ runtime_common_init() {
   # shellcheck disable=SC1090
   source "${DORAEMON_WORKSPACE_SETUP}"
   set -u
+  export ROS_MASTER_URI="http://127.0.0.1:11311"
+  export ROS_IP="127.0.0.1"
+  unset ROS_HOSTNAME
 }
 
 runtime_log_status() {
@@ -55,8 +146,14 @@ runtime_log_status() {
   fi
 }
 
+runtime_run_ros_cli() {
+  local timeout_sec
+  timeout_sec="$(runtime_ros_cli_timeout_sec)"
+  timeout --signal=TERM --kill-after=1s "${timeout_sec}s" "$@"
+}
+
 runtime_ros_master_available() {
-  rosnode list >/dev/null 2>&1
+  runtime_run_ros_cli rosnode list >/dev/null 2>&1
 }
 
 runtime_wait_for_master() {
@@ -77,7 +174,7 @@ runtime_wait_for_service() {
   local timeout_sec="${2:-30}"
   local start_ts
   start_ts="$(date +%s)"
-  until rosservice type "${service_name}" >/dev/null 2>&1; do
+  until runtime_run_ros_cli rosservice type "${service_name}" >/dev/null 2>&1; do
     if (( "$(date +%s)" - start_ts >= timeout_sec )); then
       echo "[ERROR] service not ready: ${service_name}" >&2
       return 1
@@ -120,7 +217,7 @@ runtime_node_ready_once() {
   local timeout_sec="${2:-8}"
   local start_ts
   start_ts="$(date +%s)"
-  until rosnode info "${node_name}" >/dev/null 2>&1; do
+  until runtime_run_ros_cli rosnode info "${node_name}" >/dev/null 2>&1; do
     if (( "$(date +%s)" - start_ts >= timeout_sec )); then
       return 1
     fi
@@ -130,12 +227,12 @@ runtime_node_ready_once() {
 
 runtime_service_available() {
   local service_name="$1"
-  rosservice type "${service_name}" >/dev/null 2>&1
+  runtime_run_ros_cli rosservice type "${service_name}" >/dev/null 2>&1
 }
 
 runtime_get_rosparam_value() {
   local param_name="$1"
-  rosparam get "${param_name}" 2>/dev/null | tr -d '\r'
+  runtime_run_ros_cli rosparam get "${param_name}" 2>/dev/null | tr -d '\r'
 }
 
 runtime_trim_yaml_scalar() {
@@ -424,6 +521,12 @@ runtime_frontend_service_session_healthy() {
   if [[ "${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-false}" == "true" ]]; then
     required_services+=("/clean_robot_server/app/get_odometry_status")
   fi
+  if [[ "${ENABLE_MANUAL_DRIVE_SERVICE:-false}" == "true" ]]; then
+    required_services+=(
+      "/clean_robot_server/app/manual_drive_command"
+      "/clean_robot_server/app/get_manual_drive_status"
+    )
+  fi
 
   for service_name in "${required_services[@]}"; do
     runtime_service_available "${service_name}" || return 1
@@ -450,7 +553,7 @@ runtime_restart_site_gateway_if_disconnected() {
   local pid
   local attempt
 
-  if [[ "${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE:-true}" != "true" ]]; then
+  if [[ "${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE:-false}" != "true" ]]; then
     return 0
   fi
 
@@ -512,7 +615,7 @@ runtime_tmux_window() {
   shift 2
   local cmd="$*"
   tmux new-window -t "${session_name}" -n "${window_name}" \
-    "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; ${cmd}'"
+    "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; export ROS_IP=127.0.0.1; unset ROS_HOSTNAME; ${cmd}'"
 }
 
 runtime_ensure_frontend_service_session() {
@@ -525,7 +628,7 @@ runtime_ensure_frontend_service_session() {
   enable_odometry_health="${FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH:-false}"
   odometry_health_imu_topic="${ODOMETRY_HEALTH_IMU_TOPIC:-/imu_corrected}"
   odometry_health_ekf_node_name="${ODOMETRY_HEALTH_EKF_NODE_NAME:-/wheel_speed_odom_ekf}"
-  backend_cmd="export PLAN_DB_PATH='${PLAN_DB_PATH:-/data/coverage/planning.db}'; export OPS_DB_PATH='${OPS_DB_PATH:-/data/coverage/operations.db}'; export ROBOT_ID='${ROBOT_ID:-local_robot}'; export MAPS_ROOT='${MAPS_ROOT:-/data/maps}'; export EXTERNAL_MAPS_ROOT='${EXTERNAL_MAPS_ROOT:-/data/maps/imports}'; export MAP_TOPIC='${MAP_TOPIC:-/map}'; export START_ROSBRIDGE='${START_ROSBRIDGE:-true}'; export ROSBRIDGE_ADDRESS='${ROSBRIDGE_ADDRESS:-127.0.0.1}'; export ROSBRIDGE_PORT='${ROSBRIDGE_PORT:-9090}'; export START_MAP_ASSET_SERVICE='${START_MAP_ASSET_SERVICE:-true}'; export ENABLE_SITE_EDITOR_SERVICE='${ENABLE_SITE_EDITOR_SERVICE:-true}'; export ENABLE_RECT_ZONE_PLANNER='${ENABLE_RECT_ZONE_PLANNER:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_PUBLISH_HZ='${FRONTEND_BACKEND_MANUAL_DRIVE_PUBLISH_HZ:-20.0}'; export FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH='${enable_odometry_health}'; export FRONTEND_BACKEND_ODOMETRY_HEALTH_IMU_TOPIC='${odometry_health_imu_topic}'; export FRONTEND_BACKEND_ODOMETRY_HEALTH_EKF_NODE_NAME='${odometry_health_ekf_node_name}'; exec \"${DORAEMON_SCRIPT_DIR}/start_frontend_backend.sh\""
+  backend_cmd="export PLAN_DB_PATH='${PLAN_DB_PATH:-/data/coverage/planning.db}'; export OPS_DB_PATH='${OPS_DB_PATH:-/data/coverage/operations.db}'; export ROBOT_ID='${ROBOT_ID:-local_robot}'; export MAPS_ROOT='${MAPS_ROOT:-/data/maps}'; export EXTERNAL_MAPS_ROOT='${EXTERNAL_MAPS_ROOT:-/data/maps/imports}'; export MAP_TOPIC='${MAP_TOPIC:-/map}'; export START_ROSBRIDGE='${START_ROSBRIDGE:-true}'; export ROSBRIDGE_ADDRESS='${ROSBRIDGE_ADDRESS:-127.0.0.1}'; export ROSBRIDGE_PORT='${ROSBRIDGE_PORT:-9090}'; export START_MAP_ASSET_SERVICE='${START_MAP_ASSET_SERVICE:-true}'; export ENABLE_SITE_EDITOR_SERVICE='${ENABLE_SITE_EDITOR_SERVICE:-true}'; export ENABLE_RECT_ZONE_PLANNER='${ENABLE_RECT_ZONE_PLANNER:-false}'; export DORAEMON_NO_ACTION_ACCEPTANCE='${DORAEMON_NO_ACTION_ACCEPTANCE:-true}'; export DORAEMON_ACTION_TEST_APPROVED='${DORAEMON_ACTION_TEST_APPROVED:-false}'; export ENABLE_MANUAL_DRIVE_SERVICE='${ENABLE_MANUAL_DRIVE_SERVICE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS='${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS:-false}'; export FRONTEND_BACKEND_MANUAL_DRIVE_PUBLISH_HZ='${FRONTEND_BACKEND_MANUAL_DRIVE_PUBLISH_HZ:-20.0}'; export FRONTEND_BACKEND_ENABLE_ODOMETRY_HEALTH='${enable_odometry_health}'; export FRONTEND_BACKEND_ODOMETRY_HEALTH_IMU_TOPIC='${odometry_health_imu_topic}'; export FRONTEND_BACKEND_ODOMETRY_HEALTH_EKF_NODE_NAME='${odometry_health_ekf_node_name}'; exec \"${DORAEMON_SCRIPT_DIR}/start_frontend_backend.sh\""
 
   runtime_log_status "ensure frontend service session ${FRONTEND_TMUX_SESSION}"
   if tmux has-session -t "${FRONTEND_TMUX_SESSION}" 2>/dev/null; then
@@ -534,7 +637,7 @@ runtime_ensure_frontend_service_session() {
       return 0
     fi
     runtime_log_status "frontend service session exists but app query contracts are incomplete, recreate it"
-    tmux kill-session -t "${FRONTEND_TMUX_SESSION}" || true
+    runtime_stop_frontend_services
   fi
 
   start_own_roscore="true"
@@ -547,10 +650,10 @@ runtime_ensure_frontend_service_session() {
 
   if [[ "${start_own_roscore}" == "false" ]]; then
     tmux new-session -d -s "${FRONTEND_TMUX_SESSION}" -n roscore \
-      "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; echo \"roscore already running\"; exec sleep infinity'"
+      "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; export ROS_IP=127.0.0.1; unset ROS_HOSTNAME; echo \"roscore already running\"; exec sleep infinity'"
   else
     tmux new-session -d -s "${FRONTEND_TMUX_SESSION}" -n roscore \
-      "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; unset ROS_IP ROS_HOSTNAME; exec roscore'"
+      "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; export ROS_IP=127.0.0.1; unset ROS_HOSTNAME; exec roscore'"
     sleep 2
   fi
 
@@ -571,7 +674,7 @@ runtime_kill_tmux_session_if_exists() {
 
 runtime_cleanup_ros_nodes() {
   if runtime_ros_master_available; then
-    printf 'y\n' | rosnode cleanup >/dev/null 2>&1 || true
+    printf 'y\n' | runtime_run_ros_cli rosnode cleanup >/dev/null 2>&1 || true
   fi
 }
 
@@ -580,8 +683,9 @@ runtime_stop_task_execution_if_available() {
     return 0
   fi
 
-  if rosservice type /coverage_task_manager/app/exe_task_server >/dev/null 2>&1; then
-    rosservice call /coverage_task_manager/app/exe_task_server "{command: 3, task_id: 0}" >/dev/null 2>&1 || true
+  if runtime_run_ros_cli rosservice type /coverage_task_manager/app/exe_task_server >/dev/null 2>&1; then
+    runtime_run_ros_cli rosservice call /coverage_task_manager/app/exe_task_server \
+      "{command: 3, task_id: 0}" >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -599,7 +703,7 @@ runtime_graceful_stop_runtime() {
   runtime_stop_task_execution_if_available
 
   echo "[INFO] cancel dock supply"
-  rosservice call /dock_supply/cancel '{}' >/dev/null 2>&1 || true
+  runtime_run_ros_cli rosservice call /dock_supply/cancel '{}' >/dev/null 2>&1 || true
 
   sleep 2
 }
@@ -611,11 +715,30 @@ runtime_kill_runtime_tmux_sessions() {
   runtime_kill_tmux_session_if_exists "orbbec_dual_rgbd"
 }
 
-runtime_kill_runtime_nodes() {
-  if ! runtime_ros_master_available; then
+runtime_kill_named_ros_nodes() {
+  local active_nodes=""
+  local budget_sec
+  budget_sec="$(runtime_shutdown_node_budget_sec)"
+
+  if ! active_nodes="$(runtime_run_ros_cli rosnode list 2>/dev/null)"; then
+    echo "[INFO] ROS master not reachable, continue with process cleanup"
     return 0
   fi
 
+  local deadline=$((SECONDS + budget_sec))
+  local node
+  for node in "$@"; do
+    if (( SECONDS >= deadline )); then
+      echo "[WARN] ROS node shutdown budget exhausted; continue with process cleanup" >&2
+      break
+    fi
+    grep -Fxq -- "${node}" <<<"${active_nodes}" || continue
+    echo "[INFO] rosnode kill ${node}"
+    runtime_run_ros_cli rosnode kill "${node}" >/dev/null 2>&1 || true
+  done
+}
+
+runtime_kill_runtime_nodes() {
   local nodes=(
     "/coverage_task_manager"
     "/coverage_executor"
@@ -623,6 +746,8 @@ runtime_kill_runtime_nodes() {
     "/schedule_api_service"
     "/localization_lifecycle_manager"
     "/odometry_health"
+    "/auto_charge_monitor"
+    "/mcore_velocity_sender"
     "/mcore_tcp_bridge"
     "/station_tcp_bridge"
     "/dock_supply_manager"
@@ -647,15 +772,51 @@ runtime_kill_runtime_nodes() {
     "/base_footprint_to_gyro_link"
   )
 
-  local node
-  for node in "${nodes[@]}"; do
-    rosnode info "${node}" >/dev/null 2>&1 || continue
-    echo "[INFO] rosnode kill ${node}"
-    rosnode kill "${node}" >/dev/null 2>&1 || true
+  runtime_kill_named_ros_nodes "${nodes[@]}"
+}
+
+runtime_terminate_process_patterns() {
+  local budget_sec
+  budget_sec="$(runtime_shutdown_process_budget_sec)"
+
+  local -A seen=()
+  local -a target_pids=()
+  local pattern
+  local pid
+  for pattern in "$@"; do
+    while IFS= read -r pid; do
+      [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+      [[ "${pid}" -ne "$$" && "${pid}" -ne "${BASHPID}" ]] || continue
+      if [[ -z "${seen[${pid}]+x}" ]]; then
+        seen[${pid}]=1
+        target_pids+=("${pid}")
+      fi
+    done < <(pgrep -f -- "${pattern}" 2>/dev/null || true)
   done
 
-  sleep 2
-  runtime_cleanup_ros_nodes
+  if (( ${#target_pids[@]} == 0 )); then
+    return 0
+  fi
+
+  kill -TERM "${target_pids[@]}" >/dev/null 2>&1 || true
+  local deadline=$((SECONDS + budget_sec))
+  local -a remaining=()
+  while true; do
+    remaining=()
+    for pid in "${target_pids[@]}"; do
+      if kill -0 "${pid}" >/dev/null 2>&1; then
+        remaining+=("${pid}")
+      fi
+    done
+    (( ${#remaining[@]} > 0 )) || return 0
+    if (( SECONDS >= deadline )); then
+      echo "[WARN] forcing ${#remaining[@]} residual runtime process(es) to exit" >&2
+      kill -KILL "${remaining[@]}" >/dev/null 2>&1 || true
+      sleep 1
+      return 0
+    fi
+    sleep 0.2
+  done
 }
 
 runtime_kill_runtime_processes() {
@@ -670,6 +831,7 @@ runtime_kill_runtime_processes() {
     "wheel_speed_odom_ekf_"
     "wheeltec_senior_diff_base.launch"
     "wheeltec_robot_node"
+    "mcore_velocity_sender_node"
     "mcore_tcp_bridge.py"
     "station_tcp_bridge.py"
     "dock_supply_manager.py"
@@ -681,6 +843,8 @@ runtime_kill_runtime_processes() {
     "task_manager_node.py"
     "task_api_service_node.py"
     "schedule_api_service_node.py"
+    "auto_charge_monitor.launch"
+    "auto_charge_monitor_node.py"
     "executor_node.py"
     "localization_lifecycle_manager_node.py"
     "cartographer_node"
@@ -688,38 +852,24 @@ runtime_kill_runtime_processes() {
     "runtime_flag_server_node"
   )
 
-  local pattern
-  for pattern in "${patterns[@]}"; do
-    pkill -f -- "${pattern}" >/dev/null 2>&1 || true
-  done
-
-  sleep 2
+  runtime_terminate_process_patterns "${patterns[@]}"
   runtime_cleanup_ros_nodes
 }
 
 runtime_stop_frontend_services() {
-  runtime_kill_tmux_session_if_exists "${FRONTEND_TMUX_SESSION:-doraemon_frontend_services}"
-
-  if runtime_ros_master_available; then
-    local nodes=(
-      "/map_asset_service"
-      "/coverage_planner_server"
-      "/rect_zone_planner"
-      "/site_editor_service"
-      "/profile_catalog_service"
-      "/slam_runtime_manager"
-      "/slam_api_service"
-      "/rosbridge_websocket"
-      "/rosapi"
-    )
-
-    local node
-    for node in "${nodes[@]}"; do
-      rosnode info "${node}" >/dev/null 2>&1 || continue
-      echo "[INFO] rosnode kill ${node}"
-      rosnode kill "${node}" >/dev/null 2>&1 || true
-    done
-  fi
+  local nodes=(
+    "/map_asset_service"
+    "/coverage_planner_server"
+    "/rect_zone_planner"
+    "/site_editor_service"
+    "/manual_drive_service"
+    "/profile_catalog_service"
+    "/slam_runtime_manager"
+    "/slam_api_service"
+    "/rosbridge_websocket"
+    "/rosapi"
+  )
+  runtime_kill_named_ros_nodes "${nodes[@]}"
 
   local patterns=(
     "frontend_editor_backend.launch"
@@ -728,6 +878,7 @@ runtime_stop_frontend_services() {
     "planner_server_node.py"
     "rect_zone_planner_node.py"
     "site_editor_service_node.py"
+    "manual_drive_service_node.py"
     "profile_catalog_service_node.py"
     "slam_runtime_manager_node.py"
     "slam_api_service_node.py"
@@ -735,13 +886,9 @@ runtime_stop_frontend_services() {
     "rosapi_node"
   )
 
-  local pattern
-  for pattern in "${patterns[@]}"; do
-    pkill -f -- "${pattern}" >/dev/null 2>&1 || true
-  done
-
-  sleep 2
+  runtime_terminate_process_patterns "${patterns[@]}"
   runtime_cleanup_ros_nodes
+  runtime_kill_tmux_session_if_exists "${FRONTEND_TMUX_SESSION:-doraemon_frontend_services}"
 }
 
 runtime_stop_ros_master_if_idle() {
@@ -778,5 +925,8 @@ runtime_run_contract_check() {
     --wait-interval
     "${interval_sec}"
   )
+  if [[ "${ENABLE_MANUAL_DRIVE_SERVICE:-false}" != "true" ]]; then
+    cmd+=(--exclude-manual-drive)
+  fi
   "${cmd[@]}"
 }

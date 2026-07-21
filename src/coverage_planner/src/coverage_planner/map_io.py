@@ -10,6 +10,15 @@ import numpy as np
 import yaml
 from nav_msgs.msg import MapMetaData, OccupancyGrid
 
+from coverage_planner.map_path_security import (
+    canonical_directory_root,
+    ensure_secure_parent_directory,
+    resolve_yaml_image_path,
+    validate_existing_regular_file,
+    validate_map_name,
+    validate_new_file_target,
+)
+
 
 def read_pgm(path: str):
     """Read binary P5 PGM and return (w, h, maxval, np.uint8[h, w])."""
@@ -43,13 +52,20 @@ def read_pgm(path: str):
         return w, h, maxval, img.reshape((h, w))
 
 
-def yaml_pgm_to_occupancy(yaml_path: str) -> OccupancyGrid:
-    with open(yaml_path, "r") as f:
+def yaml_pgm_to_occupancy(yaml_path: str, *, allowed_root: str = "") -> OccupancyGrid:
+    yaml_path = os.path.abspath(os.path.expanduser(str(yaml_path or "").strip()))
+    root = str(allowed_root or "").strip() or os.path.dirname(yaml_path)
+    root = canonical_directory_root(root, label="map yaml root")
+    yaml_path = validate_existing_regular_file(
+        root,
+        yaml_path,
+        suffix=".yaml",
+        label="map yaml",
+    )
+    with open(yaml_path, "r", encoding="utf-8") as f:
         meta = yaml.safe_load(f) or {}
 
-    image_path = str(meta["image"])
-    if not os.path.isabs(image_path):
-        image_path = os.path.join(os.path.dirname(yaml_path), image_path)
+    image_path = resolve_yaml_image_path(root, yaml_path, meta["image"])
 
     resolution = float(meta["resolution"])
     origin = list(meta["origin"])
@@ -103,20 +119,66 @@ def occupancy_to_yaml_dict(occ: OccupancyGrid, image_name: str = "map.pgm") -> D
     }
 
 
-def write_occupancy_to_yaml_pgm(occ: OccupancyGrid, out_dir: str, *, base_name: str = "map") -> Tuple[str, str]:
-    out_dir = os.path.expanduser(str(out_dir))
-    os.makedirs(out_dir, exist_ok=True)
-    pgm_path = os.path.join(out_dir, f"{base_name}.pgm")
-    yaml_path = os.path.join(out_dir, f"{base_name}.yaml")
+def write_occupancy_to_yaml_pgm(
+    occ: OccupancyGrid,
+    out_dir: str,
+    *,
+    base_name: str = "map",
+    allowed_root: str = "",
+) -> Tuple[str, str]:
+    normalized_name = validate_map_name(base_name)
+    out_dir = os.path.abspath(os.path.expanduser(str(out_dir or "").strip()))
+    if allowed_root:
+        root = canonical_directory_root(allowed_root, label="maps_root")
+        probe_target = os.path.join(out_dir, normalized_name + ".pgm")
+        ensure_secure_parent_directory(root, probe_target)
+    else:
+        # Offline maintenance tools already choose this directory explicitly;
+        # retain their creation behavior, then treat it as the security root.
+        os.makedirs(out_dir, mode=0o750, exist_ok=True)
+        root = canonical_directory_root(out_dir, label="map output root")
+
+    pgm_path = validate_new_file_target(
+        root,
+        os.path.join(out_dir, normalized_name + ".pgm"),
+        suffix=".pgm",
+    )
+    yaml_path = validate_new_file_target(
+        root,
+        os.path.join(out_dir, normalized_name + ".yaml"),
+        suffix=".yaml",
+    )
 
     img = occupancy_to_pgm_image(occ)
-    with open(pgm_path, "wb") as f:
-        f.write(f"P5\n{occ.info.width} {occ.info.height}\n255\n".encode("ascii"))
-        f.write(img.tobytes())
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    created_paths = []
+    try:
+        pgm_fd = os.open(
+            pgm_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o640,
+        )
+        created_paths.append(pgm_path)
+        with os.fdopen(pgm_fd, "wb") as f:
+            f.write(f"P5\n{occ.info.width} {occ.info.height}\n255\n".encode("ascii"))
+            f.write(img.tobytes())
 
-    meta = occupancy_to_yaml_dict(occ, image_name=f"{base_name}.pgm")
-    with open(yaml_path, "w") as f:
-        yaml.safe_dump(meta, f, default_flow_style=False, sort_keys=False)
+        meta = occupancy_to_yaml_dict(occ, image_name=normalized_name + ".pgm")
+        yaml_fd = os.open(
+            yaml_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o640,
+        )
+        created_paths.append(yaml_path)
+        with os.fdopen(yaml_fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(meta, f, default_flow_style=False, sort_keys=False)
+    except Exception:
+        for path in reversed(created_paths):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        raise
     return pgm_path, yaml_path
 
 

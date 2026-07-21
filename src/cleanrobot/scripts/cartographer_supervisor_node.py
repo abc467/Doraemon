@@ -11,9 +11,6 @@ import rospy
 from std_srvs.srv import Trigger, TriggerResponse
 
 
-_DEPLOYMENT_SLAM_CONFIG_ROOT = "/data/config/slam/cartographer"
-
-
 def _bool_flag(value):
     return "true" if bool(value) else "false"
 
@@ -23,24 +20,32 @@ def _workspace_root():
 
 
 def _default_slam_config_root():
-    workspace_root = _workspace_root()
-    canonical_root = os.path.join(workspace_root, "src", "cleanrobot", "config", "slam", "cartographer")
-    for candidate in (_DEPLOYMENT_SLAM_CONFIG_ROOT, canonical_root):
-        if _is_slam_config_root(candidate):
-            return os.path.abspath(os.path.expanduser(candidate))
+    canonical_root = os.path.realpath(
+        os.path.join(
+            _workspace_root(), "src", "cleanrobot", "config", "slam", "cartographer"
+        )
+    )
+    required = (
+        os.path.join(canonical_root, "slam", "config.lua"),
+        os.path.join(canonical_root, "pure_location_odom", "config.lua"),
+        os.path.join(canonical_root, "relocalization", "global_relocation.sml"),
+    )
+    if not all(os.path.isfile(item) for item in required):
+        raise RuntimeError("canonical Cartographer configuration is incomplete")
     return canonical_root
 
 
-def _is_slam_config_root(path):
-    candidate = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+def _resolve_slam_config_root(raw_path):
+    canonical_root = _default_slam_config_root()
+    candidate = os.path.realpath(os.path.expanduser(str(raw_path or "").strip()))
     if not candidate:
-        return False
-    required = (
-        os.path.join(candidate, "slam", "config.lua"),
-        os.path.join(candidate, "pure_location_odom", "config.lua"),
-        os.path.join(candidate, "relocalization", "global_relocation.sml"),
-    )
-    return all(os.path.isfile(item) for item in required)
+        candidate = canonical_root
+    if candidate != canonical_root:
+        raise RuntimeError(
+            "legacy Cartographer supervisor accepts only the immutable release config: %s"
+            % candidate
+        )
+    return canonical_root
 
 
 def _iter_candidate_prefixes():
@@ -99,9 +104,8 @@ class CartographerSupervisorNode:
             "cartographer_ros",
             "cartographer_occupancy_grid_node",
         )
-        self.config_root = os.path.expanduser(
-            str(rospy.get_param("~config_root", _default_slam_config_root())).strip()
-            or _default_slam_config_root()
+        self.config_root = _resolve_slam_config_root(
+            rospy.get_param("~config_root", _default_slam_config_root()),
         )
         self.mapping_config_subdir = str(rospy.get_param("~mapping_config_subdir", "slam")).strip() or "slam"
         self.localization_config_subdir = (

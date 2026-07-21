@@ -1,16 +1,16 @@
 # Doraemon 商用运行参数入口
 
-正式整机启动入口是 `scripts/start_runtime.sh`，日常现场调参入口是
-`config/runtime.a26022.env`。启动脚本会直接读取这个文件，因此日常改参数
-不需要再安装到 `/etc`。
+正式整机启动入口是 `scripts/start_runtime.sh`，每台车唯一的现场配置入口是
+`/etc/doraemon/runtime.env`。冻结 release 中的 `config/runtime.a26022.env` 只用于
+首次安装模板，不得把 release 改回可写后直接编辑。
 
 ## 优先级
 
 1. 前端“充电桩标定/精对接参数调试”保存的值，持久化在
    `/data/coverage/dock_calibration.yaml`，启动后由
    `dock_calibration_service` 写回 ROS 参数。
-2. `config/runtime.a26022.env`，由 `start_runtime.sh` 启动时直接读取，并显式
-   传给各级 launch。
+2. `/etc/doraemon/runtime.env`，由 `start_runtime.sh` 校验所有权、权限和内容后读取，
+   再显式传给各级 launch。
 3. 各级 launch 文件中的 `default`，只作为单独启动模块时的兜底值。
 4. 节点代码内部默认值，只作为最后兜底。
 
@@ -69,14 +69,26 @@
 
 ## 生效方式
 
-日常现场调参：改 `config/runtime.a26022.env` 后，重启小车或重启 runtime 即可：
+日常现场调参必须使用 `sudoedit` 修改本车的外部配置：
+
+```bash
+sudoedit /etc/doraemon/runtime.env
+```
+
+修改后先按商业部署手册重新检查语法、权限、车辆身份和无动作门禁。只有已进入获批的
+受控启动/调试阶段，才允许重启 runtime：
 
 ```bash
 sudo systemctl restart doraemon-runtime.service
 ```
 
-`./scripts/install_a26022_runtime_env.sh` 只用于首次部署、修复 systemd 服务，或
-刷新 `/etc/doraemon/runtime.env` 这个兜底副本；日常改参数不需要执行它。
+旧入口 `./scripts/install_a26022_runtime_env.sh` 已退役并会拒绝执行，避免它覆盖本车
+配置或擅自启用服务。首次安装或修复 systemd 服务时，只能从已冻结的精确标签 release
+显式执行以下商业安装入口；它会保持服务 `disabled`、`inactive`，且不会启动：
+
+```bash
+DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
+```
 
 如果通过前端保存精对接参数，保存值会写入
 `/data/coverage/dock_calibration.yaml`，重启后仍会优先生效。

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from coverage_planner.map_path_security import validate_map_name
+
 from coverage_planner.slam_workflow_semantics import (
     compute_effective_workflow_state,
     compute_task_ready,
@@ -142,10 +144,7 @@ def operation_name(operation: int) -> str:
 
 
 def normalize_map_name(map_name: str) -> str:
-    value = str(map_name or "").strip()
-    if value.endswith(".pbstream"):
-        value = value[:-len(".pbstream")]
-    return str(value or "").strip()
+    return validate_map_name(map_name, allow_empty=True)
 
 
 def running_phase_for_operation(operation: int) -> str:

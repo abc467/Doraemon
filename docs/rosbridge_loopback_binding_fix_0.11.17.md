@@ -1,6 +1,7 @@
 # rosbridge 0.11.17 回环监听修复说明
 
-适用后端发布标签：`deployment-2026-07-21-x86-ubuntu20-v2`。
+适用后端发布标签：`deployment-2026-07-21-x86-ubuntu20-v3`；v3 延续并加强了
+v2 首次引入的回环监听修复。
 
 ## 问题与边界
 
@@ -18,9 +19,9 @@ ROS 参数 `/rosbridge_websocket/address` 已配置为 `127.0.0.1`，但 Ubuntu
 listenWS(factory, context_factory, interface=factory.host)
 ```
 
-同时把 Doraemon 自有的四个运行入口默认值从通配地址收紧为
-`127.0.0.1`。上游包的通用 launch 默认值保持不变；商业运行入口始终显式传入
-回环地址。完整来源、哈希和许可证见
+同时把 vendored `rosbridge_server` 的 Python 空值回退、通用 launch 默认值和
+Doraemon 自有运行入口全部收紧为 `127.0.0.1`；商业入口仍显式传入回环地址，
+任何空值都不能退回通配监听。完整来源、哈希和许可证见
 `src/rosbridge_server/PROVENANCE.md`。
 
 ## 构建门禁

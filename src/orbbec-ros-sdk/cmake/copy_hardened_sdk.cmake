@@ -1,0 +1,26 @@
+if (NOT DEFINED SOURCE_DIR OR NOT IS_DIRECTORY "${SOURCE_DIR}")
+  message(FATAL_ERROR "SOURCE_DIR must name the hardened Orbbec SDK directory")
+endif ()
+if (NOT DEFINED DESTINATION_DIR OR DESTINATION_DIR STREQUAL "")
+  message(FATAL_ERROR "DESTINATION_DIR is required")
+endif ()
+
+file(MAKE_DIRECTORY "${DESTINATION_DIR}")
+file(GLOB SDK_ENTRIES "${SOURCE_DIR}/*.so" "${SOURCE_DIR}/*.so.*")
+foreach (SDK_ENTRY ${SDK_ENTRIES})
+  get_filename_component(SDK_ENTRY_NAME "${SDK_ENTRY}" NAME)
+  set(DESTINATION_ENTRY "${DESTINATION_DIR}/${SDK_ENTRY_NAME}")
+  if (IS_SYMLINK "${SDK_ENTRY}")
+    file(READ_SYMLINK "${SDK_ENTRY}" SDK_LINK_TARGET)
+    file(REMOVE "${DESTINATION_ENTRY}")
+    file(CREATE_LINK "${SDK_LINK_TARGET}" "${DESTINATION_ENTRY}" SYMBOLIC)
+  else ()
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${SDK_ENTRY}" "${DESTINATION_ENTRY}"
+      RESULT_VARIABLE COPY_RESULT)
+    if (NOT COPY_RESULT EQUAL 0)
+      message(FATAL_ERROR "failed to copy ${SDK_ENTRY_NAME}")
+    endif ()
+  endif ()
+endforeach ()

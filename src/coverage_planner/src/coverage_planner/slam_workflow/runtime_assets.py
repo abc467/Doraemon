@@ -5,15 +5,21 @@
 from __future__ import annotations
 
 import os
-import shutil
+import stat
 from typing import Any, Dict, Optional
+
+from coverage_planner.map_path_security import (
+    MapPathSecurityError,
+    canonical_directory_root,
+    map_asset_target_paths,
+    validate_existing_regular_file,
+    validate_map_name,
+    validate_revision_id,
+)
 
 
 def _normalize_map_name(map_name: str) -> str:
-    value = str(map_name or "").strip()
-    if value.endswith(".pbstream"):
-        value = value[:-len(".pbstream")]
-    return str(value or "").strip()
+    return validate_map_name(map_name, allow_empty=True)
 
 
 class CartographerRuntimeAssetHelper:
@@ -30,7 +36,7 @@ class CartographerRuntimeAssetHelper:
     ) -> Optional[Dict[str, object]]:
         backend = self._backend
         normalized_map_name = _normalize_map_name(map_name)
-        normalized_revision_id = str(map_revision_id or "").strip()
+        normalized_revision_id = validate_revision_id(map_revision_id, allow_empty=True)
         asset = None
         if normalized_revision_id:
             asset = backend._plan_store.resolve_map_asset(
@@ -70,34 +76,84 @@ class CartographerRuntimeAssetHelper:
 
     def ensure_repo_map_link(self, asset: Dict[str, object]) -> str:
         backend = self._backend
-        map_name = str((asset or {}).get("map_name") or "").strip()
+        map_name = validate_map_name(str((asset or {}).get("map_name") or ""))
         pbstream_path = os.path.expanduser(str((asset or {}).get("pbstream_path") or "").strip())
-        if not map_name:
-            raise RuntimeError("map asset missing map_name")
         if not pbstream_path:
             raise RuntimeError("map asset missing pbstream_path")
-        if not os.path.isfile(pbstream_path):
-            raise RuntimeError("pbstream not found: %s" % pbstream_path)
-
-        target_path = os.path.join(backend.repo_map_root, map_name + ".pbstream")
-        src_real = os.path.realpath(pbstream_path)
-        if os.path.exists(target_path):
-            try:
-                if os.path.realpath(target_path) == src_real:
-                    return os.path.basename(target_path)
-            except Exception:
-                pass
-            os.unlink(target_path)
+        maps_root = canonical_directory_root(backend.maps_root, label="maps_root")
+        repo_root = canonical_directory_root(backend.repo_map_root, label="repo_map_root")
+        src_real = validate_existing_regular_file(
+            maps_root,
+            pbstream_path,
+            suffix=".pbstream",
+            label="map asset pbstream",
+        )
+        target_path = os.path.join(repo_root, map_name + ".pbstream")
         try:
-            os.symlink(src_real, target_path)
-        except Exception:
-            shutil.copy2(src_real, target_path)
+            if os.path.commonpath((repo_root, os.path.abspath(target_path))) != repo_root:
+                raise MapPathSecurityError("invalid_map_path", "repo map link escaped repo_map_root")
+        except ValueError as exc:
+            raise MapPathSecurityError("invalid_map_path", "repo map link escaped repo_map_root") from exc
+
+        if os.path.abspath(target_path) == src_real:
+            return os.path.basename(target_path)
+
+        if os.path.lexists(target_path):
+            target_info = os.lstat(target_path)
+            if stat.S_ISLNK(target_info.st_mode):
+                if not os.path.exists(target_path):
+                    raise MapPathSecurityError(
+                        "invalid_map_path",
+                        "repo map link is dangling: %s" % target_path,
+                    )
+                resolved_target = os.path.realpath(target_path)
+                validate_existing_regular_file(
+                    maps_root,
+                    resolved_target,
+                    suffix=".pbstream",
+                    label="repo map link target",
+                )
+                if resolved_target == src_real:
+                    return os.path.basename(target_path)
+                # A valid contained link is managed state and may be repointed
+                # to the newly selected revision of the same map.
+                os.unlink(target_path)
+            elif stat.S_ISREG(target_info.st_mode):
+                try:
+                    if os.path.samefile(target_path, src_real):
+                        return os.path.basename(target_path)
+                except OSError:
+                    pass
+                raise MapPathSecurityError(
+                    "invalid_map_path",
+                    "repo map target is an unmanaged regular file: %s" % target_path,
+                )
+            else:
+                raise MapPathSecurityError(
+                    "invalid_map_path",
+                    "repo map target is not a regular file or symlink: %s" % target_path,
+                )
+
+        relative_source = os.path.relpath(src_real, os.path.dirname(target_path))
+        try:
+            os.symlink(relative_source, target_path)
+        except FileExistsError as exc:
+            raise MapPathSecurityError(
+                "map_path_exists",
+                "repo map target appeared while creating link: %s" % target_path,
+            ) from exc
+        if not os.path.exists(target_path) or os.path.realpath(target_path) != src_real:
+            try:
+                os.unlink(target_path)
+            except OSError:
+                pass
+            raise MapPathSecurityError("invalid_map_path", "failed to create contained repo map link")
         return os.path.basename(target_path)
 
     def cleanup_paths(self, *paths: str):
         for path in paths:
             pp = str(path or "").strip()
-            if not pp or not os.path.exists(pp):
+            if not pp or not os.path.lexists(pp):
                 continue
             try:
                 os.remove(pp)
@@ -106,19 +162,4 @@ class CartographerRuntimeAssetHelper:
 
     def target_paths(self, map_name: str, revision_id: str = "") -> Dict[str, str]:
         backend = self._backend
-        normalized_map_name = _normalize_map_name(map_name) or "map"
-        normalized_revision_id = str(revision_id or "").strip()
-        base_dir = backend.maps_root
-        if normalized_revision_id:
-            base_dir = os.path.join(
-                backend.maps_root,
-                "revisions",
-                normalized_map_name,
-                normalized_revision_id,
-            )
-        base = os.path.join(base_dir, normalized_map_name)
-        return {
-            "pbstream_path": base + ".pbstream",
-            "yaml_path": base + ".yaml",
-            "pgm_path": base + ".pgm",
-        }
+        return map_asset_target_paths(backend.maps_root, map_name, revision_id)

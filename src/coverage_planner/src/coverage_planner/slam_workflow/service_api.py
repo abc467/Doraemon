@@ -18,6 +18,11 @@ from cleanrobot_app_msgs.srv import (
 )
 
 from coverage_planner.app_msg_clone import clone_app_slam_job_state
+from coverage_planner.map_path_security import (
+    MapPathSecurityError,
+    validate_map_name,
+    validate_revision_id,
+)
 from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
 from coverage_planner.slam_workflow.api import STOP_MAPPING, SUPPORTED_SUBMIT_OPERATIONS, normalize_map_name
 from coverage_planner.slam_workflow.executor import LocalizationRequest
@@ -28,8 +33,8 @@ class SlamRuntimeServiceController:
         self._backend = backend
 
     def _resolve_effective_map_name(self, *, robot_id: str, map_name: str, map_revision_id: str = "") -> str:
-        normalized_name = normalize_map_name(map_name)
-        normalized_revision_id = str(map_revision_id or "").strip()
+        normalized_name = validate_map_name(map_name, allow_empty=True)
+        normalized_revision_id = validate_revision_id(map_revision_id, allow_empty=True)
         if not normalized_revision_id:
             return normalized_name
         asset_helper = getattr(self._backend, "_asset_helper", None)
@@ -46,7 +51,10 @@ class SlamRuntimeServiceController:
             raise
         except Exception:
             asset = None
-        resolved_name = normalize_map_name(str((asset or {}).get("map_name") or ""))
+        resolved_name = validate_map_name(
+            str((asset or {}).get("map_name") or ""),
+            allow_empty=True,
+        )
         if normalized_name and resolved_name and resolved_name != normalized_name:
             raise ValueError("map revision does not match selected map")
         return resolved_name or normalized_name
@@ -186,8 +194,8 @@ class SlamRuntimeServiceController:
     ) -> LocalizationRequest:
         return LocalizationRequest(
             robot_id=robot_id,
-            map_name=normalize_map_name(map_name),
-            map_revision_id=str(map_revision_id or "").strip(),
+            map_name=validate_map_name(map_name, allow_empty=True),
+            map_revision_id=validate_revision_id(map_revision_id, allow_empty=True),
             operation=operation,
             frame_id=frame_id,
             has_initial_pose=bool(has_initial_pose),
@@ -217,6 +225,20 @@ class SlamRuntimeServiceController:
         backend = self._backend
         runtime_adapter = backend._runtime_adapter
         workflow_executor = backend._workflow_executor
+        try:
+            requested_map_name = validate_map_name(map_name, allow_empty=True)
+            map_revision_id = validate_revision_id(map_revision_id, allow_empty=True)
+        except MapPathSecurityError as exc:
+            return self.response(
+                success=False,
+                message=str(exc),
+                error_code=str(exc.code or "invalid_map_name"),
+                operation=operation,
+                map_name="",
+                map_revision_id="",
+                localization_state="not_localized",
+                current_mode="",
+            )
         if int(operation) == STOP_MAPPING:
             effective_map_name = ""
             map_revision_id = ""
@@ -224,8 +246,19 @@ class SlamRuntimeServiceController:
             try:
                 effective_map_name = self._resolve_effective_map_name(
                     robot_id=robot_id,
-                    map_name=map_name,
+                    map_name=requested_map_name,
                     map_revision_id=map_revision_id,
+                )
+            except MapPathSecurityError as exc:
+                return self.response(
+                    success=False,
+                    message=str(exc),
+                    error_code=str(exc.code or "invalid_map_name"),
+                    operation=operation,
+                    map_name="",
+                    map_revision_id="",
+                    localization_state="not_localized",
+                    current_mode="",
                 )
             except ValueError as exc:
                 return self.response(
@@ -378,8 +411,26 @@ class SlamRuntimeServiceController:
         job_state = backend._job_state
         robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
         operation = int(req.operation)
-        raw_map_name = normalize_map_name(req.map_name)
-        map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
+        try:
+            raw_map_name = validate_map_name(req.map_name, allow_empty=True)
+            map_revision_id = validate_revision_id(
+                getattr(req, "map_revision_id", ""),
+                allow_empty=True,
+            )
+            save_map_name = validate_map_name(
+                getattr(req, "save_map_name", ""),
+                allow_empty=True,
+            )
+        except MapPathSecurityError as exc:
+            return AppSubmitSlamCommandResponse(
+                accepted=False,
+                message=str(exc),
+                error_code=str(exc.code or "invalid_map_name"),
+                job_id="",
+                operation=operation,
+                map_name="",
+                job=self._job_state_msg(None),
+            )
         if operation == STOP_MAPPING:
             map_name = ""
             map_revision_id = ""
@@ -389,6 +440,17 @@ class SlamRuntimeServiceController:
                     robot_id=robot_id,
                     map_name=raw_map_name,
                     map_revision_id=map_revision_id,
+                )
+            except MapPathSecurityError as exc:
+                job = self._job_state_msg(None)
+                return AppSubmitSlamCommandResponse(
+                    accepted=False,
+                    message=str(exc),
+                    error_code=str(exc.code or "invalid_map_name"),
+                    job_id="",
+                    operation=operation,
+                    map_name="",
+                    job=job,
                 )
             except ValueError as exc:
                 job = self._job_state_msg(None)
@@ -401,7 +463,6 @@ class SlamRuntimeServiceController:
                     map_name=raw_map_name,
                     job=job,
                 )
-        save_map_name = normalize_map_name(getattr(req, "save_map_name", ""))
         if operation not in SUPPORTED_SUBMIT_OPERATIONS:
             job = self._job_state_msg(None)
             return AppSubmitSlamCommandResponse(
@@ -493,13 +554,39 @@ class SlamRuntimeServiceController:
         backend = self._backend
         job_state = backend._job_state
         robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
-        raw_map_name = normalize_map_name(req.map_name)
-        map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
+        try:
+            raw_map_name = validate_map_name(req.map_name, allow_empty=True)
+            map_revision_id = validate_revision_id(
+                getattr(req, "map_revision_id", ""),
+                allow_empty=True,
+            )
+        except MapPathSecurityError as exc:
+            return self.response(
+                success=False,
+                message=str(exc),
+                error_code=str(exc.code or "invalid_map_name"),
+                operation=int(req.operation),
+                map_name="",
+                map_revision_id="",
+                localization_state="not_localized",
+                current_mode="",
+            )
         try:
             map_name = self._resolve_effective_map_name(
                 robot_id=robot_id,
                 map_name=raw_map_name,
                 map_revision_id=map_revision_id,
+            )
+        except MapPathSecurityError as exc:
+            return self.response(
+                success=False,
+                message=str(exc),
+                error_code=str(exc.code or "invalid_map_name"),
+                operation=int(req.operation),
+                map_name="",
+                map_revision_id="",
+                localization_state="not_localized",
+                current_mode="",
             )
         except ValueError as exc:
             return self.response(

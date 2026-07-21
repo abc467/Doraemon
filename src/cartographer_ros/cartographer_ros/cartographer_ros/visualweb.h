@@ -102,6 +102,278 @@ public:
         return !root.empty() && boost::filesystem::is_directory(root);
     }
 
+    static bool is_allowed_config_entry(const std::string &config_entry)
+    {
+        return config_entry == "slam" ||
+               config_entry == "pure_location" ||
+               config_entry == "pure_location_odom";
+    }
+
+    static boost::filesystem::path commercial_map_root_path()
+    {
+        return boost::filesystem::path("/data/maps");
+    }
+
+    static bool set_path_error(std::string *error, const std::string &message)
+    {
+        if (error != nullptr)
+        {
+            *error = message;
+        }
+        return false;
+    }
+
+    static bool has_embedded_nul(const std::string &value)
+    {
+        return value.find('\0') != std::string::npos;
+    }
+
+    static bool has_parent_reference(const boost::filesystem::path &path)
+    {
+        for (const auto &component : path)
+        {
+            if (component == "..")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool is_canonical_path_contained(
+        const boost::filesystem::path &canonical_path,
+        const boost::filesystem::path &canonical_root,
+        bool allow_root)
+    {
+        auto path_component = canonical_path.begin();
+        for (auto root_component = canonical_root.begin();
+             root_component != canonical_root.end();
+             ++root_component, ++path_component)
+        {
+            if (path_component == canonical_path.end() ||
+                *path_component != *root_component)
+            {
+                return false;
+            }
+        }
+        return allow_root || path_component != canonical_path.end();
+    }
+
+    static bool resolve_canonical_map_root(
+        const boost::filesystem::path &map_root,
+        boost::filesystem::path *canonical_root,
+        std::string *error)
+    {
+        if (canonical_root == nullptr || map_root.empty() ||
+            has_embedded_nul(map_root.string()))
+        {
+            return set_path_error(error, "Invalid map root");
+        }
+
+        boost::system::error_code status_error;
+        const boost::filesystem::file_status root_status =
+            boost::filesystem::symlink_status(map_root, status_error);
+        if (status_error || !boost::filesystem::exists(root_status) ||
+            boost::filesystem::is_symlink(root_status) ||
+            !boost::filesystem::is_directory(root_status))
+        {
+            return set_path_error(error, "Invalid map root");
+        }
+
+        boost::system::error_code canonical_error;
+        *canonical_root = boost::filesystem::canonical(map_root, canonical_error);
+        if (canonical_error || canonical_root->empty() ||
+            !canonical_root->is_absolute())
+        {
+            return set_path_error(error, "Invalid map root");
+        }
+        return true;
+    }
+
+    static bool resolve_existing_pbstream_path_for_root(
+        const std::string &filename,
+        const boost::filesystem::path &map_root,
+        boost::filesystem::path *resolved_path,
+        std::string *error)
+    {
+        if (resolved_path == nullptr || filename.empty() ||
+            has_embedded_nul(filename))
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        boost::filesystem::path canonical_root;
+        if (!resolve_canonical_map_root(map_root, &canonical_root, error))
+        {
+            return false;
+        }
+
+        const boost::filesystem::path requested(filename);
+        if (requested.extension() != ".pbstream")
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+        const boost::filesystem::path candidate =
+            requested.is_absolute() ? requested : canonical_root / requested;
+
+        boost::system::error_code status_error;
+        const boost::filesystem::file_status candidate_status =
+            boost::filesystem::symlink_status(candidate, status_error);
+        if (status_error || !boost::filesystem::exists(candidate_status))
+        {
+            return set_path_error(error, "Not Found");
+        }
+
+        boost::system::error_code canonical_error;
+        const boost::filesystem::path canonical_candidate =
+            boost::filesystem::canonical(candidate, canonical_error);
+        if (canonical_error ||
+            !is_canonical_path_contained(canonical_candidate,
+                                         canonical_root, false) ||
+            canonical_candidate.extension() != ".pbstream")
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        boost::system::error_code canonical_status_error;
+        const boost::filesystem::file_status canonical_status =
+            boost::filesystem::status(canonical_candidate,
+                                      canonical_status_error);
+        if (canonical_status_error ||
+            !boost::filesystem::is_regular_file(canonical_status))
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        *resolved_path = canonical_candidate;
+        return true;
+    }
+
+    static bool resolve_pbstream_save_path_for_root(
+        const std::string &filename,
+        const boost::filesystem::path &map_root,
+        boost::filesystem::path *resolved_path,
+        std::string *error)
+    {
+        if (resolved_path == nullptr || filename.empty() ||
+            has_embedded_nul(filename))
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        boost::filesystem::path canonical_root;
+        if (!resolve_canonical_map_root(map_root, &canonical_root, error))
+        {
+            return false;
+        }
+
+        const boost::filesystem::path requested(filename);
+        const boost::filesystem::path candidate =
+            requested.is_absolute() ? requested : canonical_root / requested;
+        const boost::filesystem::path target_filename = candidate.filename();
+        if (target_filename.empty() || target_filename == "." ||
+            target_filename == ".." || target_filename.extension() != ".pbstream")
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        boost::system::error_code canonical_error;
+        const boost::filesystem::path canonical_parent =
+            boost::filesystem::canonical(candidate.parent_path(), canonical_error);
+        if (canonical_error ||
+            !is_canonical_path_contained(canonical_parent,
+                                         canonical_root, true))
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        boost::system::error_code parent_status_error;
+        const boost::filesystem::file_status parent_status =
+            boost::filesystem::status(canonical_parent, parent_status_error);
+        if (parent_status_error ||
+            !boost::filesystem::is_directory(parent_status))
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        const boost::filesystem::path safe_target =
+            canonical_parent / target_filename;
+        boost::system::error_code target_status_error;
+        const boost::filesystem::file_status target_status =
+            boost::filesystem::symlink_status(safe_target,
+                                              target_status_error);
+        if ((target_status_error &&
+             target_status.type() != boost::filesystem::file_not_found) ||
+            boost::filesystem::is_symlink(target_status) ||
+            (boost::filesystem::exists(target_status) &&
+             !boost::filesystem::is_regular_file(target_status)))
+        {
+            return set_path_error(error, "Invalid map path");
+        }
+
+        *resolved_path = safe_target;
+        return true;
+    }
+
+    static bool resolve_map_directory_path_for_root(
+        const std::string &dirname,
+        const boost::filesystem::path &map_root,
+        boost::filesystem::path *resolved_path,
+        std::string *error)
+    {
+        if (resolved_path == nullptr || dirname.empty() ||
+            has_embedded_nul(dirname))
+        {
+            return set_path_error(error, "Invalid map directory");
+        }
+
+        const boost::filesystem::path requested(dirname);
+        if (has_parent_reference(requested))
+        {
+            return set_path_error(error, "Invalid map directory");
+        }
+
+        boost::filesystem::path canonical_root;
+        if (!resolve_canonical_map_root(map_root, &canonical_root, error))
+        {
+            return false;
+        }
+
+        boost::filesystem::path candidate;
+        if (dirname == "/map" || dirname == "map")
+        {
+            candidate = canonical_root;
+        }
+        else
+        {
+            candidate = requested.is_absolute()
+                            ? requested
+                            : canonical_root / requested;
+        }
+
+        boost::system::error_code canonical_error;
+        const boost::filesystem::path canonical_candidate =
+            boost::filesystem::canonical(candidate, canonical_error);
+        if (canonical_error ||
+            !is_canonical_path_contained(canonical_candidate,
+                                         canonical_root, true))
+        {
+            return set_path_error(error, "Invalid map directory");
+        }
+
+        boost::system::error_code status_error;
+        const boost::filesystem::file_status candidate_status =
+            boost::filesystem::status(canonical_candidate, status_error);
+        if (status_error ||
+            !boost::filesystem::is_directory(candidate_status))
+        {
+            return set_path_error(error, "Invalid map directory");
+        }
+
+        *resolved_path = canonical_candidate;
+        return true;
+    }
+
     static bool has_config_layout(const boost::filesystem::path &root)
     {
         if (root.empty() || !boost::filesystem::is_directory(root))
@@ -173,12 +445,6 @@ public:
             {
                 return candidate.string();
             }
-        }
-
-        const boost::filesystem::path deployment_candidate("/data/config/slam/cartographer");
-        if (has_config_layout(deployment_candidate))
-        {
-            return deployment_candidate.string();
         }
 
         const std::string cleanrobot_path = ros::package::getPath("cleanrobot");
@@ -295,10 +561,13 @@ public:
             return false;
         }
 
-        const bool enable_flirt =
-            config_entry == "slam" ||
-            config_entry == "pure_location" ||
-            config_entry == "pure_location_odom";
+        if (!is_allowed_config_entry(config_entry))
+        {
+            ROS_ERROR("rejected unsupported cartographer config_entry");
+            return false;
+        }
+
+        const bool enable_flirt = true;
         flirt::use_flirt.store(enable_flirt);
         std::cout << (enable_flirt ? "FLIRT Enabled" : "FLIRT Disabled")
                   << " for config_entry=" << config_entry << std::endl;
@@ -420,18 +689,15 @@ public:
             const nlohmann::json payload = parse_payload_json(payload_json);
             const std::string filename = payload.at("filename").get<std::string>();
             const bool frozen = payload.at("frozen").get<bool>();
-            const boost::filesystem::path requested(filename);
-            const std::string full_path = requested.is_absolute()
-                                              ? requested.string()
-                                              : (boost::filesystem::path(this->map_root) / requested).string();
-
-            std::ifstream stream(full_path);
-            if (!stream.good())
+            boost::filesystem::path resolved_path;
+            std::string path_error;
+            if (!resolve_existing_pbstream_path_for_root(
+                    filename, commercial_map_root_path(),
+                    &resolved_path, &path_error))
             {
-                return make_result(1, "Not Found");
+                return make_result(1, path_error);
             }
-            stream.close();
-            this->node->LoadState(full_path, frozen);
+            this->node->LoadState(resolved_path.string(), frozen);
             return make_result(0, "");
         }
         catch (const std::exception &e)
@@ -452,11 +718,16 @@ public:
             const nlohmann::json payload = parse_payload_json(payload_json);
             const std::string filename = payload.at("filename").get<std::string>();
             const bool include_unfinished = payload.at("unfinished").get<bool>();
-            const boost::filesystem::path requested(filename);
-            const std::string full_path = requested.is_absolute()
-                                              ? requested.string()
-                                              : (boost::filesystem::path(this->map_root) / requested).string();
-            const bool ok = this->node->SerializeState(full_path, include_unfinished);
+            boost::filesystem::path resolved_path;
+            std::string path_error;
+            if (!resolve_pbstream_save_path_for_root(
+                    filename, commercial_map_root_path(),
+                    &resolved_path, &path_error))
+            {
+                return make_result(1, path_error);
+            }
+            const bool ok = this->node->SerializeState(
+                resolved_path.string(), include_unfinished);
             if (ok)
             {
                 return make_result(0, "");
@@ -477,25 +748,19 @@ public:
             const nlohmann::json payload = parse_payload_json(payload_json);
             const std::string dirname = payload.at("dirname").get<std::string>();
             boost::filesystem::path dirpath;
-            if (dirname == "/map" || dirname == "map")
+            std::string path_error;
+            if (!resolve_map_directory_path_for_root(
+                    dirname, commercial_map_root_path(),
+                    &dirpath, &path_error))
             {
-                dirpath = boost::filesystem::path(this->map_root);
+                return make_result(1, path_error);
             }
-            else
+            for (const auto &entry : boost::filesystem::directory_iterator(dirpath))
             {
-                const boost::filesystem::path requested(dirname);
-                dirpath = requested.is_absolute()
-                              ? requested
-                              : (boost::filesystem::path(this->slam_root) / requested);
-            }
-            if (boost::filesystem::exists(dirpath) && boost::filesystem::is_directory(dirpath))
-            {
-                for (const auto &entry : boost::filesystem::directory_iterator(dirpath))
+                if (boost::filesystem::status(entry.path()).type() ==
+                    boost::filesystem::regular_file)
                 {
-                    if (boost::filesystem::status(entry.path()).type() == boost::filesystem::regular_file)
-                    {
-                        filenames.push_back(entry.path().filename().string());
-                    }
+                    filenames.push_back(entry.path().filename().string());
                 }
             }
             return make_result(0, "Successfully", {{"filenames", filenames}});

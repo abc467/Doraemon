@@ -64,6 +64,12 @@
   <arg name="camera1_bind_by_usb_port" default="false"/>
   <arg name="camera2_bind_by_usb_port" default="false"/>
   <arg name="camera3_bind_by_usb_port" default="false"/>
+  <arg name="camera1_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER '')"/>
+  <arg name="camera2_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER '')"/>
+  <arg name="camera3_serial_number" default="$(optenv RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER '')"/>
+  <arg name="camera1_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA1_USB_PORT '')"/>
+  <arg name="camera2_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA2_USB_PORT '')"/>
+  <arg name="camera3_usb_port" default="$(optenv RUNTIME_ORBBEC_CAMERA3_USB_PORT '')"/>
   <arg name="mechanical_connect_enable" default="false"/>
   <arg name="charge_voltage_confirm_enable" default="false"/>
   <arg name="target_soc" default="0.95"/>
@@ -250,6 +256,12 @@
           <arg name="camera1_bind_by_usb_port" value="$(arg camera1_bind_by_usb_port)"/>
           <arg name="camera2_bind_by_usb_port" value="$(arg camera2_bind_by_usb_port)"/>
           <arg name="camera3_bind_by_usb_port" value="$(arg camera3_bind_by_usb_port)"/>
+          <arg name="camera1_serial_number" value="$(arg camera1_serial_number)"/>
+          <arg name="camera2_serial_number" value="$(arg camera2_serial_number)"/>
+          <arg name="camera3_serial_number" value="$(arg camera3_serial_number)"/>
+          <arg name="camera1_usb_port" value="$(arg camera1_usb_port)"/>
+          <arg name="camera2_usb_port" value="$(arg camera2_usb_port)"/>
+          <arg name="camera3_usb_port" value="$(arg camera3_usb_port)"/>
         </include>
       </group>
     </group>

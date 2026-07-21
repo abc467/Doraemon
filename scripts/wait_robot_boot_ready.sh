@@ -2,10 +2,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+DEFAULT_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/commercial_vehicle_identity.sh"
 
 TIMEOUT_SEC="${DORAEMON_BOOT_WAIT_TIMEOUT:-120}"
+ROBOT_ID="${ROBOT_ID:-}"
+ROSBRIDGE_ADDRESS="${ROSBRIDGE_ADDRESS:-127.0.0.1}"
 CHASSIS_DRIVER="${DORAEMON_CHASSIS_DRIVER:-${CHASSIS_DRIVER:-legacy_mcore}}"
 case "${CHASSIS_DRIVER}" in
   mcore_tcp|tcp_mcore|new_mcore)
@@ -54,7 +58,35 @@ REQUIRE_ODOM_DEVICE="${DORAEMON_REQUIRE_ODOM_DEVICE:-${DEFAULT_REQUIRE_ODOM_DEVI
 REQUIRE_CHASSIS_DEVICE="${DORAEMON_REQUIRE_CHASSIS_DEVICE:-${DEFAULT_REQUIRE_CHASSIS_DEVICE}}"
 REQUIRE_MBOX_PING="${DORAEMON_REQUIRE_MBOX_PING:-${DEFAULT_REQUIRE_MBOX_PING}}"
 REQUIRE_LIDAR_PING="${DORAEMON_REQUIRE_LIDAR_PING:-true}"
+START_DEPTH_CAMERAS="${RUNTIME_START_DEPTH_CAMERAS:-false}"
+NO_ACTION_ACCEPTANCE="${DORAEMON_NO_ACTION_ACCEPTANCE:-true}"
+ACTION_TEST_APPROVED="${DORAEMON_ACTION_TEST_APPROVED:-false}"
+REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}"
+REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}"
+ORBBEC_CAMERA1_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER:-}"
+ORBBEC_CAMERA2_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER:-}"
+ORBBEC_CAMERA3_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}"
+ORBBEC_CAMERA1_USB_PORT="${RUNTIME_ORBBEC_CAMERA1_USB_PORT:-}"
+ORBBEC_CAMERA2_USB_PORT="${RUNTIME_ORBBEC_CAMERA2_USB_PORT:-}"
+ORBBEC_CAMERA3_USB_PORT="${RUNTIME_ORBBEC_CAMERA3_USB_PORT:-}"
+COMMERCIAL_ORBBEC_VENDOR_ID="2bc5"
+COMMERCIAL_ORBBEC_MIN_USB_SPEED="5000"
+ORBBEC_VENDOR_ID="${DORAEMON_ORBBEC_VENDOR_ID:-${COMMERCIAL_ORBBEC_VENDOR_ID}}"
+ORBBEC_MIN_USB_SPEED="${DORAEMON_ORBBEC_MIN_USB_SPEED:-${COMMERCIAL_ORBBEC_MIN_USB_SPEED}}"
 REPO_ROOT="${DORAEMON_REPO_ROOT:-${DEFAULT_REPO_ROOT}}"
+if [[ "$(realpath -m "${REPO_ROOT}")" != "${DEFAULT_REPO_ROOT}" ]]; then
+  echo "[ERROR] DORAEMON_REPO_ROOT must match the executing release: ${DEFAULT_REPO_ROOT}" >&2
+  exit 1
+fi
+REPO_ROOT="${DEFAULT_REPO_ROOT}"
+if [[ -n "${DORAEMON_RUNTIME_CONFIG_FILE:-}" ]]; then
+  if [[ "${DORAEMON_RUNTIME_CONFIG_FILE}" != "/etc/doraemon/runtime.env" ||
+        "$(stat -c '%U %a' /etc/doraemon/runtime.env 2>/dev/null || true)" != "root 640" ]]; then
+    echo "[ERROR] commercial runtime config must be /etc/doraemon/runtime.env, root-owned mode 0640" >&2
+    exit 1
+  fi
+  commercial_validate_runtime_env_file /etc/doraemon/runtime.env || exit 1
+fi
 
 log() {
   echo "[$(date '+%F %T')] $*"
@@ -93,6 +125,94 @@ has_device() {
   [[ -e "$1" ]]
 }
 
+has_usb_serial() {
+  local expected_serial="$1"
+  local serial_file
+  for serial_file in /sys/bus/usb/devices/*/serial; do
+    [[ -r "${serial_file}" ]] || continue
+    [[ "$(<"${serial_file}")" == "${expected_serial}" ]] && return 0
+  done
+  return 1
+}
+
+has_usb_topology_path() {
+  local path="$1"
+  local root="/sys/bus/usb/devices/${path}"
+  local speed=""
+  [[ -d "${root}" ]] || return 1
+  [[ -r "${root}/idVendor" && "$(<"${root}/idVendor")" == "${ORBBEC_VENDOR_ID}" ]] || return 1
+  [[ -r "${root}/speed" ]] || return 1
+  speed="$(<"${root}/speed")"
+  [[ "${speed}" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  awk -v actual="${speed}" -v minimum="${ORBBEC_MIN_USB_SPEED}" \
+    'BEGIN { exit !(actual >= minimum) }'
+}
+
+is_placeholder() {
+  commercial_value_is_placeholder "${1:-}"
+}
+
+validate_unique_camera_identities() {
+  commercial_validate_required_orbbec_identities \
+    "${ORBBEC_CAMERA1_SERIAL_NUMBER}" \
+    "${ORBBEC_CAMERA2_SERIAL_NUMBER}" \
+    "${ORBBEC_CAMERA3_SERIAL_NUMBER}" \
+    "${ORBBEC_CAMERA1_USB_PORT}" \
+    "${ORBBEC_CAMERA2_USB_PORT}" \
+    "${ORBBEC_CAMERA3_USB_PORT}"
+}
+
+orbbec_list_devices_binary() {
+  for candidate in \
+    "${REPO_ROOT}/install/lib/orbbec_camera/list_devices_node" \
+    "${REPO_ROOT}/devel/lib/orbbec_camera/list_devices_node"; do
+    [[ -x "${candidate}" ]] && printf '%s' "${candidate}" && return 0
+  done
+  return 1
+}
+
+orbbec_workspace_setup() {
+  for candidate in "${REPO_ROOT}/install/setup.bash" "${REPO_ROOT}/devel/setup.bash"; do
+    [[ -f "${candidate}" ]] && printf '%s' "${candidate}" && return 0
+  done
+  return 1
+}
+
+collect_orbbec_sdk_pairs() {
+  local binary=""
+  local workspace_setup=""
+  local output=""
+  local line=""
+  local serial=""
+  local port=""
+  binary="$(orbbec_list_devices_binary)" || return 1
+  workspace_setup="$(orbbec_workspace_setup)" || return 1
+
+  set +u
+  # shellcheck disable=SC1091
+  source /opt/ros/noetic/setup.bash
+  # shellcheck disable=SC1090
+  source "${workspace_setup}"
+  set -u
+  output="$(timeout --signal=TERM --kill-after=2s 15s "${binary}" 2>&1)" || return 1
+
+  while IFS= read -r line; do
+    if [[ "${line}" == *"serial: "* ]]; then
+      serial="${line##*serial: }"
+      serial="${serial%%[[:space:]]*}"
+      continue
+    fi
+    if [[ "${line}" == *"port id : "* ]]; then
+      port="${line##*port id : }"
+      port="${port%%[[:space:]]*}"
+      if [[ -n "${serial}" && -n "${port}" ]]; then
+        printf '%s|%s\n' "${serial}" "${port}"
+      fi
+      serial=""
+    fi
+  done <<<"${output}"
+}
+
 has_workspace_setup() {
   [[ -f "${REPO_ROOT}/install/setup.bash" || -f "${REPO_ROOT}/devel/setup.bash" ]]
 }
@@ -120,12 +240,181 @@ truthy() {
   esac
 }
 
+valid_boolean() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|0|false|no|off)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_orbbec_commercial_baseline() {
+  local normalized_vendor="${ORBBEC_VENDOR_ID,,}"
+
+  if [[ "${normalized_vendor}" != "${COMMERCIAL_ORBBEC_VENDOR_ID}" ]]; then
+    log "[ERROR] DORAEMON_ORBBEC_VENDOR_ID must remain ${COMMERCIAL_ORBBEC_VENDOR_ID} for the commercial baseline"
+    return 1
+  fi
+  ORBBEC_VENDOR_ID="${normalized_vendor}"
+
+  if [[ ! "${ORBBEC_MIN_USB_SPEED}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    log "[ERROR] DORAEMON_ORBBEC_MIN_USB_SPEED must be numeric and at least ${COMMERCIAL_ORBBEC_MIN_USB_SPEED}"
+    return 1
+  fi
+  if ! awk -v requested="${ORBBEC_MIN_USB_SPEED}" \
+      -v baseline="${COMMERCIAL_ORBBEC_MIN_USB_SPEED}" \
+      'BEGIN { exit !(requested >= baseline) }'; then
+    log "[ERROR] DORAEMON_ORBBEC_MIN_USB_SPEED must not be below ${COMMERCIAL_ORBBEC_MIN_USB_SPEED}"
+    return 1
+  fi
+}
+
+validate_installed_commercial_udev_rules() {
+  local serial_rule="/etc/udev/rules.d/99-doraemon-a26022-serial.rules"
+  local orbbec_rule="/etc/udev/rules.d/99-obsensor-ros1-libusb.rules"
+  local expected_orbbec_rule="${REPO_ROOT}/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules"
+  local rule=""
+
+  for rule in "${serial_rule}" "${orbbec_rule}"; do
+    if [[ ! -f "${rule}" || -L "${rule}" || \
+          "$(stat -c '%U:%G %a' "${rule}" 2>/dev/null || true)" != "root:root 644" ]]; then
+      log "[ERROR] installed udev rule must be a root:root 0644 regular file: ${rule}"
+      return 1
+    fi
+  done
+  if grep -q 'REPLACE_' "${serial_rule}"; then
+    log "[ERROR] serial udev rule still contains a placeholder"
+    return 1
+  fi
+  if [[ ! -f "${expected_orbbec_rule}" || -L "${expected_orbbec_rule}" ]] || \
+      ! cmp -s "${expected_orbbec_rule}" "${orbbec_rule}"; then
+    log "[ERROR] installed Orbbec udev rule does not match this release"
+    return 1
+  fi
+  log "[OK] installed serial and Orbbec udev rules are root-managed"
+}
+
+validate_serial_alias_permissions() {
+  local alias_path="$1"
+  local alias_name="$2"
+  local serial_rule="/etc/udev/rules.d/99-doraemon-a26022-serial.rules"
+  local target=""
+  local id_path=""
+
+  if [[ ! -L "${alias_path}" ]]; then
+    log "[ERROR] required serial alias is not a symlink: ${alias_path}"
+    return 1
+  fi
+  target="$(realpath -e -- "${alias_path}" 2>/dev/null)" || {
+    log "[ERROR] required serial alias is dangling: ${alias_path}"
+    return 1
+  }
+  if [[ ! -c "${target}" || "${target}" != /dev/ttyUSB* || \
+        "$(stat -c '%U:%G %a' "${target}" 2>/dev/null || true)" != "root:dialout 660" ]]; then
+    log "[ERROR] ${alias_path} must resolve to a root:dialout 0660 ttyUSB device"
+    return 1
+  fi
+  id_path="$(udevadm info --query=property --name="${target}" 2>/dev/null | \
+    sed -n 's/^ID_PATH=//p' | head -n1)"
+  if [[ -z "${id_path}" ]] || ! awk -v alias_name="${alias_name}" -v id_path="${id_path}" '
+      index($0, "ENV{ID_PATH}==\"" id_path "\"") &&
+      index($0, "SYMLINK+=\"" alias_name "\"") { found = 1 }
+      END { exit !found }
+    ' "${serial_rule}"; then
+    log "[ERROR] ${alias_path} does not match its locally measured ID_PATH rule"
+    return 1
+  fi
+  log "[OK] ${alias_path} -> ${target} is root:dialout 0660 and matches ID_PATH=${id_path}"
+}
+
+validate_orbbec_usb_node_permissions() {
+  local vendor_file=""
+  local device_root=""
+  local busnum=""
+  local devnum=""
+  local usb_node=""
+  local node_count=0
+
+  for vendor_file in /sys/bus/usb/devices/*/idVendor; do
+    [[ -r "${vendor_file}" ]] || continue
+    [[ "$(<"${vendor_file}")" == "${ORBBEC_VENDOR_ID}" ]] || continue
+    device_root="${vendor_file%/idVendor}"
+    [[ -r "${device_root}/busnum" && -r "${device_root}/devnum" ]] || {
+      log "[ERROR] Orbbec sysfs node lacks busnum/devnum: ${device_root}"
+      return 1
+    }
+    busnum="$(<"${device_root}/busnum")"
+    devnum="$(<"${device_root}/devnum")"
+    printf -v usb_node '/dev/bus/usb/%03d/%03d' "${busnum}" "${devnum}"
+    if [[ ! -c "${usb_node}" || -L "${usb_node}" || \
+          "$(stat -c '%U:%G %a' "${usb_node}" 2>/dev/null || true)" != "root:video 660" ]]; then
+      log "[ERROR] Orbbec USB node must be root:video 0660: ${usb_node}"
+      return 1
+    fi
+    node_count=$((node_count + 1))
+  done
+  if (( node_count < 3 )); then
+    log "[ERROR] expected at least three local Orbbec USB device nodes, found ${node_count}"
+    return 1
+  fi
+  log "[OK] ${node_count} Orbbec USB device nodes are root:video 0660"
+}
+
 START_TS="$(date +%s)"
 
 log "waiting for Doraemon robot boot dependencies"
 log "repo=${REPO_ROOT} chassis=${CHASSIS_DRIVER} chassis_device=${CHASSIS_DEVICE:-none} a_box=${A_BOX_IP} a_box_iface=${A_BOX_IFACE:-auto} mbox=${MBOX_IP} lidar=${LIDAR_IP} imu=${IMU_DEVICE} odom=${ODOM_DEVICE} timeout=${TIMEOUT_SEC}s"
 
+if is_placeholder "${ROBOT_ID}" || [[ "${ROBOT_ID}" == "local_robot" ]]; then
+  log "[ERROR] ROBOT_ID must be the explicit vehicle asset identifier"
+  exit 1
+fi
+if is_placeholder "${A_BOX_IFACE}"; then
+  log "[ERROR] DORAEMON_A_BOX_IFACE must be the explicit internal wired interface"
+  exit 1
+fi
+if [[ "${ROSBRIDGE_ADDRESS}" != "127.0.0.1" ]]; then
+  log "[ERROR] commercial rosbridge must bind only to 127.0.0.1"
+  exit 1
+fi
+validate_orbbec_commercial_baseline
+for boolean_name in START_DEPTH_CAMERAS REQUIRE_DEPTH_CAMERA_TOPICS REQUIRE_DEPTH_CAMERA_IDENTITIES NO_ACTION_ACCEPTANCE ACTION_TEST_APPROVED; do
+  if ! valid_boolean "${!boolean_name}"; then
+    log "[ERROR] ${boolean_name} must be an explicit boolean"
+    exit 1
+  fi
+done
+if truthy "${NO_ACTION_ACCEPTANCE}"; then
+  if truthy "${ACTION_TEST_APPROVED}"; then
+    log "[ERROR] no-action acceptance requires DORAEMON_ACTION_TEST_APPROVED=false"
+    exit 1
+  fi
+  log "[OK] no-action acceptance mode is enabled"
+else
+  if ! truthy "${ACTION_TEST_APPROVED}"; then
+    log "[ERROR] action-capable runtime requires DORAEMON_ACTION_TEST_APPROVED=true"
+    exit 1
+  fi
+  log "[WARN] explicitly approved action-test mode is enabled"
+fi
+if ! truthy "${START_DEPTH_CAMERAS}"; then
+  log "[ERROR] commercial preflight requires RUNTIME_START_DEPTH_CAMERAS=true"
+  exit 1
+fi
+if ! truthy "${REQUIRE_DEPTH_CAMERA_TOPICS}" || ! truthy "${REQUIRE_DEPTH_CAMERA_IDENTITIES}"; then
+  log "[ERROR] enabled depth cameras require both topic and identity commercial gates"
+  exit 1
+fi
+
 udevadm settle --timeout=10 || true
+
+validate_installed_commercial_udev_rules
+validate_serial_alias_permissions "${IMU_DEVICE}" imu
+validate_serial_alias_permissions "${ODOM_DEVICE}" wheel_odom
+validate_orbbec_usb_node_permissions
 
 wait_for "workspace setup" has_workspace_setup
 if truthy "${REQUIRE_IMU_DEVICE}"; then
@@ -154,5 +443,30 @@ if truthy "${REQUIRE_LIDAR_PING}"; then
 else
   log "[SKIP] LiDAR ping check disabled"
 fi
+if ! validate_unique_camera_identities; then
+  log "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique"
+  exit 1
+fi
+wait_for "Orbbec left serial ${ORBBEC_CAMERA1_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA1_SERIAL_NUMBER}"
+wait_for "Orbbec right serial ${ORBBEC_CAMERA2_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA2_SERIAL_NUMBER}"
+wait_for "Orbbec front serial ${ORBBEC_CAMERA3_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA3_SERIAL_NUMBER}"
+wait_for "Orbbec left USB3 topology ${ORBBEC_CAMERA1_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA1_USB_PORT}"
+wait_for "Orbbec right USB3 topology ${ORBBEC_CAMERA2_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA2_USB_PORT}"
+wait_for "Orbbec front USB3 topology ${ORBBEC_CAMERA3_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA3_USB_PORT}"
+
+sdk_pairs="$(collect_orbbec_sdk_pairs)" || {
+  log "[ERROR] unable to enumerate Orbbec serial/topology pairs with the built SDK"
+  exit 1
+}
+for expected_pair in \
+  "${ORBBEC_CAMERA1_SERIAL_NUMBER}|${ORBBEC_CAMERA1_USB_PORT}" \
+  "${ORBBEC_CAMERA2_SERIAL_NUMBER}|${ORBBEC_CAMERA2_USB_PORT}" \
+  "${ORBBEC_CAMERA3_SERIAL_NUMBER}|${ORBBEC_CAMERA3_USB_PORT}"; do
+  if ! grep -Fxq -- "${expected_pair}" <<<"${sdk_pairs}"; then
+    log "[ERROR] configured Orbbec serial/topology pair not reported by SDK: ${expected_pair}"
+    exit 1
+  fi
+done
+log "[OK] Orbbec SDK serial/topology pairs verified"
 
 log "[OK] Doraemon robot boot dependencies are ready"

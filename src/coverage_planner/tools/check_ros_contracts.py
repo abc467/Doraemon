@@ -717,8 +717,12 @@ def _print_text_summary(payload):
             print("  warning: %s" % str(warning))
 
 
-def _collect_payload():
-    payload = {"local": _local_contracts()}
+def _collect_payload(*, exclude_manual_drive=False):
+    local_contracts = _local_contracts()
+    if exclude_manual_drive:
+        local_contracts.pop("manual_drive_command_app", None)
+        local_contracts.pop("get_manual_drive_status_app", None)
+    payload = {"local": local_contracts}
     try:
         master = rosgraph.Master("/check_ros_contracts")
         master.getPid()
@@ -734,13 +738,18 @@ def main():
     parser.add_argument("--text", action="store_true", help="print a concise human-readable summary instead of JSON")
     parser.add_argument("--wait-timeout", type=float, default=0.0, help="keep checking until contracts are healthy or timeout seconds elapse")
     parser.add_argument("--wait-interval", type=float, default=2.0, help="poll interval seconds while waiting")
+    parser.add_argument(
+        "--exclude-manual-drive",
+        action="store_true",
+        help="omit manual-drive contracts when that action entry is intentionally disabled",
+    )
     args = parser.parse_args()
 
-    payload = _collect_payload()
+    payload = _collect_payload(exclude_manual_drive=args.exclude_manual_drive)
     deadline = time.time() + max(0.0, float(args.wait_timeout or 0.0))
     while (not _summary_ok(payload)) and float(args.wait_timeout or 0.0) > 0.0 and time.time() < deadline:
         time.sleep(max(0.2, float(args.wait_interval or 2.0)))
-        payload = _collect_payload()
+        payload = _collect_payload(exclude_manual_drive=args.exclude_manual_drive)
 
     if args.text:
         _print_text_summary(payload)

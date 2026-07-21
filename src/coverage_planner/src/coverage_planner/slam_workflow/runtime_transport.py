@@ -18,6 +18,8 @@ from nav_msgs.msg import OccupancyGrid
 from robot_runtime_flags_msgs.srv import SetParam
 from std_srvs.srv import Trigger
 
+from coverage_planner.map_path_security import MapPathSecurityError, validate_new_file_target
+
 
 _INTERNAL_VISUAL_COMMAND_SERVICE = "/visual_command"
 _INTERNAL_WRITE_STATE_SERVICE = "/write_state"
@@ -373,6 +375,15 @@ class CartographerRuntimeTransport:
         backend = self._backend
         runtime_param = backend._runtime_context.runtime_param
         filename = os.path.expanduser(str(filename or "").strip())
+        try:
+            filename = validate_new_file_target(
+                backend.maps_root,
+                filename,
+                suffix=".pbstream",
+                require_parent=True,
+            )
+        except MapPathSecurityError as exc:
+            return False, "invalid_pbstream_path: %s" % str(exc)
         write_state_service = self._write_state_service_name()
         runtime_save_state_service = self._runtime_save_state_service_name()
         save_backend_mode = self._save_backend_mode()
@@ -380,6 +391,14 @@ class CartographerRuntimeTransport:
             last_exc = None
             for _ in range(3):
                 try:
+                    # Revalidate immediately before every external write.  A
+                    # previous failed attempt may already have created a sink.
+                    filename = validate_new_file_target(
+                        backend.maps_root,
+                        filename,
+                        suffix=".pbstream",
+                        require_parent=True,
+                    )
                     rospy.wait_for_service(write_state_service, timeout=float(backend.command_timeout_s))
                     cli = rospy.ServiceProxy(write_state_service, WriteState)
                     resp = cli(
@@ -390,12 +409,23 @@ class CartographerRuntimeTransport:
                     code = int(getattr(status, "code", -1))
                     message = str(getattr(status, "message", "") or "")
                     return code == 0, message
+                except MapPathSecurityError as exc:
+                    return False, "invalid_pbstream_path: %s" % str(exc)
                 except Exception as exc:
                     last_exc = exc
                     rospy.sleep(0.5)
             return False, str(last_exc or "write_state failed")
 
         if save_backend_mode == "trigger_fallback":
+            try:
+                filename = validate_new_file_target(
+                    backend.maps_root,
+                    filename,
+                    suffix=".pbstream",
+                    require_parent=True,
+                )
+            except MapPathSecurityError as exc:
+                return False, "invalid_pbstream_path: %s" % str(exc)
             rospy.logwarn(
                 "[slam_runtime_manager] save_pbstream degraded: using internal trigger fallback service=%s",
                 runtime_save_state_service,

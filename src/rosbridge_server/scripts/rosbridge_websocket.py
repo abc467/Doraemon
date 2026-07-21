@@ -98,7 +98,7 @@ if __name__ == "__main__":
     # if authentication should be used
     RosbridgeWebSocket.authenticate = rospy.get_param('~authenticate', False)
     port = rospy.get_param('~port', 9090)
-    address = rospy.get_param('~address', "0.0.0.0")
+    address = rospy.get_param('~address', "127.0.0.1")
 
     external_port = rospy.get_param('~websocket_external_port', None)
     if external_port:
@@ -257,10 +257,10 @@ if __name__ == "__main__":
     UnadvertiseService.services_glob = RosbridgeWebSocket.services_glob
     CallService.services_glob = RosbridgeWebSocket.services_glob
 
-    # Support the legacy "" address value.
-    # The socket library would interpret this as INADDR_ANY.
+    # Treat an empty legacy address as loopback.  INADDR_ANY is never a safe
+    # implicit default for the commercial overlay.
     if not address:
-        address = '0.0.0.0'
+        address = '127.0.0.1'
 
     ##################################################
     # Done with parameter handling                   #

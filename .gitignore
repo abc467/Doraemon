@@ -11,6 +11,9 @@ log/
 logs/
 Log/
 
+# Generated SW2URDF export logs may contain workstation-specific paths.
+export.log
+
 operations.db
 planning.db
 wheel_speed_odom_debug.csv
@@ -24,8 +27,10 @@ frames.gv
 frames.pdf
 .~lock.*#
 
-*.bag
-*.bag.active
+*.[bB][aA][gG]
+*.[bB][aA][gG].*
+*.[dD][bB]
+*.[sS][qQ][lL][iI][tT][eE]*
 *.db-journal
 *.db-shm
 *.db-wal

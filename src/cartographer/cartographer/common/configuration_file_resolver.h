@@ -36,6 +36,8 @@ class ConfigurationFileResolver : public FileResolver {
   explicit ConfigurationFileResolver(
       const std::vector<std::string>& configuration_files_directories);
 
+  // 'basename' must be a single non-empty filename, never a path. Resolved
+  // files must be regular files contained by one of the search directories.
   std::string GetFullPathOrDie(const std::string& basename) override;
   std::string GetFileContentOrDie(const std::string& basename) override;
 

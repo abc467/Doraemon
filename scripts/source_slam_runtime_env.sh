@@ -1,6 +1,8 @@
 #!/bin/bash
 
 _SOURCE_SLAM_RUNTIME_ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${_SOURCE_SLAM_RUNTIME_ENV_DIR}/commercial_filesystem_security.sh"
 
 default_ros_machine_ip() {
     local ips ip
@@ -34,7 +36,7 @@ apply_ros_network_env() {
     case "${master_uri}" in
         http://localhost:*|http://127.0.0.1:*)
             export ROS_MASTER_URI="${master_uri}"
-            unset ROS_IP
+            export ROS_IP="127.0.0.1"
             unset ROS_HOSTNAME
             return 0
             ;;
@@ -62,12 +64,38 @@ is_slam_config_root() {
 
 resolve_slam_config_root() {
     local repo_root="${1:-${_SOURCE_SLAM_RUNTIME_ENV_DIR}/..}"
+    local requested_root="${2:-}"
     local deployment_root="/data/config/slam/cartographer"
     local canonical_root="${repo_root}/src/cleanrobot/config/slam/cartographer"
+    local requested_canonical=""
 
-    if is_slam_config_root "${deployment_root}"; then
-        echo "${deployment_root}"
-        return 0
+    canonical_root="$(realpath -e -- "${canonical_root}" 2>/dev/null || printf '%s' "${canonical_root}")"
+
+    if [[ -n "${requested_root}" ]]; then
+        requested_canonical="$(realpath -e -- "${requested_root}" 2>/dev/null || true)"
+        if [[ "${requested_canonical}" == "${deployment_root}" ]]; then
+            commercial_validate_slam_config_override_tree "${deployment_root}" 1 || return 1
+            echo "${deployment_root}"
+            return 0
+        fi
+        if [[ -n "${requested_canonical}" && "${requested_canonical}" == "${canonical_root}" ]] && \
+            is_slam_config_root "${canonical_root}"; then
+            echo "${canonical_root}"
+            return 0
+        fi
+        echo "[ERROR] SLAM_CONFIG_ROOT is outside the approved locations: ${requested_root}" >&2
+        return 1
+    fi
+
+    if [[ -e "${deployment_root}" || -L "${deployment_root}" ]]; then
+        # Empty is the only state allowed to fall back to the immutable release.
+        # Any content makes the override authoritative and the shared validator
+        # then requires the complete reviewed layout.
+        commercial_validate_slam_config_override_tree "${deployment_root}" 0 || return 1
+        if is_slam_config_root "${deployment_root}"; then
+            echo "${deployment_root}"
+            return 0
+        fi
     fi
 
     if is_slam_config_root "${canonical_root}"; then
@@ -154,11 +182,9 @@ source_slam_runtime_env() {
     set -u
 
     export SLAM_ROOT="${repo_root}"
-    if [[ -z "${SLAM_CONFIG_ROOT:-}" ]]; then
-        local resolved_config_root=""
-        resolved_config_root="$(resolve_slam_config_root "${repo_root}")" || return 1
-        export SLAM_CONFIG_ROOT="${resolved_config_root}"
-    fi
+    local resolved_config_root=""
+    resolved_config_root="$(resolve_slam_config_root "${repo_root}" "${SLAM_CONFIG_ROOT:-}")" || return 1
+    export SLAM_CONFIG_ROOT="${resolved_config_root}"
     export SLAM_MAP_ROOT="${SLAM_MAP_ROOT:-${MAPS_ROOT:-/data/maps}}"
     export WORKSPACE_SETUP="${workspace_setup}"
     export WORKSPACE_LIB_ROOT="${workspace_lib_root}"

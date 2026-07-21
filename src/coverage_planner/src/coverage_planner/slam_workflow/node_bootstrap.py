@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 
+import grp
 import os
+import stat
 from dataclasses import dataclass
 
 import rospy
 
 
 DEPLOYMENT_SLAM_CONFIG_ROOT = "/data/config/slam/cartographer"
+DEPLOYMENT_SLAM_RUNTIME_LOG_ROOT = "/var/log/doraemon/slam-runtime"
+DEPLOYMENT_RELEASES_ROOT = "/opt/doraemon/releases"
+DEPLOYMENT_RUNTIME_LOGS_ROOT = "/var/log/doraemon"
 
 
 def workspace_root_from_node(node_file: str) -> str:
@@ -39,14 +44,151 @@ def is_slam_config_root(path: str) -> bool:
     return all(os.path.isfile(item) for item in required)
 
 
+def _decode_mountinfo_path(value: str) -> str:
+    return (
+        str(value)
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+def _contains_mount_point(path: str) -> bool:
+    root = os.path.realpath(path)
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                left = raw_line.split(" - ", 1)[0].split()
+                if len(left) < 5:
+                    continue
+                target = os.path.realpath(_decode_mountinfo_path(left[4]))
+                try:
+                    if os.path.commonpath((root, target)) == root:
+                        return True
+                except ValueError:
+                    continue
+    except OSError:
+        return True
+    return False
+
+
+def is_reviewed_deployment_slam_config_root(path: str) -> bool:
+    """Require the external Lua/SML tree to be root-managed and read-only."""
+    candidate = os.path.abspath(os.path.expanduser(str(path or "").strip()))
+    if candidate != DEPLOYMENT_SLAM_CONFIG_ROOT or os.path.realpath(candidate) != candidate:
+        return False
+    if not is_slam_config_root(candidate) or _contains_mount_point(candidate):
+        return False
+    try:
+        expected_gid = grp.getgrnam("a").gr_gid
+        for current_root, dirnames, filenames in os.walk(
+            candidate, topdown=True, followlinks=False
+        ):
+            paths = [current_root]
+            paths.extend(os.path.join(current_root, name) for name in dirnames)
+            paths.extend(os.path.join(current_root, name) for name in filenames)
+            for item in paths:
+                info = os.lstat(item)
+                if stat.S_ISLNK(info.st_mode):
+                    return False
+                if info.st_uid != 0 or info.st_gid != expected_gid:
+                    return False
+                mode = stat.S_IMODE(info.st_mode)
+                if stat.S_ISDIR(info.st_mode):
+                    if mode != 0o750:
+                        return False
+                elif stat.S_ISREG(info.st_mode):
+                    if mode != 0o640:
+                        return False
+                else:
+                    return False
+    except (KeyError, OSError):
+        return False
+    return True
+
+
+def deployment_slam_config_override_has_entries(path: str) -> bool:
+    """Return whether an installed override contains anything, failing closed."""
+    if not os.path.lexists(path):
+        return False
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is not None
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot inspect external SLAM config override: %s" % path
+        ) from exc
+
+
+def resolve_slam_config_root(raw_path: str, workspace_root: str) -> str:
+    canonical = os.path.realpath(canonical_slam_config_root(workspace_root))
+    external = DEPLOYMENT_SLAM_CONFIG_ROOT
+    raw_candidate = str(raw_path or "").strip()
+
+    if raw_candidate:
+        candidate = os.path.realpath(os.path.expanduser(raw_candidate))
+        if candidate == external:
+            if not is_reviewed_deployment_slam_config_root(external):
+                raise RuntimeError(
+                    "external SLAM config root is not a reviewed root:a read-only tree: %s"
+                    % external
+                )
+            return external
+        if candidate == canonical and is_slam_config_root(canonical):
+            return canonical
+        raise RuntimeError("SLAM config root is outside the approved locations: %s" % candidate)
+
+    # Only a completely empty staging directory may fall back to the immutable
+    # release. Any entry makes the override authoritative, so incomplete or
+    # unreviewed content must stop startup instead of being ignored.
+    if deployment_slam_config_override_has_entries(external):
+        if not is_reviewed_deployment_slam_config_root(external):
+            raise RuntimeError(
+                "external SLAM config override exists but is not reviewed and read-only: %s"
+                % external
+            )
+        return external
+    if is_slam_config_root(canonical):
+        return canonical
+    raise RuntimeError("no complete SLAM config root exists in the approved locations")
+
+
 def default_slam_config_root(workspace_root: str) -> str:
-    for candidate in (
-        DEPLOYMENT_SLAM_CONFIG_ROOT,
-        canonical_slam_config_root(workspace_root),
-    ):
-        if is_slam_config_root(candidate):
-            return os.path.abspath(os.path.expanduser(candidate))
-    return canonical_slam_config_root(workspace_root)
+    return resolve_slam_config_root("", workspace_root)
+
+
+def resolve_slam_runtime_log_root(raw_path: str, workspace_root: str) -> str:
+    """Resolve an external writable log root and reject release-tree paths."""
+    raw_workspace = str(workspace_root or "").strip()
+    workspace = os.path.realpath(os.path.expanduser(raw_workspace)) if raw_workspace else ""
+    raw_candidate = str(raw_path or "").strip() or DEPLOYMENT_SLAM_RUNTIME_LOG_ROOT
+    candidate = os.path.realpath(os.path.expanduser(raw_candidate))
+    releases_root = os.path.realpath(DEPLOYMENT_RELEASES_ROOT)
+    runtime_logs_root = os.path.realpath(DEPLOYMENT_RUNTIME_LOGS_ROOT)
+
+    def is_inside(root: str) -> bool:
+        if not root:
+            return False
+        try:
+            return os.path.commonpath((root, candidate)) == root
+        except ValueError:
+            return False
+
+    if is_inside(workspace):
+        raise RuntimeError(
+            "slam runtime log_root must be outside the immutable workspace: %s" % candidate
+        )
+    if is_inside(releases_root):
+        raise RuntimeError(
+            "slam runtime log_root must be outside the immutable releases tree: %s"
+            % candidate
+        )
+    if not is_inside(runtime_logs_root):
+        raise RuntimeError(
+            "slam runtime log_root must stay under /var/log/doraemon: %s" % candidate
+        )
+    return candidate
 
 
 def map_id_from_md5(map_md5: str) -> str:
@@ -172,8 +314,9 @@ def load_slam_runtime_manager_bootstrap(node_file: str, rospy_module=rospy) -> S
     return SlamRuntimeManagerBootstrap(
         workspace_root=workspace_root,
         workspace_setup_path=workspace_setup_path(workspace_root),
-        slam_config_root=os.path.expanduser(
-            str(rospy_module.get_param("~config_root", default_config_root)).strip() or default_config_root
+        slam_config_root=resolve_slam_config_root(
+            rospy_module.get_param("~config_root", default_config_root),
+            workspace_root,
         ),
         plan_db_path=rospy_module.get_param("~plan_db_path", "/data/coverage/planning.db"),
         ops_db_path=rospy_module.get_param("~ops_db_path", "/data/coverage/operations.db"),
@@ -181,8 +324,9 @@ def load_slam_runtime_manager_bootstrap(node_file: str, rospy_module=rospy) -> S
         repo_map_root=os.path.expanduser(
             str(rospy_module.get_param("~repo_map_root", default_maps_root)).strip()
         ),
-        log_root=os.path.expanduser(
-            str(rospy_module.get_param("~log_root", os.path.join(workspace_root, "log"))).strip()
+        log_root=resolve_slam_runtime_log_root(
+            rospy_module.get_param("~log_root", DEPLOYMENT_SLAM_RUNTIME_LOG_ROOT),
+            workspace_root,
         ),
         robot_id=str(rospy_module.get_param("~robot_id", "local_robot")).strip() or "local_robot",
         runtime_ns=str(rospy_module.get_param("~runtime_ns", "/cartographer/runtime")).rstrip("/"),

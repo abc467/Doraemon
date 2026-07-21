@@ -14,9 +14,12 @@
  * limitations under the License.
  *******************************************************************************/
 #include <ros/ros.h>
+#include <orbbec_camera/logging.h>
 #include <orbbec_camera/types.h>
 int main() {
   try {
+    orbbec_camera::disableOrbbecSdkFileLogging();
+    ob::Context::setLoggerToConsole(OBLogSeverity::OB_LOG_SEVERITY_OFF);
     std::shared_ptr<ob::Pipeline> pipeline = std::make_shared<ob::Pipeline>();
     auto device = pipeline->getDevice();
     if (!device) {

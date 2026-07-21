@@ -21,7 +21,7 @@
 
 4.使用ROS launch运行驱动
 
-	sudo chmod 777 /dev/ttyUSB0 (非网络款)			//这里的/dev/ttyUSB0指的是串口名称，如果是串口/虚拟串口款，需要赋权
+	串口/虚拟串口款应安装经审核的 udev 规则，使用 `GROUP:="dialout", MODE:="0660"`，把服务用户加入 `dialout` 后物理重插设备。严禁对串口执行 `chmod 777`。商业车辆必须根据本主板上实际拔插验证的串口身份建立稳定别名，不能把 VID/PID 当作唯一身份。
     
     roslaunch bluesea2 [launch file]    			//具体launch文件说明如下
 

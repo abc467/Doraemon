@@ -83,6 +83,23 @@ void CheckForLuaErrors(lua_State* L, int status) {
   CHECK_EQ(status, 0) << lua_tostring(L, -1);
 }
 
+// Cartographer configuration files need Lua's basic language support plus the
+// math, string, and table libraries, but they must not inherit ambient process,
+// filesystem, dynamic-module, or debugger capabilities.  Open the standard
+// libraries for compatibility, then remove every global entry point that can
+// recover those capabilities before any configuration code is evaluated.
+void DisableUnsafeLuaGlobals(lua_State* L) {
+  constexpr const char* kUnsafeGlobals[] = {
+      "os",          "io",       "package", "debug",  "require",
+      "dofile",      "loadfile", "load",    "loadstring",
+      "module",      "collectgarbage",
+  };
+  for (const char* const name : kUnsafeGlobals) {
+    lua_pushnil(L);
+    lua_setglobal(L, name);
+  }
+}
+
 // Returns 'a' if 'condition' is true, else 'b'.
 int LuaChoose(lua_State* L) {
   CHECK_EQ(lua_gettop(L), 3) << "choose() takes (condition, a, b).";
@@ -168,6 +185,7 @@ LuaParameterDictionary::LuaParameterDictionary(
   SetDictionaryInRegistry(L_, this);
 
   luaL_openlibs(L_);
+  DisableUnsafeLuaGlobals(L_);
 
   lua_register(L_, "choose", LuaChoose);
   lua_register(L_, "include", LuaInclude);

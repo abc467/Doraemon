@@ -37,10 +37,63 @@ elseif ((${MACHINES} MATCHES "aarch64") AND (${MACHINES_BIT} MATCHES "32"))
 endif ()
 
 # Paths
-set(ORBBEC_LIBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDK/lib/${HOST_PLATFORM})
+set(ORBBEC_VENDOR_LIBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDK/lib/${HOST_PLATFORM})
 set(ORBBEC_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/SDK/include/)
-set(CMAKE_BUILD_RPATH "${CMAKE_BUILD_RPATH}:${ORBBEC_LIBS_DIR}")
-set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_RPATH}:${ORBBEC_LIBS_DIR}")
+
+# Never patch the checked-in SDK binaries. Copy the selected architecture into
+# the package build tree and remove unsafe empty RPATH components there. The
+# hardened copies are the only vendor binaries used for linking or installation.
+find_program(ORBBEC_PATCHELF_EXECUTABLE NAMES patchelf)
+find_program(ORBBEC_BASH_EXECUTABLE NAMES bash)
+if (NOT ORBBEC_PATCHELF_EXECUTABLE OR NOT ORBBEC_BASH_EXECUTABLE)
+  message(FATAL_ERROR "patchelf and bash are required to harden Orbbec SDK RPATHs")
+endif ()
+
+set(ORBBEC_RPATH_HARDENER
+  ${CMAKE_CURRENT_SOURCE_DIR}/scripts/harden_elf_rpath.sh)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${ORBBEC_RPATH_HARDENER})
+set(ORBBEC_LIBS_DIR
+  ${CMAKE_CURRENT_BINARY_DIR}/hardened-sdk/lib/${HOST_PLATFORM})
+file(MAKE_DIRECTORY ${ORBBEC_LIBS_DIR})
+file(GLOB ORBBEC_VENDOR_LIBRARY_ENTRIES
+  ${ORBBEC_VENDOR_LIBS_DIR}/*.so
+  ${ORBBEC_VENDOR_LIBS_DIR}/*.so.*)
+foreach (ORBBEC_VENDOR_LIBRARY ${ORBBEC_VENDOR_LIBRARY_ENTRIES})
+  get_filename_component(ORBBEC_VENDOR_LIBRARY_NAME
+    ${ORBBEC_VENDOR_LIBRARY} NAME)
+  set(ORBBEC_HARDENED_LIBRARY
+    ${ORBBEC_LIBS_DIR}/${ORBBEC_VENDOR_LIBRARY_NAME})
+  if (IS_SYMLINK ${ORBBEC_VENDOR_LIBRARY})
+    file(READ_SYMLINK ${ORBBEC_VENDOR_LIBRARY} ORBBEC_VENDOR_LINK_TARGET)
+    file(REMOVE ${ORBBEC_HARDENED_LIBRARY})
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${ORBBEC_VENDOR_LINK_TARGET} ${ORBBEC_HARDENED_LIBRARY}
+      RESULT_VARIABLE ORBBEC_LINK_RESULT)
+    if (NOT ORBBEC_LINK_RESULT EQUAL 0)
+      message(FATAL_ERROR
+        "failed to copy Orbbec SDK symlink ${ORBBEC_VENDOR_LIBRARY_NAME}")
+    endif ()
+  else ()
+    configure_file(${ORBBEC_VENDOR_LIBRARY} ${ORBBEC_HARDENED_LIBRARY} COPYONLY)
+    execute_process(
+      COMMAND ${CMAKE_COMMAND} -E env
+        PATCHELF=${ORBBEC_PATCHELF_EXECUTABLE}
+        ${ORBBEC_BASH_EXECUTABLE} ${ORBBEC_RPATH_HARDENER}
+        ${ORBBEC_HARDENED_LIBRARY}
+      RESULT_VARIABLE ORBBEC_HARDEN_RESULT)
+    if (NOT ORBBEC_HARDEN_RESULT EQUAL 0)
+      message(FATAL_ERROR
+        "failed to harden Orbbec SDK library ${ORBBEC_VENDOR_LIBRARY_NAME}")
+    endif ()
+  endif ()
+endforeach ()
+
+# CMake RPATH variables are lists. list(APPEND) avoids manufacturing a leading
+# empty component when the inherited list is empty.
+list(APPEND CMAKE_BUILD_RPATH ${ORBBEC_LIBS_DIR})
+list(APPEND CMAKE_INSTALL_RPATH ${ORBBEC_LIBS_DIR})
 if (USE_NV_HW_DECODER)
   set(JETSON_MULTI_MEDIA_API_DIR /usr/src/jetson_multimedia_api)
   set(JETSON_MULTI_MEDIA_API_CLASS_DIR ${JETSON_MULTI_MEDIA_API_DIR}/samples/common/classes)
@@ -89,7 +142,6 @@ find_package(Boost REQUIRED)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Boost COMPONENTS filesystem system REQUIRED)
-include(CheckIncludeFileCXX)
 # check if boost was found
 if(Boost_FOUND)
     message(STATUS "Boost found!")
@@ -97,19 +149,6 @@ if(Boost_FOUND)
     message(STATUS "Boost_LIBRARIES: ${Boost_LIBRARIES}")
 else()
     message(FATAL_ERROR "Boost not found!")
-endif()
-
-check_include_file_cxx(dwarf.h ORBBEC_HAS_DWARF_H)
-find_path(ORBBEC_LIBDW_INCLUDE_DIR elfutils/libdw.h)
-find_library(ORBBEC_LIBDW_LIBRARY dw)
-if(ORBBEC_HAS_DWARF_H AND ORBBEC_LIBDW_INCLUDE_DIR AND ORBBEC_LIBDW_LIBRARY)
-  set(ORBBEC_BACKWARD_DEFINITIONS BACKWARD_HAS_DW=1)
-  list(APPEND COMMON_LIBDW_INCLUDE_DIRS ${ORBBEC_LIBDW_INCLUDE_DIR})
-  list(APPEND COMMON_LIBDW_LIBRARIES ${ORBBEC_LIBDW_LIBRARY})
-  message(STATUS "Orbbec crash stack trace: using libdw")
-else()
-  set(ORBBEC_BACKWARD_DEFINITIONS BACKWARD_HAS_BACKTRACE_SYMBOL=1)
-  message(WARNING "Orbbec crash stack trace: libdw headers/library not found, using backtrace symbols")
 endif()
 
 # Additional dependencies based on options
@@ -159,7 +198,6 @@ set(COMMON_INCLUDE_DIRS
   ${Boost_INCLUDE_DIRS}
   ${OpenCV_INCLUDED_DIRS}
   ${ORBBEC_INCLUDE_DIR}
-  ${COMMON_LIBDW_INCLUDE_DIRS}
 )
 if (USE_NV_HW_DECODER)
   list(APPEND COMMON_INCLUDE_DIRS
@@ -222,7 +260,6 @@ set(COMMON_LINK_LIBRARIES
   -L${ORBBEC_LIBS_DIR}
   Threads::Threads
   -lrt
-  ${COMMON_LIBDW_LIBRARIES}
 )
 
 if (USE_RK_HW_DECODER)
@@ -236,17 +273,47 @@ elseif (USE_NV_HW_DECODER)
   )
 endif ()
 
+# The isolated catkin devel layout and the install layout both place the
+# package's shared libraries in lib/, while node executables live one level
+# below it. Keep hardened vendor libraries alongside the package library so
+# every runtime lookup can be expressed relative to the loading ELF.
+set(ORBBEC_DEVEL_LIB_DIR
+  ${CATKIN_DEVEL_PREFIX}/${CATKIN_PACKAGE_LIB_DESTINATION})
+add_custom_target(orbbec_hardened_sdk_copy ALL
+  COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${ORBBEC_LIBS_DIR}
+    -DDESTINATION_DIR=${ORBBEC_DEVEL_LIB_DIR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_hardened_sdk.cmake
+  COMMENT "Copying hardened Orbbec SDK libraries into the catkin devel space"
+  VERBATIM)
+
+function(harden_orbbec_target TARGET_NAME TARGET_RPATH)
+  # BUILD_WITH_INSTALL_RPATH suppresses CMake's absolute build-tree RPATH.
+  # The same relative layout is valid in isolated devel and install spaces.
+  set_target_properties(${TARGET_NAME} PROPERTIES
+    BUILD_WITH_INSTALL_RPATH TRUE
+    INSTALL_RPATH "${TARGET_RPATH}")
+  add_dependencies(${TARGET_NAME} orbbec_hardened_sdk_copy)
+  add_custom_command(TARGET ${TARGET_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E env
+      PATCHELF=${ORBBEC_PATCHELF_EXECUTABLE}
+      ${ORBBEC_BASH_EXECUTABLE} ${ORBBEC_RPATH_HARDENER}
+      $<TARGET_FILE:${TARGET_NAME}>
+    COMMENT "Verifying ${TARGET_NAME} has a relocatable, non-empty RPATH"
+    VERBATIM)
+endfunction()
+
 
 # Add libraries
 add_library(${PROJECT_NAME} ${SOURCE_FILES})
 target_link_libraries(${PROJECT_NAME} PRIVATE ${COMMON_LINK_LIBRARIES})
 target_include_directories(${PROJECT_NAME} PUBLIC ${COMMON_INCLUDE_DIRS})
-target_compile_definitions(${PROJECT_NAME} PRIVATE ${ORBBEC_BACKWARD_DEFINITIONS})
+harden_orbbec_target(${PROJECT_NAME} "$ORIGIN;/opt/ros/noetic/lib")
 
 add_library(${PROJECT_NAME}_nodelet ${SOURCE_FILES} src/ros_nodelet.cpp)
 target_link_libraries(${PROJECT_NAME}_nodelet ${COMMON_LINK_LIBRARIES})
 target_include_directories(${PROJECT_NAME}_nodelet PUBLIC ${COMMON_INCLUDE_DIRS})
-target_compile_definitions(${PROJECT_NAME}_nodelet PRIVATE ${ORBBEC_BACKWARD_DEFINITIONS})
+harden_orbbec_target(${PROJECT_NAME}_nodelet "$ORIGIN;/opt/ros/noetic/lib")
 
 
 # Add dependencies
@@ -258,7 +325,7 @@ macro(add_orbbec_executable TARGET SOURCES)
   add_executable(${TARGET} ${SOURCES})
   target_link_libraries(${TARGET} ${COMMON_LINK_LIBRARIES} ${PROJECT_NAME})
   target_include_directories(${TARGET} PUBLIC ${COMMON_INCLUDE_DIRS})
-  target_compile_definitions(${TARGET} PRIVATE ${ORBBEC_BACKWARD_DEFINITIONS})
+  harden_orbbec_target(${TARGET} "$ORIGIN/..;/opt/ros/noetic/lib")
 endmacro()
 
 # Add nodes

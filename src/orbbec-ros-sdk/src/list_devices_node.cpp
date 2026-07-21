@@ -14,6 +14,7 @@
  * limitations under the License.
  *******************************************************************************/
 #include <ros/ros.h>
+#include <orbbec_camera/logging.h>
 #include <orbbec_camera/types.h>
 #include <orbbec_camera/utils.h>
 #include <string>
@@ -40,8 +41,11 @@ std::string parseUsbPort(const std::string &line) {
 }
 int main() {
   try {
+    // Logger configuration must precede Context construction: Context creation
+    // itself emits logs and otherwise creates ./Log in its working directory.
+    orbbec_camera::disableOrbbecSdkFileLogging();
+    ob::Context::setLoggerToConsole(OBLogSeverity::OB_LOG_SEVERITY_OFF);
     auto context = std::make_shared<ob::Context>();
-    context->setLoggerSeverity(OBLogSeverity::OB_LOG_SEVERITY_OFF);
     auto list = context->queryDeviceList();
     for (size_t i = 0; i < list->deviceCount(); i++) {
       auto device = list->getDevice(i);

@@ -4,7 +4,6 @@
 import argparse
 import glob
 import os
-import shutil
 
 from coverage_planner.map_io import (
     compute_occupancy_grid_md5,
@@ -13,8 +12,18 @@ from coverage_planner.map_io import (
 )
 from coverage_planner.map_asset_import import map_id_from_md5, register_imported_map_asset
 from coverage_planner.map_asset_import import normalize_import_verification_mode
+from coverage_planner.map_path_security import (
+    canonical_directory_root,
+    copy_regular_file_exclusive,
+    ensure_secure_parent_directory,
+    map_asset_target_paths,
+    validate_existing_regular_file,
+    validate_map_name,
+)
 from coverage_planner.ops_store.store import OperationsStore
 from coverage_planner.plan_store.store import PlanStore
+
+
 def _find_existing_asset(store: PlanStore, map_name: str, map_md5: str):
     for asset in store.list_map_assets_by_name(map_name=map_name):
         if str(asset.get("map_md5") or "").strip() == str(map_md5 or "").strip():
@@ -44,7 +53,7 @@ def main():
     if bool(args.set_active or args.set_active_if_missing) and verification_mode != "offline_verified":
         raise SystemExit("--set-active and --set-active-if-missing require --verification-mode=offline_verified")
 
-    os.makedirs(os.path.expanduser(args.maps_root), exist_ok=True)
+    maps_root = canonical_directory_root(args.maps_root, label="maps_root")
     store = PlanStore(args.plan_db_path)
     _ = OperationsStore(args.ops_db_path)
 
@@ -56,9 +65,17 @@ def main():
 
     yaml_files = sorted(glob.glob(os.path.expanduser(args.src_glob)))
     for yaml_path in yaml_files:
-        map_name = os.path.splitext(os.path.basename(yaml_path))[0]
+        yaml_path = os.path.abspath(os.path.expanduser(str(yaml_path or "").strip()))
+        source_root = canonical_directory_root(os.path.dirname(yaml_path), label="map import source root")
+        yaml_path = validate_existing_regular_file(
+            source_root,
+            yaml_path,
+            suffix=".yaml",
+            label="map import yaml",
+        )
+        map_name = validate_map_name(os.path.splitext(os.path.basename(yaml_path))[0])
         seen_map_names.add(map_name)
-        occ = yaml_pgm_to_occupancy(yaml_path)
+        occ = yaml_pgm_to_occupancy(yaml_path, allowed_root=source_root)
         map_md5 = ""
         map_id = ""
         if verification_mode == "offline_verified":
@@ -70,20 +87,45 @@ def main():
         asset = _find_existing_asset(store, map_name=map_name, map_md5=map_md5) if map_md5 else None
         if asset is None:
             revision_id = store.generate_map_revision_id(map_name)
-            out_root = os.path.join(
-                os.path.expanduser(args.maps_root),
-                "revisions",
-                map_name,
-                revision_id,
-            )
-            os.makedirs(out_root, exist_ok=True)
-            pgm_path, new_yaml_path = write_occupancy_to_yaml_pgm(occ, out_root, base_name=map_name)
-
+            target_paths = map_asset_target_paths(maps_root, map_name, revision_id)
+            for target_path in target_paths.values():
+                if os.path.lexists(target_path):
+                    raise RuntimeError("target map asset already exists: %s" % target_path)
+            ensure_secure_parent_directory(maps_root, target_paths["pbstream_path"])
+            out_root = os.path.dirname(target_paths["pbstream_path"])
             pbstream_src = os.path.splitext(yaml_path)[0] + ".pbstream"
             pbstream_dst = ""
-            if os.path.exists(pbstream_src):
-                pbstream_dst = os.path.join(out_root, map_name + ".pbstream")
-                shutil.copy2(pbstream_src, pbstream_dst)
+            pgm_path = ""
+            new_yaml_path = ""
+            try:
+                pgm_path, new_yaml_path = write_occupancy_to_yaml_pgm(
+                    occ,
+                    out_root,
+                    base_name=map_name,
+                    allowed_root=maps_root,
+                )
+                if os.path.lexists(pbstream_src):
+                    pbstream_src = validate_existing_regular_file(
+                        source_root,
+                        pbstream_src,
+                        suffix=".pbstream",
+                        label="map import pbstream",
+                    )
+                    pbstream_dst = copy_regular_file_exclusive(
+                        source_root,
+                        pbstream_src,
+                        maps_root,
+                        target_paths["pbstream_path"],
+                        suffix=".pbstream",
+                    )
+            except Exception:
+                for created_path in (pbstream_dst, new_yaml_path, pgm_path):
+                    if created_path and os.path.lexists(created_path):
+                        try:
+                            os.unlink(created_path)
+                        except OSError:
+                            pass
+                raise
 
             asset, _snapshot_md5 = register_imported_map_asset(
                 store,
@@ -137,7 +179,7 @@ def main():
 
     print(
         "summary imported=%d reused=%d backfilled=%d maps_root=%s yaml_files=%d"
-        % (imported, skipped, backfilled, os.path.expanduser(args.maps_root), len(yaml_files))
+        % (imported, skipped, backfilled, maps_root, len(yaml_files))
     )
 
 

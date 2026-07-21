@@ -23,7 +23,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
@@ -31,7 +30,6 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <utility>
 
@@ -274,106 +272,6 @@ namespace cartographer
             CHECK(data_.submap_data.at(front_submap_id).submap ==
                   insertion_submaps.front());
             return {front_submap_id, last_submap_id};
-        }
-        /**
-         * @brief 向节点列表中添加一个新的节点, 并保存新生成的submap
-         *
-         * @param[in] constant_data 节点数据的指针
-         * @param[in] trajectory_id 轨迹id
-         * @param[in] insertion_submaps 子地图指针的vector
-         * @param[in] optimized_pose 当前节点在global坐标系下的坐标
-         * @return NodeId 返回新生成的节点id
-         */
-        std::ofstream node_out;
-        // 将兴趣点数据存入文件中
-        void append_interest_points(const std::string &id,
-                                    const std::vector<InterestPoint *> &kpts)
-        {
-            if (!node_out.is_open())
-            {
-                node_out.open("/home/lb/cartographer_web/nodes_dense.csv",
-                              std::ios::out | std::ios::trunc);
-                if (!node_out.is_open())
-                {
-                    return;
-                }
-            }
-
-            std::stringstream ss;
-            ss << id << ",";
-            for (auto i = kpts.cbegin(); i != kpts.cend(); i++)
-            {
-                auto pos = (*i)->getPosition();
-                ss << pos.x << "," << pos.y << "," << pos.theta << ",";
-            }
-
-            node_out << ss.str() << std::endl;
-            node_out.flush();
-        }
-        // 兴趣点集对应的pose
-        void append_node_data_xya(const std::string &id, double x, double y,
-                                  double theta)
-        {
-            if (!node_out.is_open())
-            {
-                node_out.open("/home/lb/cartographer_web/nodes_dense.csv",
-                              std::ios::out | std::ios::trunc);
-                if (!node_out.is_open())
-                {
-                    return;
-                }
-
-                std::stringstream ss;
-                ss << id << ",";
-                ss << std::to_string(x) << ",";
-                ss << std::to_string(y) << ",";
-                ss << std::to_string(theta) << ",";
-
-                node_out << ss.str() << std::endl;
-                node_out.flush();
-            }
-        }
-
-        void append_node_data_pose(const std::string &id,
-                                   const transform::Rigid3d &pose,
-                                   const sensor::PointCloud &point_cloud)
-        {
-            if (!node_out.is_open())
-            {
-                node_out.open("/home/lb/cartographer_web/nodes_dense.csv",
-                              std::ios::out | std::ios::trunc);
-                if (!node_out.is_open())
-                {
-                    return;
-                }
-            }
-            double local_x = pose.translation().x();
-            double local_y = pose.translation().y();
-            double local_z = pose.translation().z();
-            double local_qw = pose.rotation().w();
-            double local_qx = pose.rotation().x();
-            double local_qy = pose.rotation().y();
-            double local_qz = pose.rotation().z();
-
-            std::stringstream ss;
-            ss << id << ",";
-            ss << std::to_string(local_x) << ",";
-            ss << std::to_string(local_y) << ",";
-            ss << std::to_string(local_z) << ",";
-            ss << std::to_string(local_qw) << ",";
-            ss << std::to_string(local_qx) << ",";
-            ss << std::to_string(local_qy) << ",";
-            ss << std::to_string(local_qz) << ",";
-
-            for (auto i = point_cloud.begin(); i != point_cloud.end(); i++)
-            {
-                auto x = (*i).position.x();
-                auto y = (*i).position.y();
-                auto z = (*i).position.z();
-                ss << x << "," << y << "," << z << ",";
-            }
-            node_out << ss.str() << std::endl;
-            node_out.flush();
         }
         // 处理兴趣点检测的进程
         void PoseGraph2D::process_queue_for_detect()

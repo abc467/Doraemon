@@ -16,6 +16,15 @@ import subprocess
 import uuid
 from typing import Any, Callable, Dict, Optional
 
+from coverage_planner.map_path_security import (
+    MapPathSecurityError,
+    canonical_directory_root,
+    ensure_secure_parent_directory,
+    validate_existing_regular_file,
+    validate_map_name,
+    validate_revision_id,
+)
+
 
 class FlirtPbstreamMigrationError(RuntimeError):
     def __init__(self, code: str, message: str):
@@ -221,6 +230,10 @@ class FlirtPbstreamRevisionMigrator:
             raise FlirtPbstreamMigrationError(
                 "source_revision_required", "source_revision_id is required"
             )
+        try:
+            source_revision_id = validate_revision_id(source_revision_id)
+        except MapPathSecurityError as exc:
+            raise FlirtPbstreamMigrationError("source_revision_invalid", str(exc)) from exc
         source = self._store.resolve_map_revision(
             revision_id=source_revision_id
         ) or {}
@@ -228,18 +241,28 @@ class FlirtPbstreamRevisionMigrator:
             raise FlirtPbstreamMigrationError(
                 "source_revision_not_found", "source revision was not found"
             )
-        source_path = os.path.expanduser(
-            str(source.get("pbstream_path") or "").strip()
-        )
-        if not source_path or not os.path.isfile(source_path):
-            raise FlirtPbstreamMigrationError(
-                "source_pbstream_not_found", "source PBStream is not a regular file"
+        try:
+            backend = getattr(self._assets, "_backend", None)
+            maps_root = canonical_directory_root(
+                getattr(backend, "maps_root", ""),
+                label="maps_root",
             )
-
-        map_name = str(source.get("map_name") or "").strip()
+            source_path = validate_existing_regular_file(
+                maps_root,
+                os.path.expanduser(str(source.get("pbstream_path") or "").strip()),
+                suffix=".pbstream",
+                label="source pbstream",
+            )
+            map_name = validate_map_name(str(source.get("map_name") or ""))
+        except MapPathSecurityError as exc:
+            raise FlirtPbstreamMigrationError("source_pbstream_invalid", str(exc)) from exc
         target_revision_id = str(target_revision_id or "").strip()
         if not target_revision_id:
             target_revision_id = self._store.generate_map_revision_id(map_name)
+        try:
+            target_revision_id = validate_revision_id(target_revision_id)
+        except MapPathSecurityError as exc:
+            raise FlirtPbstreamMigrationError("target_revision_invalid", str(exc)) from exc
         if target_revision_id == source_revision_id:
             raise FlirtPbstreamMigrationError(
                 "target_revision_invalid", "target revision must differ from source"
@@ -308,9 +331,13 @@ class FlirtPbstreamRevisionMigrator:
         source_path = str(plan["source_pbstream_path"])
         target_path = str(plan["target_pbstream_path"])
         target_dir = os.path.dirname(target_path) or "."
-        os.makedirs(target_dir, exist_ok=True)
+        backend = getattr(self._assets, "_backend", None)
+        maps_root = canonical_directory_root(getattr(backend, "maps_root", ""), label="maps_root")
+        ensure_secure_parent_directory(maps_root, target_path)
         lock_path = target_path + ".migration.lock"
-        partial_path = target_path + ".partial." + uuid.uuid4().hex
+        # The write_state sink validator requires an explicit .pbstream
+        # extension even for private migration candidates.
+        partial_path = target_path + ".partial." + uuid.uuid4().hex + ".pbstream"
         lock_fd: Optional[int] = None
         published = False
         registered = False
@@ -436,4 +463,3 @@ class FlirtPbstreamRevisionMigrator:
                     os.unlink(path)
                 except OSError:
                     pass
-

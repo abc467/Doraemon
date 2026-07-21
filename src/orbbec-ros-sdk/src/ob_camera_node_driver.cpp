@@ -15,170 +15,59 @@
  *******************************************************************************/
 
 #include "orbbec_camera/ob_camera_node_driver.h"
+#include "orbbec_camera/logging.h"
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <semaphore.h>
 #include <sys/shm.h>
 #include <ros/package.h>
 #include <regex>
 #include <sys/mman.h>
-#include <iomanip>  // For std::put_time
-
-#include <boost/filesystem.hpp>
-
-#include <stdio.h>
-#include <sys/ioctl.h>
-#include <linux/usbdevice_fs.h>
 #include <iostream>
-#include <sstream>
 #include <string>
 
 namespace orbbec_camera {
-backward::SignalHandling sh;
+namespace {
 
-std::string g_camera_name = "camera";
-static std::string g_current_device_uid = "";
-const std::string GMSL_TYPE = "gmsl";
-const std::string MIPI_TYPE = "mipi";
-
-bool startsWith(const std::string &str, const std::string &prefix) { return str.find(prefix) == 0; }
-
-std::pair<std::string, std::string> getFirstAndLastField(const std::string &str, char delimiter) {
-  std::string firstField, lastField;
-  size_t start = 0, end = str.find(delimiter);
-  // Find the first field
-  if (end != std::string::npos) {
-    firstField = str.substr(start, end - start);
-    start = end + 1;
-    // Find the last field starting from after the first field
-    end = str.find_last_of(delimiter, str.size() - 1);
-    if (end != std::string::npos) {
-      lastField = str.substr(end + 1);
-    } else {
-      // If no more delimiters are found, the rest of the string is the last field
-      lastField = str.substr(start);
-    }
-  } else {
-    // If no delimiter is found, the whole string is both the first and last field
-    firstField = "";
-    lastField = str;
-  }
-  return {firstField, lastField};
+// Fatal signal handlers run in an undefined process state. Keep this path to
+// POSIX async-signal-safe operations only; systemd records the signal/exit and
+// restarts according to the unit policy. In particular, do not call ROS,
+// allocate, unwind, write files, or reset USB from here.
+void fatalSignalHandler(const int signum) {
+  static constexpr char kMessage[] =
+      "orbbec_camera: fatal signal received; exiting immediately\n";
+  const ssize_t ignored = ::write(STDERR_FILENO, kMessage, sizeof(kMessage) - 1);
+  (void)ignored;
+  _exit(128 + signum);
 }
 
-std::string get_device_bus_path() {
-  std::cout << "Original UID: " << g_current_device_uid << std::endl;
-  if (g_current_device_uid.empty()) {
-    std::cerr << "Error: current_device_uid is empty" << std::endl;
-    return "";
-  }
-  if (startsWith(g_current_device_uid, GMSL_TYPE) || startsWith(g_current_device_uid, MIPI_TYPE)) {
-    std::cout << "The string startswith 'gmsl/mipi'. GMSL/MIPI device skip usbdevfs_reset"
-              << std::endl;
-    return "";
-  }
-  std::pair<std::string, std::string> result = getFirstAndLastField(g_current_device_uid, '-');
-  std::string first_number = result.first;
-  std::string last_number = result.second;
-  if (first_number.empty() || last_number.empty()) {
-    std::cerr << "Error: Failed to extract numbers from device UID" << std::endl;
-    return "";
-  }
-  // Convert the number to a string and format it as a three-digit representation.
-  auto format_number = [](const std::string &number) {
-    std::ostringstream oss;
-    oss << std::setw(3) << std::setfill('0') << number;
-    return oss.str();
-  };
-  std::string first_number_str = format_number(first_number);
-  std::string last_number_str = format_number(last_number);
-  std::string device_bus_path = "/dev/bus/usb/" + first_number_str + "/" + last_number_str;
-  std::cout << "First Number: " << first_number_str << " Last Number: " << last_number_str
-            << std::endl;
-  std::cout << "device_bus_path: " << device_bus_path << std::endl;
-  return device_bus_path;
+void installFatalSignalHandlers() {
+  struct sigaction action {};
+  action.sa_handler = fatalSignalHandler;
+  sigemptyset(&action.sa_mask);
+  action.sa_flags = SA_RESETHAND;
+  (void)sigaction(SIGSEGV, &action, nullptr);
+  (void)sigaction(SIGABRT, &action, nullptr);
+  (void)sigaction(SIGBUS, &action, nullptr);
+  (void)sigaction(SIGFPE, &action, nullptr);
+  (void)sigaction(SIGILL, &action, nullptr);
 }
 
-int usbdevfs_reset() {
-  // std::string device_bus_path = "/dev/bus/usb/002/007";
-  std::string device_bus_path = get_device_bus_path();
-  if (device_bus_path.empty()) {
-    std::cerr << "Error: device_bus_path is empty" << std::endl;
-    return -1;
-  }
-  const char *filename = device_bus_path.c_str();
-  std::cout << "usbdevfs_reset device bus: " << device_bus_path << std::endl;
-  int fd = open(filename, O_WRONLY);
-  if (fd < 0) {
-    std::cerr << "Error opening device " << filename << ": " << strerror(errno) << std::endl;
-    return -1;
-  }
-  std::cout << "Usbdevfs Resetting USB device " << filename << std::endl;
-  if (ioctl(fd, USBDEVFS_RESET, 0) < 0) {
-    std::cerr << "Error in ioctl: " << strerror(errno) << std::endl;
-    close(fd);
-    return -1;
-  }
-  std::cout << "Usbdevfs Reset successful" << std::endl;
-  close(fd);
-  return 0;
-}
-
-void signalHandler(int signum) {
-  std::cout << "Received signal: " << signum << std::endl;
-  if (signum == SIGINT || signum == SIGTERM) {
-    ros::shutdown();
-  } else {
-    std::string log_dir = "Log/";
-
-    // Get current time and format it.format as "2024_05_20_12_34_56"
-    std::time_t now = std::time(nullptr);
-    std::tm *local_time = std::localtime(&now);
-    std::ostringstream time_stream;
-    time_stream << std::put_time(local_time, "%Y_%m_%d_%H_%M_%S");
-    std::string log_file_name = g_camera_name + "_crash_stack_trace_" + time_stream.str() + ".log";
-    std::string log_file_path = log_dir + log_file_name;
-
-    // Ensure log directory exists
-    if (!boost::filesystem::exists(log_dir)) {
-      if (!boost::filesystem::create_directories(log_dir)) {
-        std::cerr << "Failed to create log directory: " << log_dir << std::endl;
-        exit(signum);
-      }
-    }
-    auto abs_path = boost::filesystem::absolute(log_dir);
-    std::cout << "Log crash stack trace to " << abs_path.string() << "/" << log_file_name
-              << std::endl;
-
-    // Write stack trace to log file.
-    {
-      std::ofstream log_file(log_file_path, std::ios::app);
-      if (log_file.is_open()) {
-        log_file << "Received signal: " << signum << std::endl;
-        backward::StackTrace st;
-        st.load_here(32);  // Capture stack
-        backward::Printer p;
-        p.print(st, log_file);  // Print stack to log file
-      } else {
-        std::cerr << "Failed to open log file: " << log_file_path << std::endl;
-      }
-      log_file.close();
-    }
-
-    // usbdevfs reset before exit
-    std::cout << "start usbdevfs reset " << std::endl;
-    usbdevfs_reset();
-    std::cout << "start usbdevfs reset finish" << std::endl;
-
-    std::cout << "save crash stack trace log to file finish and exit program." << std::endl;
-    exit(signum);  // Exit program
-  }
-}
+}  // namespace
 
 OBCameraNodeDriver::OBCameraNodeDriver(ros::NodeHandle &nh, ros::NodeHandle &nh_private)
     : nh_(nh),
       nh_private_(nh_private),
-      config_path_(ros::package::getPath("orbbec_camera") + "/config/OrbbecSDKConfig_v1.0.xml"),
+      config_path_([this]() {
+        installFatalSignalHandlers();
+        // Configure the closed SDK before its first Context is constructed. The
+        // XML carries the same path, while this application-level setting has
+        // higher priority and prevents an early fallback to ./Log.
+        disableOrbbecSdkFileLogging();
+        return ros::package::getPath("orbbec_camera") +
+               "/config/OrbbecSDKConfig_v1.0.xml";
+      }()),
       ctx_(std::make_shared<ob::Context>(config_path_.c_str())) {
   init();
 }
@@ -196,19 +85,7 @@ OBCameraNodeDriver::~OBCameraNodeDriver() {
 
 void OBCameraNodeDriver::init() {
   is_alive_ = true;
-  struct sigaction sa;
-  sa.sa_handler = signalHandler;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_RESTART;
-  sigaction(SIGSEGV, &sa, nullptr);
-  sigaction(SIGABRT, &sa, nullptr);
-  sigaction(SIGFPE, &sa, nullptr);
-  sigaction(SIGILL, &sa, nullptr);
-  // Leave normal shutdown signals to roscpp. Calling ros::shutdown() from this handler can run
-  // inside a ROS helper thread and make roscpp try to join that same thread during teardown.
-
   auto log_level = nh_private_.param<std::string>("log_level", "info");
-  g_camera_name = nh_private_.param<std::string>("camera_name", "camera");
   auto ob_log_level = obLogSeverityFromString(log_level);
   ctx_->setLoggerToConsole(ob_log_level);
 
@@ -376,8 +253,6 @@ void OBCameraNodeDriver::initializeDevice(const std::shared_ptr<ob::Device> &dev
   device_info_ = device_->getDeviceInfo();
   device_uid_ = device_info_->uid();
   ROS_INFO_STREAM("device uid: " << device_uid_);
-  g_current_device_uid = device_info_->uid();
-  ROS_INFO_STREAM("g_current_device_uid: " << g_current_device_uid);
 
   CHECK_NOTNULL(device_.get());
   if (ob_camera_node_) {

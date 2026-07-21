@@ -435,7 +435,8 @@ class SlamRuntimeAdapterTest(unittest.TestCase):
             info=SimpleNamespace(resolution=0.05),
         )
 
-        def _write_occupancy(_occ, out_dir, base_name):
+        def _write_occupancy(_occ, out_dir, base_name, allowed_root=""):
+            self.assertEqual(allowed_root, self.backend.maps_root)
             yaml_path = os.path.join(out_dir, base_name + ".yaml")
             pgm_path = os.path.join(out_dir, base_name + ".pgm")
             with open(yaml_path, "w", encoding="utf-8") as fh:
@@ -531,7 +532,8 @@ class SlamRuntimeAdapterTest(unittest.TestCase):
             info=SimpleNamespace(resolution=0.05),
         )
 
-        def _write_occupancy(_occ, maps_root, base_name):
+        def _write_occupancy(_occ, maps_root, base_name, allowed_root=""):
+            self.assertEqual(allowed_root, self.backend.maps_root)
             yaml_path = os.path.join(maps_root, base_name + ".yaml")
             pgm_path = os.path.join(maps_root, base_name + ".pgm")
             with open(yaml_path, "w", encoding="utf-8") as fh:
@@ -607,7 +609,8 @@ class SlamRuntimeAdapterTest(unittest.TestCase):
             info=SimpleNamespace(resolution=0.05),
         )
 
-        def _write_occupancy(_occ, maps_root, base_name):
+        def _write_occupancy(_occ, maps_root, base_name, allowed_root=""):
+            self.assertEqual(allowed_root, self.backend.maps_root)
             yaml_path = os.path.join(maps_root, base_name + ".yaml")
             pgm_path = os.path.join(maps_root, base_name + ".pgm")
             with open(yaml_path, "w", encoding="utf-8") as fh:
@@ -661,7 +664,8 @@ class SlamRuntimeAdapterTest(unittest.TestCase):
             info=SimpleNamespace(resolution=0.05),
         )
 
-        def _write_occupancy(_occ, maps_root, base_name):
+        def _write_occupancy(_occ, maps_root, base_name, allowed_root=""):
+            self.assertEqual(allowed_root, self.backend.maps_root)
             yaml_path = os.path.join(maps_root, base_name + ".yaml")
             pgm_path = os.path.join(maps_root, base_name + ".pgm")
             with open(yaml_path, "w", encoding="utf-8") as fh:

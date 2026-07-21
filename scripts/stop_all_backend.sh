@@ -38,9 +38,9 @@ source "${SCRIPT_DIR}/runtime_common.sh"
 main() {
   runtime_common_init
   runtime_graceful_stop_runtime
-  runtime_kill_runtime_tmux_sessions
   runtime_kill_runtime_nodes
   runtime_kill_runtime_processes
+  runtime_kill_runtime_tmux_sessions
   runtime_stop_frontend_services
   runtime_stop_ros_master_if_idle
 

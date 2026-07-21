@@ -20,10 +20,12 @@ Security patch:
 - Upstream subject: `Fix IP binding of rosbridge_server (#1047)`
 - Modified file: `scripts/rosbridge_websocket.py`
 - Exact hunk: pass `interface=factory.host` to `listenWS`.
+- Commercial hardening: both the launch argument and Python empty-value
+  fallback default to `127.0.0.1`; no wildcard-listen default remains.
 - Baseline script SHA256:
   `c3f3d27b1f32f0fe80aaf427178b384c2ad361857c9c6f8a45d0fdbdcd6f8275`
 - Patched script SHA256:
-  `5630bbeb5864d0b1fa16a40250fbdd81c90e2a2ebc040b9dae429d21388f971a`
+  `f5b31634e8a759ee54db9b36bf1a64b3ee96ab4bfbf5f1d8e8ade21c5c707021`
 
 The complete upstream `rosbridge_server` package was copied with executable
 bits and script symlinks preserved. No upstream Git directory and no other
@@ -31,7 +33,7 @@ rosbridge_suite packages are included. Runtime dependencies continue to come
 from the pinned ROS Noetic/Ubuntu packages. The package version remains
 `0.11.17`; the Doraemon release commit and tag identify this patched build.
 
-CR-001 build baseline package versions:
+Validated Ubuntu 20.04 build-baseline package versions:
 
 - `python3-autobahn 17.10.1+dfsg1-6`
 - `python3-twisted 18.9.0-11ubuntu0.20.04.5`

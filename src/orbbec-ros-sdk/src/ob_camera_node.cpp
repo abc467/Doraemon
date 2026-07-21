@@ -15,6 +15,7 @@
  *******************************************************************************/
 
 #include "orbbec_camera/ob_camera_node.h"
+#include "orbbec_camera/storage.h"
 #include "libobsensor/hpp/Utils.hpp"
 #if defined(USE_RK_HW_DECODER)
 #include "orbbec_camera/rk_mpp_decoder.h"
@@ -683,11 +684,18 @@ void OBCameraNode::publishDepthPointCloud(const std::shared_ptr<ob::FrameSet>& f
     auto now = std::time(nullptr);
     std::stringstream ss;
     ss << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S");
-    auto current_path = boost::filesystem::current_path().string();
-    std::string filename = current_path + "/point_cloud/points_" + ss.str() + ".ply";
-    if (!boost::filesystem::exists(current_path + "/point_cloud")) {
-      boost::filesystem::create_directory(current_path + "/point_cloud");
+    if (!isSafeOrbbecCaptureComponent(camera_name_)) {
+      ROS_ERROR("Failed to prepare point cloud capture path: unsafe camera_name");
+      return;
     }
+    const std::string capture_name = camera_name_ + "_points_" + ss.str() + ".ply";
+    boost::filesystem::path capture_path;
+    std::string storage_error;
+    if (!makeOrbbecCapturePath("point_cloud", capture_name, capture_path, storage_error)) {
+      ROS_ERROR_STREAM("Failed to prepare point cloud capture path: " << storage_error);
+      return;
+    }
+    const std::string filename = capture_path.string();
     ROS_INFO_STREAM("Saving point cloud to " << filename);
     try {
       saveDepthPointCloudMsgToPly(cloud_msg_, filename);
@@ -807,11 +815,18 @@ void OBCameraNode::publishColoredPointCloud(const std::shared_ptr<ob::FrameSet>&
     auto now = std::time(nullptr);
     std::stringstream ss;
     ss << std::put_time(std::localtime(&now), "%Y%m%d_%H%M%S");
-    auto current_path = boost::filesystem::current_path().string();
-    std::string filename = current_path + "/point_cloud/colored_points_" + ss.str() + ".ply";
-    if (!boost::filesystem::exists(current_path + "/point_cloud")) {
-      boost::filesystem::create_directory(current_path + "/point_cloud");
+    if (!isSafeOrbbecCaptureComponent(camera_name_)) {
+      ROS_ERROR("Failed to prepare colored point cloud capture path: unsafe camera_name");
+      return;
     }
+    const std::string capture_name = camera_name_ + "_colored_points_" + ss.str() + ".ply";
+    boost::filesystem::path capture_path;
+    std::string storage_error;
+    if (!makeOrbbecCapturePath("point_cloud", capture_name, capture_path, storage_error)) {
+      ROS_ERROR_STREAM("Failed to prepare colored point cloud capture path: " << storage_error);
+      return;
+    }
+    const std::string filename = capture_path.string();
     ROS_INFO_STREAM("Saving point cloud to " << filename);
     try {
       saveRGBPointCloudMsgToPly(cloud_msg_, filename);
@@ -1441,17 +1456,27 @@ void OBCameraNode::saveImageToFile(const stream_index_pair& stream_index, const 
     auto now = time(nullptr);
     std::stringstream ss;
     ss << std::put_time(localtime(&now), "%Y%m%d_%H%M%S");
-    auto current_path = boost::filesystem::current_path().string();
     auto fps = fps_[stream_index];
     int index = save_images_count_[stream_index];
     std::string file_suffix = stream_index == COLOR ? ".png" : ".raw";
-    std::string filename = current_path + "/image/" + stream_name_[stream_index] + "_" +
-                           std::to_string(image_msg->width) + "x" +
-                           std::to_string(image_msg->height) + "_" + std::to_string(fps) + "hz_" +
-                           ss.str() + "_" + std::to_string(index) + file_suffix;
-    if (!boost::filesystem::exists(current_path + "/image")) {
-      boost::filesystem::create_directory(current_path + "/image");
+    if (!isSafeOrbbecCaptureComponent(camera_name_)) {
+      save_images_[stream_index] = false;
+      ROS_ERROR("Failed to prepare image capture path: unsafe camera_name");
+      return;
     }
+    const std::string capture_name = camera_name_ + "_" + stream_name_[stream_index] + "_" +
+                                     std::to_string(image_msg->width) + "x" +
+                                     std::to_string(image_msg->height) + "_" +
+                                     std::to_string(fps) + "hz_" + ss.str() + "_" +
+                                     std::to_string(index) + file_suffix;
+    boost::filesystem::path capture_path;
+    std::string storage_error;
+    if (!makeOrbbecCapturePath("image", capture_name, capture_path, storage_error)) {
+      save_images_[stream_index] = false;
+      ROS_ERROR_STREAM("Failed to prepare image capture path: " << storage_error);
+      return;
+    }
+    const std::string filename = capture_path.string();
     ROS_INFO_STREAM("Saving image to " << filename);
     if (stream_index.first == OB_STREAM_COLOR) {
       auto image_to_save =
