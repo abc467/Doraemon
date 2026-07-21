@@ -32,6 +32,17 @@ set -a
 # shellcheck disable=SC1090
 source "${DEPS_ENV}"
 set +a
+
+# Cartographer must use Ubuntu's Protobuf 3.6.1. The complete dependency
+# environment also contains OR-Tools/Fields2Cover CMake prefixes, whose bundled
+# Protobuf 25.3 is ABI-incompatible with this workspace. Keep those products
+# available through their dedicated variables/PYTHONPATH, but expose only the
+# two prefixes required by this catkin build.
+: "${ABSEIL_ROOT:?ABSEIL_ROOT is missing from ${DEPS_ENV}}"
+: "${FLIRT_ROOT:?FLIRT_ROOT is missing from ${DEPS_ENV}}"
+: "${absl_DIR:?absl_DIR is missing from ${DEPS_ENV}}"
+export CMAKE_PREFIX_PATH="${ABSEIL_ROOT}:${FLIRT_ROOT}"
+
 set +u
 # shellcheck disable=SC1091
 source /opt/ros/noetic/setup.bash
@@ -56,9 +67,17 @@ catkin build --no-status -j"${JOBS}"
 set +u
 source "${REPO_ROOT}/devel/setup.bash"
 set -u
+python3 "${REPO_ROOT}/scripts/verify_rosbridge_loopback_patch.py"
 python3 -c "import fields2cover; print('Fields2Cover runtime:', fields2cover.__file__)"
 rospack find coverage_planner
 rospack find coverage_task_manager
 rospack find robot_hw_bridge
+
+ROSBRIDGE_OVERLAY="$(rospack find rosbridge_server)"
+if [[ "$(realpath "${ROSBRIDGE_OVERLAY}")" != "$(realpath "${REPO_ROOT}/src/rosbridge_server")" ]]; then
+  echo "[ERROR] rosbridge_server did not resolve to the release overlay: ${ROSBRIDGE_OVERLAY}" >&2
+  exit 1
+fi
+echo "rosbridge_server overlay: ${ROSBRIDGE_OVERLAY}"
 
 echo "[OK] Doraemon workspace build completed"

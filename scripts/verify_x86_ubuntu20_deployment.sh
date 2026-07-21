@@ -55,10 +55,42 @@ if [[ -f /etc/doraemon/deps.env ]]; then
     fail "Fields2Cover Python import"
 fi
 
-if [[ -f "${REPO_ROOT}/install/setup.bash" || -f "${REPO_ROOT}/devel/setup.bash" ]]; then
-  ok "Doraemon workspace setup"
+WORKSPACE_SETUP=""
+if [[ -f "${REPO_ROOT}/install/setup.bash" ]]; then
+  WORKSPACE_SETUP="${REPO_ROOT}/install/setup.bash"
+elif [[ -f "${REPO_ROOT}/devel/setup.bash" ]]; then
+  WORKSPACE_SETUP="${REPO_ROOT}/devel/setup.bash"
+fi
+
+if [[ -n "${WORKSPACE_SETUP}" ]]; then
+  ok "Doraemon workspace setup ${WORKSPACE_SETUP}"
 else
   fail "Doraemon workspace is not built"
+fi
+
+if python3 "${REPO_ROOT}/scripts/verify_rosbridge_loopback_patch.py"; then
+  ok "rosbridge loopback source overlay"
+else
+  fail "rosbridge loopback source overlay"
+fi
+
+if [[ -n "${WORKSPACE_SETUP}" ]]; then
+  set +u
+  # shellcheck disable=SC1091
+  source /opt/ros/noetic/setup.bash
+  # shellcheck disable=SC1090
+  source "${WORKSPACE_SETUP}"
+  set -u
+
+  if ROSBRIDGE_OVERLAY="$(rospack find rosbridge_server 2>/dev/null)"; then
+    if [[ "$(realpath "${ROSBRIDGE_OVERLAY}")" == "$(realpath "${REPO_ROOT}/src/rosbridge_server")" ]]; then
+      ok "rosbridge_server resolves to release overlay ${ROSBRIDGE_OVERLAY}"
+    else
+      fail "rosbridge_server resolves outside release overlay: ${ROSBRIDGE_OVERLAY}"
+    fi
+  else
+    fail "rosbridge_server cannot be resolved"
+  fi
 fi
 
 for device in /dev/imu /dev/wheel_odom; do

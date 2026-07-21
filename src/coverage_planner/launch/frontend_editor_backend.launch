@@ -8,7 +8,7 @@
   <arg name="map_asset_app_service_name" default="/clean_robot_server/app/map_server"/>
 
   <arg name="start_rosbridge" default="true"/>
-  <arg name="rosbridge_address" default="0.0.0.0"/>
+  <arg name="rosbridge_address" default="127.0.0.1"/>
   <arg name="rosbridge_port" default="9090"/>
 
   <arg name="start_map_asset_service" default="true"/>
