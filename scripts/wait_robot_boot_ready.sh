@@ -178,41 +178,6 @@ orbbec_workspace_setup() {
   return 1
 }
 
-collect_orbbec_sdk_pairs() {
-  local binary=""
-  local workspace_setup=""
-  local output=""
-  local line=""
-  local serial=""
-  local port=""
-  binary="$(orbbec_list_devices_binary)" || return 1
-  workspace_setup="$(orbbec_workspace_setup)" || return 1
-
-  set +u
-  # shellcheck disable=SC1091
-  source /opt/ros/noetic/setup.bash
-  # shellcheck disable=SC1090
-  source "${workspace_setup}"
-  set -u
-  output="$(timeout --signal=TERM --kill-after=2s 15s "${binary}" 2>&1)" || return 1
-
-  while IFS= read -r line; do
-    if [[ "${line}" == *"serial: "* ]]; then
-      serial="${line##*serial: }"
-      serial="${serial%%[[:space:]]*}"
-      continue
-    fi
-    if [[ "${line}" == *"port id : "* ]]; then
-      port="${line##*port id : }"
-      port="${port%%[[:space:]]*}"
-      if [[ -n "${serial}" && -n "${port}" ]]; then
-        printf '%s|%s\n' "${serial}" "${port}"
-      fi
-      serial=""
-    fi
-  done <<<"${output}"
-}
-
 has_workspace_setup() {
   [[ -f "${REPO_ROOT}/install/setup.bash" || -f "${REPO_ROOT}/devel/setup.bash" ]]
 }
@@ -363,6 +328,11 @@ validate_orbbec_usb_node_permissions() {
   log "[OK] ${node_count} Orbbec USB device nodes are root:video 0660"
 }
 
+if [[ ! "${TIMEOUT_SEC}" =~ ^[1-9][0-9]*$ ]] || (( TIMEOUT_SEC > 600 )); then
+  log "[ERROR] DORAEMON_BOOT_WAIT_TIMEOUT must be an integer from 1 through 600"
+  exit 1
+fi
+
 START_TS="$(date +%s)"
 
 log "waiting for Doraemon robot boot dependencies"
@@ -454,19 +424,33 @@ wait_for "Orbbec left USB3 topology ${ORBBEC_CAMERA1_USB_PORT}" has_usb_topology
 wait_for "Orbbec right USB3 topology ${ORBBEC_CAMERA2_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA2_USB_PORT}"
 wait_for "Orbbec front USB3 topology ${ORBBEC_CAMERA3_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA3_USB_PORT}"
 
-sdk_pairs="$(collect_orbbec_sdk_pairs)" || {
-  log "[ERROR] unable to enumerate Orbbec serial/topology pairs with the built SDK"
+orbbec_binary="$(orbbec_list_devices_binary)" || {
+  log "[ERROR] fixed Orbbec SDK enumerator is unavailable in this release"
   exit 1
 }
-for expected_pair in \
-  "${ORBBEC_CAMERA1_SERIAL_NUMBER}|${ORBBEC_CAMERA1_USB_PORT}" \
-  "${ORBBEC_CAMERA2_SERIAL_NUMBER}|${ORBBEC_CAMERA2_USB_PORT}" \
-  "${ORBBEC_CAMERA3_SERIAL_NUMBER}|${ORBBEC_CAMERA3_USB_PORT}"; do
-  if ! grep -Fxq -- "${expected_pair}" <<<"${sdk_pairs}"; then
-    log "[ERROR] configured Orbbec serial/topology pair not reported by SDK: ${expected_pair}"
-    exit 1
-  fi
-done
-log "[OK] Orbbec SDK serial/topology pairs verified"
+workspace_setup="$(orbbec_workspace_setup)" || {
+  log "[ERROR] workspace setup disappeared before Orbbec SDK enumeration"
+  exit 1
+}
+set +u
+# shellcheck disable=SC1091
+source /opt/ros/noetic/setup.bash
+# shellcheck disable=SC1090
+source "${workspace_setup}"
+set -u
+orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))
+if (( orbbec_remaining_sec <= 0 )); then
+  log "[ERROR] global boot wait budget was exhausted before Orbbec SDK enumeration"
+  exit 1
+fi
+if ! python3 "${SCRIPT_DIR}/verify_orbbec_sdk_pairs.py" \
+    --binary "${orbbec_binary}" \
+    --timeout-seconds "${orbbec_remaining_sec}" \
+    --expected "${ORBBEC_CAMERA1_SERIAL_NUMBER}|${ORBBEC_CAMERA1_USB_PORT}" \
+    --expected "${ORBBEC_CAMERA2_SERIAL_NUMBER}|${ORBBEC_CAMERA2_USB_PORT}" \
+    --expected "${ORBBEC_CAMERA3_SERIAL_NUMBER}|${ORBBEC_CAMERA3_USB_PORT}"; then
+  log "[ERROR] Orbbec SDK serial/topology stability gate failed"
+  exit 1
+fi
 
 log "[OK] Doraemon robot boot dependencies are ready"

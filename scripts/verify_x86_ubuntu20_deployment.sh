@@ -210,6 +210,8 @@ check_static_runtime_contract() {
   local orbbec_config="${REPO_ROOT}/src/orbbec-ros-sdk/config/OrbbecSDKConfig_v1.0.xml"
   local orbbec_driver="${REPO_ROOT}/src/orbbec-ros-sdk/src/ob_camera_node_driver.cpp"
   local orbbec_list_devices="${REPO_ROOT}/src/orbbec-ros-sdk/src/list_devices_node.cpp"
+  local orbbec_pair_gate="${REPO_ROOT}/scripts/verify_orbbec_sdk_pairs.py"
+  local boot_preflight="${REPO_ROOT}/scripts/wait_robot_boot_ready.sh"
   local orbbec_storage="${REPO_ROOT}/src/orbbec-ros-sdk/include/orbbec_camera/storage.h"
   local required_unit_line=""
   local unit_line_count=""
@@ -284,6 +286,25 @@ check_static_runtime_contract() {
     ok "Orbbec enumeration configures logging before Context"
   else
     fail "Orbbec enumeration must configure logging before Context"
+  fi
+  if grep -Fq 'DORAEMON_ORBBEC_DEVICE_V1|' "${orbbec_list_devices}" && \
+      grep -Fq 'return kSdkErrorExitCode' "${orbbec_list_devices}" && \
+      grep -Fq 'return kStandardErrorExitCode' "${orbbec_list_devices}" && \
+      grep -Fq 'return kUnknownErrorExitCode' "${orbbec_list_devices}" && \
+      ! grep -Fq 'ROS_INFO_STREAM("serial:' "${orbbec_list_devices}"; then
+    ok "Orbbec enumeration uses an atomic versioned machine protocol"
+  else
+    fail "Orbbec enumeration must use machine records and fail nonzero on exceptions"
+  fi
+  if [[ -f "${orbbec_pair_gate}" && ! -L "${orbbec_pair_gate}" ]] && \
+      grep -Fq 'REQUIRED_CONSECUTIVE_SNAPSHOTS = 2' "${orbbec_pair_gate}" && \
+      grep -Fq 'python3 "${SCRIPT_DIR}/verify_orbbec_sdk_pairs.py"' "${boot_preflight}" && \
+      grep -Fq 'orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))' \
+        "${boot_preflight}" && \
+      ! grep -Fq 'DORAEMON_ORBBEC_LIST_DEVICES_BINARY' "${boot_preflight}"; then
+    ok "Orbbec boot gate requires two exact snapshots within the shared timeout"
+  else
+    fail "Orbbec boot gate stability and fixed-binary contract"
   fi
 }
 

@@ -39,6 +39,11 @@ class OrbbecExternalLoggingContractTest(unittest.TestCase):
         construct_at = source.index("std::make_shared<ob::Context>")
         self.assertLess(configure_at, construct_at)
         self.assertNotIn("context->setLoggerSeverity", source)
+        self.assertIn("DORAEMON_ORBBEC_DEVICE_V1|", source)
+        self.assertNotIn('ROS_INFO_STREAM("serial:', source)
+        self.assertIn("return kSdkErrorExitCode", source)
+        self.assertIn("return kStandardErrorExitCode", source)
+        self.assertIn("return kUnknownErrorExitCode", source)
 
     def test_pipeline_tools_configure_logger_before_pipeline(self):
         for filename in ("list_depth_work_mode.cpp", "list_camera_profile_mode.cpp"):
