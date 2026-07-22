@@ -1,6 +1,6 @@
 # 清洁机器人 x86 Ubuntu 20.04 商业部署手册
 
-版本：2026-07-22 v7
+版本：2026-07-22 v8
 
 本文用于把 Doraemon 清洁机器人后端、清洁机器人前端和 Site Gateway
 部署到全新的 x86 主板。目标系统为 Ubuntu 20.04，部署操作用户为 `a`。
@@ -11,7 +11,7 @@
 
 | 工程 | GitHub | 部署标签 |
 | --- | --- | --- |
-| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-22-x86-ubuntu20-v7` |
+| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-22-x86-ubuntu20-v8` |
 | 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-21-frontend-v2` |
 
 不要用仓库默认分支或 `latest` 做批量生产。部署标签、依赖清单和验收记录
@@ -88,7 +88,7 @@ group/other 写权限。`current` 符号链接本身也必须为 `root:root`。
 | --- | --- |
 | 车辆资产编号 | `<公司资产系统中的唯一编号>` |
 | hostname | `clean-robot-<唯一序号>` |
-| 后端标签 | `deployment-2026-07-22-x86-ubuntu20-v7` |
+| 后端标签 | `deployment-2026-07-22-x86-ubuntu20-v8` |
 | 前端标签 | `deployment-2026-07-21-frontend-v2` |
 | 机器人内部网口 | 现场识别，例如 `eno1` |
 | A-box 地址 | `192.168.127.11/24` |
@@ -177,7 +177,7 @@ Ubuntu 维护方案和受控 APT/ROS 镜像，保存安装包与校验值，不�
 sudo install -d -o root -g root -m 0755 /opt/doraemon/releases
 sudo install -d -o root -g root -m 0755 /opt/doraemon/deps
 sudo install -d -o a -g a -m 0755 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 ```
 
@@ -187,21 +187,21 @@ stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-22-x86-ubuntu20-v7 \
+  --branch deployment-2026-07-22-x86-ubuntu20-v8 \
   https://github.com/abc467/Doraemon.git \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 ```
 
 验证：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
 git rev-parse HEAD
 git rev-parse --is-shallow-repository
 du -sh . .git
-release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 find "${release}" -xdev \
   -path "${release}/.git" -prune -o \
   \( \
@@ -261,7 +261,7 @@ FLIRT 兼容源码已小体积纳入 `third_party/flirt`，来源和修改说明
 依赖编译可能较久。并发数应按主板内存调整；首次部署建议从 4 开始：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 DORAEMON_BUILD_JOBS=4 ./scripts/install_x86_ubuntu20_dependencies.sh
 ```
 
@@ -292,7 +292,7 @@ reset/clean，也不得改成任意新版本来绕过错误。
 ### 6.3 依赖验收
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 cat /etc/doraemon/deps.env
 source /etc/profile.d/doraemon-deps.sh
 /opt/doraemon/deps/cmake-3.20.6/bin/cmake --version
@@ -371,7 +371,7 @@ test -z "$(find /opt/doraemon/deps -xdev \
 ## 7. 阶段 D：编译后端工作空间
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 ```
 
@@ -379,10 +379,24 @@ DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 Fields2Cover、`coverage_planner`、`coverage_task_manager` 和
 `robot_hw_bridge`。
 
+构建成功后必须运行 M 核速度单位回归。该测试验证 ROS 的 SI 单位、方向、最终硬限幅和
+M 核协议比例之间的边界，不能用只编译成功替代：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source /etc/profile.d/doraemon-deps.sh
+catkin test mcore_chassis_bridge --no-status --summarize
+catkin_test_results --all build/mcore_chassis_bridge/test_results
+```
+
+至少必须覆盖：`0.20 m/s × 1000 = 200`、`0.80 m/s` 在 `0.35 m/s` 上限下输出
+`350`、`0.0349 rad/s × 1000 = 34.9`、方向取反、零上限的旧版不限幅语义，以及
+`NaN`/`Inf`、非法比例、非法方向和负上限的拒绝路径。
+
 检查：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source devel/setup.bash
@@ -400,6 +414,7 @@ release 保留并冻结；catkin 的 `log`/`logs` 只是构建日志，不属于
 
 `[停止条件]` 干净构建失败、任一要求的 ROS package 找不到、Fields2Cover 不能导入、
 固定 Shapely 包/隔离导入/几何运算校验失败或几何回归因缺少 Shapely 被跳过、
+M 核速度单位回归存在任一 error/failure/skip、
 构建缓存引用固定版本之外的 CMake/编译器/依赖前缀，或 build/devel 中出现旧机器绝对
 路径时停止。不得复制旧构建产物补齐，也不得在尚未完成阶段 G 冻结前安装 systemd unit。
 
@@ -481,7 +496,7 @@ udevadm info --query=property --name=/dev/ttyUSB0
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7/deploy/udev/99-doraemon-a26022-serial.rules.example \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8/deploy/udev/99-doraemon-a26022-serial.rules.example \
   /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 sudoedit /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 ```
@@ -503,7 +518,7 @@ ls -l /dev/imu /dev/wheel_odom /dev/mcore
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
   /etc/udev/rules.d/99-obsensor-ros1-libusb.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -533,7 +548,7 @@ systemctl is-enabled doraemon-runtime.service || true
 清理或替换 `build/`、`devel/`：
 
 ```bash
-release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 cd "${release}"
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
@@ -556,37 +571,37 @@ test -z "$(find "${release}" -xdev \
       -iname export.log -o -iname '*.db' -o -iname '*.sqlite*' \) \
   \) -print -quit)"
 sudo chown -hR root:root \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 sudo chmod -R go-w \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 sudo chown root:root /opt/doraemon/releases
 sudo chmod 0755 /opt/doraemon/releases
 sudo ln -sfn \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
   /opt/doraemon/current
 sudo chown -h root:root /opt/doraemon/current
 
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
   -xdev \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
   -xdev \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/doraemon/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/doraemon/current)" = 'root:root'
 test "$(readlink -f /opt/doraemon/current)" = \
-  '/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7'
+  '/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8'
 test "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
   describe --tags --exact-match)" = \
-  'deployment-2026-07-22-x86-ubuntu20-v7'
+  'deployment-2026-07-22-x86-ubuntu20-v8'
 test -z "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
   status --porcelain=v1 --untracked-files=all)"
 sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
   rev-parse HEAD
 ```
 
@@ -608,7 +623,7 @@ allowlist 执行一次性 `sudo -n git` 只读检查；它们不得改用全局 
 只从这个已冻结的物理 release 安装，显式保持“不启用”：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
 DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
 ```
 
@@ -680,7 +695,7 @@ DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
 USB3 拓扑仍为占位符，服务必须拒绝启动。相机在生产入口始终按序列号绑定；
 USB3 拓扑用于独立审计，启动前还会用目标版本内的 Orbbec SDK 验证
 `序列号 ↔ 拓扑` 配对、厂商和 SuperSpeed，不允许在失败时自动降级到另一个设备。
-v7 延续 v6 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
+v8 延续 v7 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
 的超时预算内重试，并要求连续两次都得到恰好三条、唯一且与本车配置完全相同的配对。
 空、部分、额外、重复、畸形或超时快照都会清零连续成功计数并继续等待，直至预算耗尽后
 fail closed。原始 SDK stdout/stderr 不得直接写入 systemd journal。
@@ -939,18 +954,27 @@ sudo grep -R -n 'replace-with\\|change-me\\|bulibusan' /etc/clean-robot-site
 
 应无输出。
 
-`[停止条件]` 三个角色缺失、使用历史公共默认口令、外置配置权限不符，或
-`robotId`/`siteName`/ROS 地址不属于当前登记车辆时停止。已知公共默认口令不能以工程
-偏差名义继续使用。
+`[停止条件]` 三个角色缺失、外置配置权限不符，或 `robotId`/`siteName`/ROS 地址不属于
+当前登记车辆时停止。历史公共默认口令不得进入正式商业运行；工厂试产临时口令只有满足
+下一段全部限时隔离条件时才可用于阶段 L，不能据此通过阶段 M。
 
 三个角色未使用当前车辆各自独立的强口令，或支持名称、电话、邮箱仍为占位值，属于
-阶段 M 的 `[停止条件]` 和正式商业发布阻断。首次批量工程试验如确需暂缓，只能由负责人
-逐车批准并在该车
-部署记录中登记偏差、范围、到期时间和复验入口，不得在本通用手册中写入口令或单车偏差。
-这种批准最多允许继续明确限定的无动作工程验收，不能记为商业验收通过，也不得进入阶段
-L、M 或交付客户。关闭偏差时必须分别轮换三角色强口令、补齐真实支持信息，并重新执行
-安装器、三角色登录/权限、车辆身份和支持信息显示检查；记录保管位置和结果，不记录口令
-明文。
+阶段 M 的 `[停止条件]` 和正式商业发布阻断。
+
+首次批量工程试验如确需暂用临时口令做阶段 L 工厂调试，只能由负责人逐车、限时批准，
+并同时满足以下隔离条件：
+
+- 在单车部署记录中登记车辆、负责人、偏差范围、到期时间和关闭入口，但不记录口令明文；
+- 真实支持信息已经补齐；
+- 重新安装 Gateway 时显式设置 `SITE_LISTEN_HOST=127.0.0.1`，实测 `4173` 只监听 loopback；
+- 只允许通过本机显示器或受控 NoMachine 会话操作，管理网和机器人内部网均不能直接访问
+  `4173`；现场动作仍执行阶段 L 的全部物理安全门；
+- 该例外只允许有负责人监护的工厂调试，不得记为商业验收通过，不得进入阶段 M 或交付客户。
+
+不满足上述全部隔离条件时，临时口令最多只能用于阶段 K 无动作验收，不得进入阶段 L。
+关闭偏差时必须分别轮换三角色强口令，重新执行安装器、三角色登录/权限、车辆身份和支持
+信息显示检查，并在阶段 M 前把 Gateway 恢复到经批准的管理网监听策略；记录保管位置和
+结果，不记录口令明文。
 
 ### 13.2 安装但不启动服务
 
@@ -973,6 +997,10 @@ sudo SITE_SERVICE_USER=a \
   ./scripts/install-site-systemd.sh
 ```
 
+存在上一节已批准的阶段 L 临时口令偏差时，上述安装命令还必须增加
+`SITE_LISTEN_HOST=127.0.0.1`；安装后用 `ss` 实测 `4173` 仅监听 loopback。不得用 UFW
+代替进程绑定隔离。
+
 安装器会验证外置配置、账号和生产依赖，并把 SQLite 放到
 `/var/lib/clean-robot-site/site-gateway.sqlite`。它不会从 root 账号运行
 `npm install`，也不会自动拉起后端。
@@ -984,6 +1012,7 @@ systemctl is-enabled clean-robot-site-gateway.service
 systemctl is-active clean-robot-site-gateway.service
 sudo systemctl cat clean-robot-site-gateway.service
 systemctl show clean-robot-site-gateway.service -p NRestarts --value
+sudo ss -H -ltnp | awk '$4 ~ /:4173$/ {print}'
 ```
 
 安装后必须精确为 `disabled`、`inactive`、`NRestarts=0`。前端 release 和
@@ -1215,11 +1244,14 @@ sudo journalctl -u clean-robot-site-gateway.service -n 100 --no-pager
 http://127.0.0.1:4173/
 ```
 
-或从受控管理网访问：
+不存在临时口令偏差、Gateway 已按批准策略监听管理网时，才可从受控管理网访问：
 
 ```text
 http://<机器人管理地址>:4173/
 ```
+
+存在阶段 L 临时口令偏差时，`4173` 必须保持 loopback-only，只能在本机浏览器或受控
+NoMachine 桌面中打开 `http://127.0.0.1:4173/`。
 
 确认前端显示的 `robotId`、车辆编号、地图、模块和账号权限都属于当前车辆。
 
@@ -1265,15 +1297,59 @@ EXECUTOR_AUTO_CHARGE_ENABLE=false
 AUTO_CHARGE_MONITOR_ENABLE=false
 AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false
 AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock
+START_MCORE_VELOCITY_SENDER=true
+START_MCORE_BRIDGE=false
+MCORE_ENABLE_CMD_VEL=false
+MCORE_LINEAR_VELOCITY_SCALE=1000.0
+MCORE_ANGULAR_VELOCITY_SCALE=1000.0
+MCORE_LINEAR_VELOCITY_SIGN=<本车离地验证的 -1.0 或 1.0>
+MCORE_ANGULAR_VELOCITY_SIGN=<本车离地验证的 -1.0 或 1.0>
 MCORE_MAX_ABS_LINEAR_VELOCITY=<机器人测试负责人批准的有限正数，单位 m/s>
 MCORE_MAX_ABS_ANGULAR_VELOCITY=<机器人测试负责人批准的有限正数，单位 rad/s>
 ```
 
-模板中的两个 M-core 上限是有意设置的 `0.0`，用于让动作模式 fail closed。不得把
-`0.0` 当成可接受限速，也不得由部署人员猜测数值。两个值都必须是机器人测试负责人
-批准的有限正数；单车部署记录必须写明数值、单位、批准人、批准时间和依据（测试方案、
-机械/控制参数版本或变更单）。空值、非数字、`NaN`、`Inf`、零或负数都是
+这里的“当前运动阶段选中的 ROS 运动控制器”是软件算法，不是 M 核或电机驱动板。它根据
+路径、定位和障碍物产生 SI 单位的 `/cmd_vel`；`mcore_velocity_sender` 是链路末端的独立
+硬限幅和协议转换层。当前冻结配置中的合法速度源如下：
+
+| 速度源 | 线速度上限 | 角速度上限 | 用途 |
+| --- | ---: | ---: | --- |
+| MPPI Standard / Connect / Eco | 0.30 m/s | 0.60 rad/s | 常规清扫、区块连接和节能档 |
+| MPPI Heavy | 0.35 m/s | 0.22 rad/s | 重清扫档 |
+| MyPlanner | 0.25 m/s | 0.30 rad/s | 点对点与回桩预对接 |
+| 前端 manual drive | 0.30 m/s | 0.50 rad/s | 有门禁的人工驾驶 |
+| 精确对接控制器 | 0.20 m/s | 0.50 rad/s | 充电桩精确对接 |
+
+因此本版本所有已启用正常速度源的“分量最大包络”是 `0.35 m/s` 和 `0.60 rad/s`；这两个
+最大值来自不同档位，不表示存在一个同时以 `0.35/0.60` 运行的控制器。M 核最终硬上限
+必须满足：`所有已启用速度源上限 <= M 核硬上限 <= 本车批准的物理安全上限`。若车辆
+机械/控制依据不允许该包络，必须同步下调上游控制器并创建新固定标签，不能只在单车环境
+文件中抬高或压低一个不匹配的 M 核参数。
+
+两个 `MCORE_MAX_ABS_*` 的单位始终分别为 `m/s` 和 `rad/s`；不得填入 `mm/s`、
+`mrad/s` 或协议 raw 值。转换顺序固定为：
+
+```text
+protocol = clamp(cmd_vel_SI * sign, -limit_SI, +limit_SI) * scale
+```
+
+默认比例为 `1000`：`0.20 m/s` 应发送协议值 `200`；`0.80 m/s` 在 `0.35 m/s` 上限下
+应发送 `350`。严禁用 `350/600` 之类协议数值规避单位错误；修复后这种配置会变成危险的
+超限放行。`docs/new_chassis_adaptation.md` 中面向旧桥接路径的 `scale=1` 适配示例不能复制到
+本商业 M 核发送链路。
+
+模板中的两个 M-core 上限为 `0.0`。节点为兼容旧调试入口把 `0.0` 解释为“不限幅”，
+但商业 `start_runtime.sh` 在动作模式会明确拒绝零值，因此模板组合仍是 fail closed。
+不得把 `0.0` 当成可接受的动作限速，也不得绕过商业启动入口直接 launch。两个上限必须是
+机器人测试负责人批准的有限正数；两个 scale 必须有限且大于零，两个 sign 必须精确为
+`-1.0` 或 `1.0`。单车部署记录必须写明数值、单位、批准人、批准时间和依据（测试方案、
+机械/控制参数版本或变更单）。空值、非法数字、`NaN`、`Inf`、零/负上限或非法方向均为
 `[停止条件]`。
+
+CR-001 的 `mcore_tcp` 商业动作链必须只有一个底盘运动发送器：新
+`mcore_velocity_sender` 开启，旧 `mcore_tcp_bridge` 的运动订阅和 Wheeltec 路径关闭。
+上述三个开关不是精确的 `true/false/false` 时启动门必须拒绝；不得同时向 M 核 5001 与
+8080 路径下发 `/cmd_vel`。
 
 阶段 L 初次动作启动仍必须显式关闭任务层自动回桩和充电恢复监视器。建图、任务创建、
 充电桩标定和人工监护的手动回桩不依赖这三个自动开关；不得为了提前测试其他动作而把它们
@@ -1298,6 +1374,25 @@ MANUAL_DRIVE_REQUIRE_COMBINED_STATUS=true
 复核物理安全条件后再受控启动。两项动作批准变量不是上述组合、M-core 两个限速未按
 要求批准记录、manual-drive 启用但五门未全开、批准未记录或服务未先停止时，均为
 `[停止条件]`，不得执行任何运动、回桩、充电、供排水或清洁执行器测试。
+
+动作启动后、驱动轮仍离地时，先核对 live 参数和最终订阅链路：
+
+```bash
+rosparam get /mcore_velocity_sender/linear_velocity_scale
+rosparam get /mcore_velocity_sender/angular_velocity_scale
+rosparam get /mcore_velocity_sender/linear_velocity_sign
+rosparam get /mcore_velocity_sender/angular_velocity_sign
+rosparam get /mcore_velocity_sender/max_abs_linear_velocity
+rosparam get /mcore_velocity_sender/max_abs_angular_velocity
+rosnode info /mcore_velocity_sender
+rostopic info /cmd_vel
+```
+
+六个 live 参数必须与本车记录精确一致。`/cmd_vel` 的底层发送订阅者必须只有
+`/mcore_velocity_sender`；不得同时存在 `/mcore_tcp_bridge`、`/wheeltec_robot` 或其他底盘
+发送订阅者，也不得没有订阅者。publisher 只能来自本版本已审计的 MBF、Executor、
+manual drive、对桩/退桩链路；出现未知 publisher、重复底盘订阅、参数缺失、非有限值或
+单位不明均为 `[停止条件]`。
 
 ### 15.1 低速底盘验收
 
@@ -1394,21 +1489,63 @@ task/map/revision 绑定不一致，或未达到 localization/runtime-map match/
 7. 验证停止距离、航向、充电触点和充电状态。
 8. 重启后端，再次确认持久标定可读取并完成一次有人监护的手动回桩。
 
-上述八项全部通过并记录后，必须再次停止后端并取得机器人测试负责人对自动回桩/充电恢复的
-单独批准，才可把下列三项改为 `true`，重新受控启动并执行有人监护的自动回桩测试：
+上述八项全部通过并记录后，自动回充必须分两轮放行，不能一次把正常闭环和故障恢复同时
+打开。
+
+第一轮先验证正常自动回充闭环。再次停止后端并取得机器人测试负责人单独批准，只设置：
 
 ```text
 TASK_AUTO_CHARGE_ENABLE=true
+EXECUTOR_AUTO_CHARGE_ENABLE=false
 AUTO_CHARGE_MONITOR_ENABLE=true
-AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=true
+AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false
+AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock
 ```
 
-即使这三项获批开启，`EXECUTOR_AUTO_CHARGE_ENABLE` 仍必须保持 `false`，
-`AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY` 仍必须保持 `redock`。任务层自动开关关闭时，
-任务完成回桩和充满后的重复循环也必须保持关闭；只允许现场受控的手动回桩。
+启动前确认 `AUTO_CHARGE_LOW_SOC`、`AUTO_CHARGE_REARM_SOC`、
+`AUTO_CHARGE_RESUME_SOC`、`AUTO_CHARGE_TARGET_SOC` 都是 `[0,1]` 内的有限值，并满足：
+
+```text
+low_soc < rearm_soc <= resume_soc <= target_soc
+```
+
+电池消息必须存在、新鲜、有限并已归一化到 `0..1`。要验收“低电量回桩、充满后继续”，
+前端任务还必须明确保存 `return_to_dock_on_finish=true` 和
+`repeat_after_full_charge=true`，且当前正整数 task、job、run 绑定完整。仅打开全局开关
+不会自动给已有任务补上这两个语义。
+
+第一轮有人监护地验证完整正常路径：任务运行中低 SOC → TaskManager 暂停 Executor →
+两阶段回桩 → 充电 → 达恢复阈值 → 离桩/重定位 → 恢复或重新执行同一任务。启动后归档：
+
+```bash
+rosparam get /coverage_task_manager/auto_charge_enable
+rosparam get /coverage_task_manager/low_soc
+rosparam get /coverage_task_manager/resume_soc
+rosparam get /coverage_task_manager/rearm_soc
+rosparam get /coverage_executor/auto_charge_enable
+rosparam get /auto_charge_monitor/recovery_enable
+rosparam get /auto_charge_monitor/recovery_strategy
+rosservice call /clean_robot_server/app/get_dock_calibration_status '{}'
+rostopic echo -n 1 /battery_state
+rosservice call /auto_charge_monitor/snapshot '{}'
+```
+
+正常闭环通过并记录后，再次停止后端、取得故障恢复专项批准，才允许第二轮只把
+`AUTO_CHARGE_MONITOR_RECOVERY_ENABLE` 改为 `true`。用受控故障注入验证 `redock` 的重试
+次数上限、最终故障状态和停止结果；不得启用或恢复直接发布 `/cmd_vel` 的旧
+`contact_jog` 路径。专项失败时退回第一轮配置，不能边测试边继续放开。
+
+两轮中 `EXECUTOR_AUTO_CHARGE_ENABLE` 都必须永久保持 `false`，
+`AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY` 必须保持 `redock`。任务层自动开关关闭时，任务
+完成回桩和充满后的重复循环也必须保持关闭；只允许现场受控的手动回桩。
 
 持久标定加载标记、两阶段状态或任一 saved/active/runtime 地图身份检查不通过时均为
 `[停止条件]`；不得使用 launch 默认坐标、仅同名地图或另车标定文件绕过。
+
+`EXECUTOR_AUTO_CHARGE_ENABLE` 不是 `false`、恢复策略不是 `redock`、SOC 非法或陈旧、
+任务/run 绑定丢失、TaskManager 未先暂停 Executor 就开始回桩、第一轮出现恢复动作、第二轮
+出现直接 `contact_jog`/超次数重试，或动作链路节点/最终底盘订阅重复，均为
+`[停止条件]`。
 
 不要把 A 车的 `dock_calibration.yaml` 复制给 B 车。更换雷达、底盘、充电桩、
 机械安装位置或地图坐标后，原标定必须重新评估。
@@ -1432,6 +1569,11 @@ AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=true
 都属于 ROS wildcard 暴露，是阶段 M `[停止条件]`；UFW 规则不能替代修复 listener。
 同时复核两个服务在 enable 前仍为 `NRestarts=0`，并把 `ss` 和 `systemctl show` 输出
 归档到单车部署记录。
+
+还必须归档阶段 L 最终生效的六个 M 核 scale/sign/limit 参数、所有已启用速度源的 live
+ROS 参数、`/cmd_vel` publisher/subscriber 清单，以及自动回充两轮测试的 runtime 配置摘要、
+任务 `return_to_dock_on_finish`/`repeat_after_full_charge`、SOC 时间线和回桩/充电/离桩/恢复
+结果。代码配置、`runtime.env`、live 参数和单车记录的单位必须一致。
 
 满足全部门禁后才执行：
 
@@ -1743,8 +1885,9 @@ sudo journalctl -u clean-robot-site-gateway.service -n 150 --no-pager
 - [ ] `9090`、`11311` 实测仅监听 loopback，阶段 K 两服务保持 disabled 且 `NRestarts=0`
 - [ ] 急停、低速底盘、传感器安全链通过
 - [ ] 两个 M-core 动作限速为测试负责人批准的有限正数，数值、单位和依据已归档
+- [ ] M-core scale/sign/limit、所有实际速度源和 `/cmd_vel` 拓扑已按 live 参数归档，只有一个底盘发送订阅者
 - [ ] 当前车辆完成建图和任务流程验收
-- [ ] 充电桩标定已保存、重启后可读取、回桩和充电通过
+- [ ] 充电桩标定已保存、重启后可读取；正常自动回充闭环与 `redock` 故障恢复已分轮验收
 - [ ] 清洁执行器逐项验收通过
 - [ ] 后端和前端仅在验收后启用开机启动
 - [ ] 重启后系统、前端和日志检查通过

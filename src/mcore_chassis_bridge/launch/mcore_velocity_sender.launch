@@ -18,6 +18,8 @@
   <arg name="angular_velocity_scale" default="1000.0"/>
   <arg name="linear_velocity_sign" default="1.0"/>
   <arg name="angular_velocity_sign" default="1.0"/>
+  <!-- max_abs values are SI units and are clamped before the protocol scale.
+       Zero retains the legacy unlimited meaning; commercial action startup rejects zero. -->
   <arg name="max_abs_linear_velocity" default="0.0"/>
   <arg name="max_abs_angular_velocity" default="0.0"/>
   <arg name="send_immediately" default="true"/>

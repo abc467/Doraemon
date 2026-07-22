@@ -437,6 +437,23 @@ runtime_is_positive_finite_number() {
   '
 }
 
+runtime_is_unit_sign() {
+  local raw_value="${1:-}"
+  LC_ALL=C awk -v raw="${raw_value}" '
+    BEGIN {
+      if (raw !~ /^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$/) {
+        exit 1
+      }
+      number = raw + 0
+      rendered = sprintf("%.17g", number)
+      if (rendered ~ /[Ii][Nn][Ff]|[Nn][Aa][Nn]/) {
+        exit 1
+      }
+      exit !(number == -1 || number == 1)
+    }
+  '
+}
+
 runtime_value_is_placeholder() {
   commercial_value_is_placeholder "${1:-}"
 }
@@ -469,6 +486,9 @@ validate_commercial_vehicle_identity() {
   normalize_boolean_variable DORAEMON_NO_ACTION_ACCEPTANCE
   normalize_boolean_variable DORAEMON_ACTION_TEST_APPROVED
   normalize_boolean_variable ENABLE_MANUAL_DRIVE_SERVICE
+  normalize_boolean_variable START_MCORE_BRIDGE
+  normalize_boolean_variable START_MCORE_VELOCITY_SENDER
+  normalize_boolean_variable MCORE_ENABLE_CMD_VEL
   normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE
   normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE
   normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE
@@ -483,7 +503,7 @@ validate_commercial_vehicle_identity() {
     echo "[ERROR] action-capable runtime requires DORAEMON_ACTION_TEST_APPROVED=true" >&2
     return 1
   else
-    local velocity_limit_name
+    local velocity_limit_name velocity_scale_name velocity_sign_name
     for velocity_limit_name in \
       MCORE_MAX_ABS_LINEAR_VELOCITY \
       MCORE_MAX_ABS_ANGULAR_VELOCITY; do
@@ -492,6 +512,34 @@ validate_commercial_vehicle_identity() {
         return 1
       fi
     done
+
+    for velocity_scale_name in \
+      MCORE_LINEAR_VELOCITY_SCALE \
+      MCORE_ANGULAR_VELOCITY_SCALE; do
+      if ! runtime_is_positive_finite_number "${!velocity_scale_name:-}"; then
+        echo "[ERROR] action-capable runtime requires ${velocity_scale_name} to be finite and > 0" >&2
+        return 1
+      fi
+    done
+
+    for velocity_sign_name in \
+      MCORE_LINEAR_VELOCITY_SIGN \
+      MCORE_ANGULAR_VELOCITY_SIGN; do
+      if ! runtime_is_unit_sign "${!velocity_sign_name:-}"; then
+        echo "[ERROR] action-capable runtime requires ${velocity_sign_name} to be exactly -1 or +1" >&2
+        return 1
+      fi
+    done
+
+    if [[ "${CHASSIS_DRIVER}" == "mcore_tcp" ]] &&
+       [[ "${START_MCORE_VELOCITY_SENDER}" != "true" ||
+          "${START_MCORE_BRIDGE}" != "false" ||
+          "${MCORE_ENABLE_CMD_VEL}" != "false" ]]; then
+      echo "[ERROR] mcore_tcp action mode requires exactly one motion transport: " \
+           "START_MCORE_VELOCITY_SENDER=true, START_MCORE_BRIDGE=false, " \
+           "MCORE_ENABLE_CMD_VEL=false" >&2
+      return 1
+    fi
 
     if [[ "${ENABLE_MANUAL_DRIVE_SERVICE}" == "true" ]]; then
       local manual_drive_gate_name

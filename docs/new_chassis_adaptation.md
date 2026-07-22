@@ -42,6 +42,12 @@ roslaunch robot_hw_bridge hardware_bridges.launch \
 
 如果新底盘仍使用 M-core 协议，但速度方向或比例不同，可以只调参数：
 
+> 下面只描述旧 `robot_hw_bridge/mcore_tcp_bridge.py`（默认 TCP 5001）适配入口。
+> 该旧桥当前是先乘 scale、再按协议值限幅，示例中的 `scale=1` 与限值属于同一数值域。
+> CR-001 商业 `mcore_tcp` 链路使用的是 `mcore_velocity_sender`（TCP 8080）：其
+> `MCORE_MAX_ABS_*` 必须是 SI 单位并在乘 `1000` 前限幅。两套参数不得互抄，也不得同时
+> 订阅 `/cmd_vel`；商业步骤以 `x86_ubuntu20_commercial_deployment.md` 为准。
+
 ```bash
 roslaunch robot_hw_bridge hardware_bridges.launch \
   mcore_linear_velocity_sign:=-1.0 \

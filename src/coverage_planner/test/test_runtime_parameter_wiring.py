@@ -239,6 +239,81 @@ validate_commercial_vehicle_identity
             result.stderr,
         )
 
+    def test_action_mode_rejects_invalid_velocity_scales_and_signs(self):
+        script = VALID_COMMERCIAL_IDENTITY + r"""
+DORAEMON_NO_ACTION_ACCEPTANCE=false
+DORAEMON_ACTION_TEST_APPROVED=true
+MCORE_MAX_ABS_LINEAR_VELOCITY=0.35
+MCORE_MAX_ABS_ANGULAR_VELOCITY=0.6
+MCORE_LINEAR_VELOCITY_SCALE=1000.0
+MCORE_ANGULAR_VELOCITY_SCALE=1000.0
+MCORE_LINEAR_VELOCITY_SIGN=1.0
+MCORE_ANGULAR_VELOCITY_SIGN=1.0
+for invalid in 0 -1 nan inf 1e309; do
+  MCORE_LINEAR_VELOCITY_SCALE="${invalid}"
+  if validate_commercial_vehicle_identity; then exit 40; fi
+done
+MCORE_LINEAR_VELOCITY_SCALE=1000.0
+for invalid in 0 -1 nan inf 1e309; do
+  MCORE_ANGULAR_VELOCITY_SCALE="${invalid}"
+  if validate_commercial_vehicle_identity; then exit 41; fi
+done
+MCORE_ANGULAR_VELOCITY_SCALE=1000.0
+for invalid in 0 0.5 -0.5 2 nan inf; do
+  MCORE_LINEAR_VELOCITY_SIGN="${invalid}"
+  if validate_commercial_vehicle_identity; then exit 42; fi
+done
+MCORE_LINEAR_VELOCITY_SIGN=-1.0
+for invalid in 0 0.5 -0.5 2 nan inf; do
+  MCORE_ANGULAR_VELOCITY_SIGN="${invalid}"
+  if validate_commercial_vehicle_identity; then exit 43; fi
+done
+MCORE_ANGULAR_VELOCITY_SIGN=1.0
+validate_commercial_vehicle_identity
+"""
+        result = run_start_runtime_snippet(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn(
+            "action-capable runtime requires MCORE_LINEAR_VELOCITY_SCALE "
+            "to be finite and > 0",
+            result.stderr,
+        )
+        self.assertIn(
+            "action-capable runtime requires MCORE_ANGULAR_VELOCITY_SIGN "
+            "to be exactly -1 or +1",
+            result.stderr,
+        )
+
+    def test_mcore_tcp_action_mode_requires_exactly_one_motion_transport(self):
+        script = VALID_COMMERCIAL_IDENTITY + r"""
+DORAEMON_NO_ACTION_ACCEPTANCE=false
+DORAEMON_ACTION_TEST_APPROVED=true
+CHASSIS_DRIVER=mcore_tcp
+MCORE_MAX_ABS_LINEAR_VELOCITY=0.35
+MCORE_MAX_ABS_ANGULAR_VELOCITY=0.6
+MCORE_LINEAR_VELOCITY_SCALE=1000.0
+MCORE_ANGULAR_VELOCITY_SCALE=1000.0
+MCORE_LINEAR_VELOCITY_SIGN=1.0
+MCORE_ANGULAR_VELOCITY_SIGN=1.0
+START_MCORE_VELOCITY_SENDER=true
+START_MCORE_BRIDGE=false
+MCORE_ENABLE_CMD_VEL=false
+validate_commercial_vehicle_identity
+START_MCORE_BRIDGE=true
+MCORE_ENABLE_CMD_VEL=true
+if validate_commercial_vehicle_identity; then exit 50; fi
+START_MCORE_BRIDGE=false
+MCORE_ENABLE_CMD_VEL=false
+START_MCORE_VELOCITY_SENDER=false
+if validate_commercial_vehicle_identity; then exit 51; fi
+"""
+        result = run_start_runtime_snippet(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn(
+            "mcore_tcp action mode requires exactly one motion transport",
+            result.stderr,
+        )
+
     def test_no_action_mode_keeps_zero_limit_template_and_disables_sender(self):
         defaults = read_env_defaults("config/runtime.a26022.env")
         self.assertEqual(defaults.get("MCORE_MAX_ABS_LINEAR_VELOCITY"), "0.0")

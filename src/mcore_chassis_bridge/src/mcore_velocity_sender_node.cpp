@@ -35,6 +35,8 @@
 #include <std_msgs/UInt64.h>
 #include <std_msgs/UInt8.h>
 
+#include <mcore_chassis_bridge/velocity_command_units.h>
+
 namespace {
 
 constexpr uint8_t kHead0 = 0x43;
@@ -198,14 +200,6 @@ std::string HexString(const uint8_t* data, size_t len) {
     oss << std::setw(2) << static_cast<unsigned int>(data[i]);
   }
   return oss.str();
-}
-
-double ClampAbs(double value, double max_abs) {
-  const double limit = std::fabs(max_abs);
-  if (limit <= 0.0) {
-    return value;
-  }
-  return std::max(-limit, std::min(limit, value));
 }
 
 bool IsFiniteTwist(const geometry_msgs::Twist& msg) {
@@ -387,6 +381,14 @@ class MCoreVelocitySenderNode {
     squeegee_forward_value_ = ClampInt(squeegee_forward_value_, -1, 1);
     squeegee_backward_value_ = ClampInt(squeegee_backward_value_, -1, 1);
     squeegee_stop_value_ = ClampInt(squeegee_stop_value_, -1, 1);
+    if (!mcore_chassis_bridge::IsValidVelocityConversionConfig(
+            linear_velocity_sign_, max_abs_linear_velocity_, linear_velocity_scale_) ||
+        !mcore_chassis_bridge::IsValidVelocityConversionConfig(
+            angular_velocity_sign_, max_abs_angular_velocity_, angular_velocity_scale_)) {
+      throw std::invalid_argument(
+          "M-core velocity scale must be finite and > 0, sign must be -1 or +1, "
+          "and max_abs velocity must be finite and >= 0");
+    }
     cleaning_params_.profile_name = pnh_.param<std::string>("profile_name", "default");
     cleaning_params_.vel_water_pump =
         static_cast<uint8_t>(ClampInt(pnh_.param<int>("vel_water_pump", 0), 0, 100));
@@ -491,6 +493,10 @@ class MCoreVelocitySenderNode {
                     << (repeat_last_cmd_vel_ ? "true" : "false")
                     << ", linear_velocity_scale=" << linear_velocity_scale_
                     << ", angular_velocity_scale=" << angular_velocity_scale_
+                    << ", linear_velocity_sign=" << linear_velocity_sign_
+                    << ", angular_velocity_sign=" << angular_velocity_sign_
+                    << ", max_abs_linear_velocity_si=" << max_abs_linear_velocity_
+                    << ", max_abs_angular_velocity_si=" << max_abs_angular_velocity_
                     << ", drain_after_write=" << (drain_after_write_ ? "true" : "false")
                     << ", enable_tx_log=" << (enable_tx_log_ ? "true" : "false")
                     << ", enable_rx_log=" << (enable_rx_log_ ? "true" : "false")
@@ -538,10 +544,11 @@ class MCoreVelocitySenderNode {
       return;
     }
 
-    last_vx_ = ClampAbs(msg.linear.x * linear_velocity_scale_ * linear_velocity_sign_,
-                        max_abs_linear_velocity_);
-    last_wz_ = ClampAbs(msg.angular.z * angular_velocity_scale_ * angular_velocity_sign_,
-                        max_abs_angular_velocity_);
+    last_vx_ = mcore_chassis_bridge::ToProtocolVelocity(
+        msg.linear.x, linear_velocity_sign_, max_abs_linear_velocity_, linear_velocity_scale_);
+    last_wz_ = mcore_chassis_bridge::ToProtocolVelocity(
+        msg.angular.z, angular_velocity_sign_, max_abs_angular_velocity_,
+        angular_velocity_scale_);
     last_cmd_time_ = ros::Time::now();
     have_cmd_ = true;
     timeout_logged_ = false;
@@ -1551,7 +1558,8 @@ class MCoreVelocitySenderNode {
     battery_msg_.capacity = static_cast<float>(battery_full_capacity_);
     battery_msg_.design_capacity = static_cast<float>(battery_full_capacity_);
     battery_msg_.percentage = static_cast<float>(
-        ClampAbs(remaining / static_cast<float>(battery_full_capacity_), 1.0));
+        mcore_chassis_bridge::ClampAbs(
+            remaining / static_cast<float>(battery_full_capacity_), 1.0));
     battery_pub_.publish(battery_msg_);
     combined_status_msg_.battery_percentage = static_cast<uint8_t>(
         ClampInt(static_cast<int>(std::lround(battery_msg_.percentage * 100.0f)), 0, 100));
