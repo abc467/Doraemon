@@ -436,6 +436,15 @@ class SlamApiStateControllerTest(unittest.TestCase):
         self.assertEqual(resp.state.robot_id, "local_robot")
         self.assertEqual(resp.state.workflow_state, "LOCALIZED")
 
+    def test_handle_get_status_app_rejects_another_vehicle_identity(self):
+        resp = self.controller.handle_get_status_app(
+            type("Req", (), {"robot_id": "CR-999", "refresh_map_identity": True})()
+        )
+
+        self.assertFalse(resp.success)
+        self.assertIn("robot_id mismatch", resp.message)
+        self.assertEqual(resp.state.robot_id, "local_robot")
+
     @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
     @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
     @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")

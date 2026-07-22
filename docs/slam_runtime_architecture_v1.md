@@ -132,8 +132,10 @@ flowchart TD
 
 - 正式 runtime owner
 - 正式 job owner
-- 托管 runtime 级 submit/get/operate 服务
+- 托管 runtime 级异步 submit/get 服务和受限 operate 兼容入口
 - 调用内部 workflow 层完成 Cartographer 编排
+- 维护临时 ROS 参数 `/cartographer/runtime/mapping_session_id`，把存活的建图会话绑定到
+  本次成功 `start_mapping` 的精确 job ID
 
 当前 node 已被收薄，主要只保留：
 
@@ -141,6 +143,8 @@ flowchart TD
 - 订阅 `/map`、`/tracked_pose`
 - 发布 runtime job state
 - 提供 runtime 级 service 入口
+- 在暴露 operation service 前清空旧的 `mapping_session_id`；启动建图失败、成功停止建图时
+  也会清空，因此 runtime manager 重启后旧 checkpoint 必然失效
 
 ### 4.3 `localization_lifecycle_manager`
 
@@ -333,6 +337,13 @@ flowchart LR
 - `/cartographer/runtime/app/restart_localization`
 
 这些接口是后端内部编排层用的，不是前端直接绑定的主入口。
+
+`/cartographer/runtime/app/operate` 不是同步写动作的替代入口。当前它会对
+`start_mapping`、`save_mapping`、`stop_mapping`、`verify_map_revision` 和
+`activate_map_revision` 返回 `async_slam_workflow_required`，不会执行状态写入；这五类动作
+必须通过 `/cartographer/runtime/app/submit_job` 提交，并用
+`/cartographer/runtime/app/get_job` 核对异步终态。前端和商业验收工具继续只走正式
+`submit_slam_command -> submit_job/get_job` 链，不能因 operate service 仍存在而恢复同步写入。
 
 ### 6.3 底层算法/transport 层
 
@@ -530,6 +541,7 @@ sequenceDiagram
     participant FE as Frontend / Gateway
     participant API as slam_api_service
     participant RT as slam_runtime_manager
+    participant PARAM as ROS parameter server
     participant AD as CartographerRuntimeAdapter
     participant TR as runtime_transport
     participant CR as cartographer_ros
@@ -537,16 +549,22 @@ sequenceDiagram
     FE->>API: submit_slam_command(start_mapping)
     API->>API: 校验 can_start_mapping / odometry / runtime ready
     API->>RT: /cartographer/runtime/app/submit_job
+    RT->>PARAM: mapping_session_id = start job_id
     RT->>AD: start_mapping(robot_id)
     AD->>AD: wait_for_odometry_ready()
     AD->>TR: stop_runtime()
-    AD->>TR: start_runtime_processes(include_unfrozen_submaps=true)
+    AD->>TR: start_runtime_processes(include_unfinished_submaps=true)
     TR->>CR: 启动 mapping runtime
     AD->>TR: visual_command(load_config mapping=slam)
     AD->>TR: visual_command(add_trajectory)
     AD->>TR: wait_for_service_ready(/map)
     AD->>TR: wait_until_ready(mapping mode)
     AD->>AD: 更新 runtime_state=current_mode=mapping
+    alt start_mapping 失败
+        RT->>PARAM: mapping_session_id = ""
+    else start_mapping 成功
+        RT->>PARAM: 保留与 job_id 完全一致的 session token
+    end
     RT-->>API: job accepted / running / succeeded
     API-->>FE: 通过 get_job / slam_state 观察 mapping_session_active=true
 ```
@@ -583,6 +601,12 @@ sequenceDiagram
     API-->>FE: get_job/get_state 观察保存结果
 ```
 
+`set_active_on_save`、`switch_to_localization_after_save` 和
+`relocalize_after_switch` 是底层 contract 的兼容字段，不是商业建图验收捷径。商业
+`run_revision_workflow_acceptance.py` 会把它们固定为 `false`，先生成 inactive、
+`saved_unverified/pending` candidate，再显式 verify 和 activate；production wrapper 不提供
+mapping profile。
+
 ### 7.6 `stop_mapping` 时序
 
 ```mermaid
@@ -590,6 +614,7 @@ sequenceDiagram
     participant FE as Frontend / Gateway
     participant API as slam_api_service
     participant RT as slam_runtime_manager
+    participant PARAM as ROS parameter server
     participant EX as WorkflowRuntimeExecutor
     participant AD as CartographerRuntimeAdapter
 
@@ -598,6 +623,7 @@ sequenceDiagram
     RT->>AD: stop_mapping()
     AD->>AD: stop_runtime + clear runtime map identity
     AD-->>RT: localization / not_localized
+    RT->>PARAM: 成功后 mapping_session_id = ""
     RT-->>API: job succeeded
     API-->>FE: mapping stopped; use switch_map_and_localize to select a map and relocalize
 ```
@@ -605,6 +631,16 @@ sequenceDiagram
 `stop_mapping` 只表达“退出建图运行时”。它不再隐式使用 active map 执行
 `restart_localization`，因此低匹配分数、人工辅助和地图激活结果应由后续
 `switch_map_and_localize / activate_map_revision / prepare_for_task` 流程承接。
+
+商业现场建图必须使用 `run_revision_workflow_acceptance.py` 的 checkpoint v2
+`pause / inspect / resume` 流程。初始 topology 门要求 session token 为空；成功
+`start_mapping` 后，工具只有在 live token 与 start job ID 完全一致时，才会以当前用户所有、
+`0600` 权限原子写 checkpoint。resume 会复核 checkpoint 的车辆、profile、job、终态、
+现场快照和 live token，并在提交 `save_mapping` 前再次核对同一 token。runtime manager
+重启会在服务暴露前清 token，成功 `stop_mapping` 也会清 token，所以这两种情况都不能复用
+旧 checkpoint。建图、验证、激活完成后必须先创建精确 revision 绑定的 zone/plan/task，
+取得正整数 task ID，再单独执行 `activate_revision_prepare_for_task`；建图后立即 prepare 的
+一键 profile 已退出商业主链。
 
 ## 8. 配置与资产真源
 
@@ -775,18 +811,15 @@ scripts/start_frontend_backend.sh
 scripts/start_runtime.sh
 ```
 
-启动后顺手做最小 workflow 验证：
+通用 backend runtime smoke 是严格只读门禁，拒绝
+`BACKEND_RUNTIME_SMOKE_ACTIONS` 和 `--run-task-cycle`。真实 workflow 写动作必须在现场批准后
+使用 `run_revision_workflow_acceptance.py` 专用入口，不挂到启动流程。
 
-```bash
-BACKEND_RUNTIME_SMOKE_ACTIONS=prepare_for_task scripts/start_runtime.sh
-```
-
-启动收口后直接挂 production gate：
+启动收口后可挂只读 production gate：
 
 ```bash
 RUN_BACKEND_PRODUCTION_ACCEPTANCE=1 \
-BACKEND_PRODUCTION_ACCEPTANCE_PROFILE=activate_revision_prepare_for_task_gate \
-BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS='--map-revision-id rev_demo_01' \
+BACKEND_PRODUCTION_ACCEPTANCE_PROFILE=read_only_gate \
 scripts/start_runtime.sh
 ```
 
@@ -835,7 +868,9 @@ scripts/stop_all_backend.sh
 5. live smoke
    - `get_slam_status`
    - `get_system_readiness`
-   - `prepare_for_task -> get_slam_job`
+   - 默认只执行上述只读检查
+   - `prepare_for_task -> get_slam_job` 只允许在仿真/离线测试，或阶段 L 已完成现场动作批准、
+     物理安全门、精确 map/revision 和正整数 task 绑定后，通过专用 acceptance 工具执行
 
 ## 11. 当前运行态最小检查项
 

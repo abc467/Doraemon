@@ -12,6 +12,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 IDENTITY_VALIDATOR = REPO_ROOT / "scripts" / "commercial_vehicle_identity.sh"
 DEPLOYMENT_VERIFIER = REPO_ROOT / "scripts" / "verify_x86_ubuntu20_deployment.sh"
+START_RUNTIME = REPO_ROOT / "scripts" / "start_runtime.sh"
 RUNTIME_TEMPLATE = REPO_ROOT / "config" / "runtime.a26022.env"
 SYSTEMD_UNIT = REPO_ROOT / "deploy" / "systemd" / "doraemon-runtime.service"
 LEGACY_RUNTIME_ENV_INSTALLER = REPO_ROOT / "scripts" / "install_a26022_runtime_env.sh"
@@ -151,12 +152,99 @@ class CommercialEnvironmentValidatorTest(unittest.TestCase):
             msg="stdout:\n%s\nstderr:\n%s" % (result.stdout, result.stderr),
         )
 
+    def test_production_storage_paths_override_hostile_parent_environment(self):
+        expected = "\n".join(
+            (
+                "/data/coverage/planning.db",
+                "/data/coverage/operations.db",
+                "/data/maps",
+                "/data/maps/imports",
+                "/data/coverage/dock_calibration.yaml",
+            )
+        )
+        script = r"""
+set -euo pipefail
+source "$1"
+export PLAN_DB_PATH=/tmp/hostile-planning.db
+export OPS_DB_PATH=/tmp/hostile-operations.db
+export MAPS_ROOT=/tmp/hostile-maps
+export EXTERNAL_MAPS_ROOT=/tmp/hostile-imports
+export DOCK_CALIBRATION_STORAGE_PATH=/tmp/hostile-dock.yaml
+set -a
+source "$2"
+set +a
+commercial_pin_storage_paths
+bash -c 'printf "%s\n" "$PLAN_DB_PATH" "$OPS_DB_PATH" "$MAPS_ROOT" "$EXTERNAL_MAPS_ROOT" "$DOCK_CALIBRATION_STORAGE_PATH"'
+"""
+        with tempfile.TemporaryDirectory(prefix="doraemon-storage-pin-") as temp_dir:
+            runtime_env = pathlib.Path(temp_dir) / "runtime.env"
+            # A valid file may omit these optional keys. Hostile values inherited
+            # from the parent must still be replaced after the file is sourced.
+            runtime_env.write_text("ROBOT_ID=CR-001\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    script,
+                    "storage-pin-test",
+                    str(IDENTITY_VALIDATOR),
+                    str(runtime_env),
+                ],
+                cwd=str(REPO_ROOT),
+                env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                check=False,
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg="stdout:\n%s\nstderr:\n%s" % (result.stdout, result.stderr),
+        )
+        self.assertEqual(result.stdout.strip(), expected)
+
+        start_source = START_RUNTIME.read_text(encoding="utf-8")
+        runtime_env_source = start_source.index('source "${DORAEMON_RUNTIME_CONFIG_FILE}"')
+        production_pin = start_source.index(
+            "commercial_pin_storage_paths", runtime_env_source
+        )
+        production_exports = start_source.index(
+            'export DORAEMON_REPO_ROOT="${REPO_ROOT}"', production_pin
+        )
+        self.assertLess(runtime_env_source, production_pin)
+        self.assertLess(production_pin, production_exports)
+
     def test_runtime_validator_rejects_reserved_duplicate_and_executable_values(self):
         template = RUNTIME_TEMPLATE.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory(prefix="doraemon-runtime-injection-") as temp_dir:
             sentinel = pathlib.Path(temp_dir) / "must-not-exist"
             cases = {
                 "reserved key": template + "\nROS_MASTER_URI=http://10.0.0.1:11311\n",
+                "script directory control": template + "\nSCRIPT_DIR=/tmp/hostile-scripts\n",
+                "repository root control": template + "\nREPO_ROOT=/tmp/hostile-release\n",
+                "production entry control": template + "\nDORAEMON_PRODUCTION_ENTRY=false\n",
+                "automatic runtime smoke": template + "\nRUN_BACKEND_RUNTIME_SMOKE=1\n",
+                "runtime smoke actions": template + "\nBACKEND_RUNTIME_SMOKE_ACTIONS=start_mapping\n",
+                "runtime smoke extra args": template + "\nBACKEND_RUNTIME_SMOKE_EXTRA_ARGS=--actions,start_mapping\n",
+                "automatic revision db health": template + "\nRUN_REVISION_DB_HEALTH_CHECK=1\n",
+                "revision db strict override": template + "\nREVISION_DB_HEALTH_STRICT=1\n",
+                "automatic production gate": template + "\nRUN_BACKEND_PRODUCTION_ACCEPTANCE=1\n",
+                "production write profile": template + "\nBACKEND_PRODUCTION_ACCEPTANCE_PROFILE=revision_cycle_gate\n",
+                "production write approval": template + "\nBACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS=1\n",
+                "production extra args": template + "\nBACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS=--allow-write-actions\n",
+                "no-map startup override": template + "\nALLOW_NO_ACTIVE_MAP_STARTUP=0\n",
+                "alternate plan database": template + "\nPLAN_DB_PATH=/tmp/planning.db\n",
+                "alternate operations database": template + "\nOPS_DB_PATH=/tmp/operations.db\n",
+                "alternate maps root": template + "\nMAPS_ROOT=/tmp/maps\n",
+                "alternate imports root": template + "\nEXTERNAL_MAPS_ROOT=/tmp/imports\n",
+                "alternate dock calibration": replace_assignment(
+                    template,
+                    "DOCK_CALIBRATION_STORAGE_PATH",
+                    "/tmp/dock_calibration.yaml",
+                ),
                 "duplicate key": template + "\nROBOT_ID=CR-DUPLICATE\n",
                 "command substitution": replace_assignment(
                     template, "ROBOT_ID", "$(touch %s)" % sentinel
@@ -265,6 +353,10 @@ printf 'failures=%%s\\n' "${FAILURES}"
             "NoNewPrivileges=true",
             "UMask=0027",
             "RemainAfterExit=yes",
+            "Environment=ALLOW_NO_ACTIVE_MAP_STARTUP=1",
+            "Environment=RUN_BACKEND_RUNTIME_SMOKE=0",
+            "Environment=RUN_REVISION_DB_HEALTH_CHECK=0",
+            "Environment=RUN_BACKEND_PRODUCTION_ACCEPTANCE=0",
         ):
             self.assertEqual(lines.count(expected), 1, msg="missing exact unit line: %s" % expected)
 
@@ -320,6 +412,22 @@ printf 'failures=%%s\\n' "${FAILURES}"
             "privilege boundary": ("NoNewPrivileges=true", "NoNewPrivileges=false"),
             "umask": ("UMask=0027", "UMask=0000"),
             "oneshot state": ("RemainAfterExit=yes", "RemainAfterExit=no"),
+            "automatic smoke disabled": (
+                "Environment=RUN_BACKEND_RUNTIME_SMOKE=0",
+                "Environment=RUN_BACKEND_RUNTIME_SMOKE=1",
+            ),
+            "new vehicle degraded startup": (
+                "Environment=ALLOW_NO_ACTIVE_MAP_STARTUP=1",
+                "Environment=ALLOW_NO_ACTIVE_MAP_STARTUP=0",
+            ),
+            "automatic revision db health disabled": (
+                "Environment=RUN_REVISION_DB_HEALTH_CHECK=0",
+                "Environment=RUN_REVISION_DB_HEALTH_CHECK=1",
+            ),
+            "automatic production acceptance disabled": (
+                "Environment=RUN_BACKEND_PRODUCTION_ACCEPTANCE=0",
+                "Environment=RUN_BACKEND_PRODUCTION_ACCEPTANCE=1",
+            ),
         }
         for label, (original, replacement) in mutations.items():
             with self.subTest(label=label):

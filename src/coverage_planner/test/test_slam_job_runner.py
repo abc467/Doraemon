@@ -6,6 +6,7 @@ import sys
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +79,9 @@ class _FakeServiceApi:
 
 
 class _FakeRuntimeContext:
+    def runtime_param(self, key):
+        return "/cartographer/runtime/%s" % str(key)
+
     def runtime_map_revision_id(self):
         return "rev_demo_01"
 
@@ -94,7 +98,8 @@ class SlamJobRunnerTest(unittest.TestCase):
         )
         runner = CartographerSlamJobRunner(backend)
 
-        runner.run_job("job_1")
+        with mock.patch("coverage_planner.slam_workflow.job_runner.rospy.set_param") as set_param:
+            runner.run_job("job_1")
 
         finished = backend._job_events.finished[-1]
         self.assertTrue(finished["success"])
@@ -105,6 +110,55 @@ class SlamJobRunnerTest(unittest.TestCase):
         self.assertEqual(finished["resolved_map_revision_id"], "")
         self.assertFalse(finished["manual_assist_required"])
         self.assertFalse(finished["localization_valid"])
+        set_param.assert_called_once_with(
+            "/cartographer/runtime/mapping_session_id",
+            "",
+        )
+
+    def test_successful_start_mapping_publishes_stable_session_token(self):
+        job_state = _FakeJobState()
+        job_state.snapshots["job_1"].update(
+            {
+                "operation": 3,
+                "runtime_operation": 2,
+                "operation_name": "start_mapping",
+                "requested_map_name": "",
+                "requested_map_revision_id": "",
+            }
+        )
+
+        class StartServiceApi(_FakeServiceApi):
+            def execute_operation(self, **_kwargs):
+                return SimpleNamespace(
+                    success=True,
+                    error_code="",
+                    message="mapping started",
+                    map_name="",
+                    map_revision_id="",
+                    current_mode="mapping",
+                    localization_state="mapping",
+                )
+
+        backend = SimpleNamespace(
+            robot_id="local_robot",
+            _lock=threading.Lock(),
+            _job_state=job_state,
+            _job_events=_FakeEvents(),
+            _service_api=StartServiceApi(),
+            _runtime_context=_FakeRuntimeContext(),
+        )
+        runner = CartographerSlamJobRunner(backend)
+
+        with mock.patch("coverage_planner.slam_workflow.job_runner.rospy.set_param") as set_param:
+            runner.run_job("job_1")
+
+        finished = backend._job_events.finished[-1]
+        self.assertTrue(finished["success"])
+        self.assertEqual(finished["status"], "succeeded")
+        set_param.assert_called_once_with(
+            "/cartographer/runtime/mapping_session_id",
+            "job_1",
+        )
 
     def test_persisted_success_manual_assist_snapshot_normalizes_status(self):
         controller = CartographerSlamJobController(SimpleNamespace(robot_id="local_robot"))

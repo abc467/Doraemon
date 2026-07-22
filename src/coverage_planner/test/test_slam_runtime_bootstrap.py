@@ -104,6 +104,21 @@ class SlamRuntimeLogRootTest(unittest.TestCase):
         params = {item.get("name"): item.get("value") for item in runtime_nodes[0].findall("param")}
         self.assertEqual(params.get("log_root"), "$(arg slam_runtime_log_root)")
 
+    def test_planner_launch_exposes_runtime_repository_map_root(self):
+        root = ET.parse(PLANNER_LAUNCH).getroot()
+        runtime_nodes = [
+            item
+            for item in root.iter("node")
+            if item.get("name") == "slam_runtime_manager"
+        ]
+        self.assertEqual(len(runtime_nodes), 1)
+        params = {
+            item.get("name"): item.get("value")
+            for item in runtime_nodes[0].findall("param")
+        }
+        self.assertEqual(params.get("maps_root"), "$(arg maps_root)")
+        self.assertEqual(params.get("repo_map_root"), "$(arg maps_root)")
+
 
 class SlamConfigRootSecurityTest(unittest.TestCase):
     def test_default_uses_only_reviewed_external_or_canonical_release_config(self):

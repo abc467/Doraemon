@@ -194,6 +194,7 @@
       <param name="plan_db_path" value="$(arg plan_db_path)"/>
       <param name="ops_db_path" value="$(arg ops_db_path)"/>
       <param name="maps_root" value="$(arg maps_root)"/>
+      <param name="repo_map_root" value="$(arg maps_root)"/>
       <param name="log_root" value="$(arg slam_runtime_log_root)"/>
       <param name="robot_id" value="$(arg robot_id)"/>
       <param name="runtime_ns" value="$(arg runtime_ns)"/>

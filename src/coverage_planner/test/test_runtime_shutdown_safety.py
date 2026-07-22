@@ -416,6 +416,12 @@ validate_commercial_vehicle_identity
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
+    def test_backend_runtime_smoke_command_forwards_vehicle_identity(self):
+        source = read_repo_file("scripts/start_runtime.sh")
+        function = bash_function(source, "build_backend_runtime_smoke_cmd")
+        self.assertIn("--robot-id", function)
+        self.assertIn('"${ROBOT_ID}"', function)
+
     def test_no_action_runtime_asserts_transport_and_service_absence(self):
         source = read_repo_file("scripts/start_runtime.sh")
         function = bash_function(source, "assert_no_action_runtime_isolated")

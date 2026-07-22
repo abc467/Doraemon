@@ -156,6 +156,13 @@ class SlamRuntimeNodeWiring:
     def wire(self):
         backend = self._backend
         rospy_module = self._rospy
+        # A runtime-manager restart invalidates every paused mapping checkpoint.
+        # Clear the session token before exposing any operation service so a stale
+        # checkpoint can never attach to an unproven mapping process.
+        rospy_module.set_param(
+            backend._runtime_context.runtime_param("mapping_session_id"),
+            "",
+        )
         rospy_module.Subscriber(backend.map_topic, OccupancyGrid, self.on_map, queue_size=2)
         rospy_module.Subscriber(backend.tracked_pose_topic, PoseStamped, self.on_tracked_pose, queue_size=20)
         backend._initial_pose_pub = rospy_module.Publisher(

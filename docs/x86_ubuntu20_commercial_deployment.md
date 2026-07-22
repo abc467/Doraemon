@@ -1,6 +1,6 @@
 # 清洁机器人 x86 Ubuntu 20.04 商业部署手册
 
-版本：2026-07-21 v5
+版本：2026-07-22 v6
 
 本文用于把 Doraemon 清洁机器人后端、清洁机器人前端和 Site Gateway
 部署到全新的 x86 主板。目标系统为 Ubuntu 20.04，部署操作用户为 `a`。
@@ -11,7 +11,7 @@
 
 | 工程 | GitHub | 部署标签 |
 | --- | --- | --- |
-| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-21-x86-ubuntu20-v5` |
+| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-22-x86-ubuntu20-v6` |
 | 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-21-frontend-v2` |
 
 不要用仓库默认分支或 `latest` 做批量生产。部署标签、依赖清单和验收记录
@@ -88,7 +88,7 @@ group/other 写权限。`current` 符号链接本身也必须为 `root:root`。
 | --- | --- |
 | 车辆资产编号 | `<公司资产系统中的唯一编号>` |
 | hostname | `clean-robot-<唯一序号>` |
-| 后端标签 | `deployment-2026-07-21-x86-ubuntu20-v5` |
+| 后端标签 | `deployment-2026-07-22-x86-ubuntu20-v6` |
 | 前端标签 | `deployment-2026-07-21-frontend-v2` |
 | 机器人内部网口 | 现场识别，例如 `eno1` |
 | A-box 地址 | `192.168.127.11/24` |
@@ -177,7 +177,7 @@ Ubuntu 维护方案和受控 APT/ROS 镜像，保存安装包与校验值，不�
 sudo install -d -o root -g root -m 0755 /opt/doraemon/releases
 sudo install -d -o root -g root -m 0755 /opt/doraemon/deps
 sudo install -d -o a -g a -m 0755 \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 ```
 
@@ -187,21 +187,21 @@ stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-21-x86-ubuntu20-v5 \
+  --branch deployment-2026-07-22-x86-ubuntu20-v6 \
   https://github.com/abc467/Doraemon.git \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 ```
 
 验证：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
 git rev-parse HEAD
 git rev-parse --is-shallow-repository
 du -sh . .git
-release=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 find "${release}" -xdev \
   -path "${release}/.git" -prune -o \
   \( \
@@ -261,7 +261,7 @@ FLIRT 兼容源码已小体积纳入 `third_party/flirt`，来源和修改说明
 依赖编译可能较久。并发数应按主板内存调整；首次部署建议从 4 开始：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 DORAEMON_BUILD_JOBS=4 ./scripts/install_x86_ubuntu20_dependencies.sh
 ```
 
@@ -292,7 +292,7 @@ reset/clean，也不得改成任意新版本来绕过错误。
 ### 6.3 依赖验收
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 cat /etc/doraemon/deps.env
 source /etc/profile.d/doraemon-deps.sh
 /opt/doraemon/deps/cmake-3.20.6/bin/cmake --version
@@ -371,7 +371,7 @@ test -z "$(find /opt/doraemon/deps -xdev \
 ## 7. 阶段 D：编译后端工作空间
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 ```
 
@@ -382,7 +382,7 @@ Fields2Cover、`coverage_planner`、`coverage_task_manager` 和
 检查：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source devel/setup.bash
@@ -481,7 +481,7 @@ udevadm info --query=property --name=/dev/ttyUSB0
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5/deploy/udev/99-doraemon-a26022-serial.rules.example \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6/deploy/udev/99-doraemon-a26022-serial.rules.example \
   /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 sudoedit /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 ```
@@ -503,7 +503,7 @@ ls -l /dev/imu /dev/wheel_odom /dev/mcore
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
   /etc/udev/rules.d/99-obsensor-ros1-libusb.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -533,7 +533,7 @@ systemctl is-enabled doraemon-runtime.service || true
 清理或替换 `build/`、`devel/`：
 
 ```bash
-release=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 cd "${release}"
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
@@ -556,37 +556,37 @@ test -z "$(find "${release}" -xdev \
       -iname export.log -o -iname '*.db' -o -iname '*.sqlite*' \) \
   \) -print -quit)"
 sudo chown -hR root:root \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 sudo chmod -R go-w \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 sudo chown root:root /opt/doraemon/releases
 sudo chmod 0755 /opt/doraemon/releases
 sudo ln -sfn \
-  /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
   /opt/doraemon/current
 sudo chown -h root:root /opt/doraemon/current
 
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
   -xdev \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
   -xdev \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/doraemon/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/doraemon/current)" = 'root:root'
 test "$(readlink -f /opt/doraemon/current)" = \
-  '/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5'
+  '/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6'
 test "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
-  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
   describe --tags --exact-match)" = \
-  'deployment-2026-07-21-x86-ubuntu20-v5'
+  'deployment-2026-07-22-x86-ubuntu20-v6'
 test -z "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
-  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
   status --porcelain=v1 --untracked-files=all)"
 sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
-  -C /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
   rev-parse HEAD
 ```
 
@@ -608,7 +608,7 @@ allowlist 执行一次性 `sudo -n git` 只读检查；它们不得改用全局 
 只从这个已冻结的物理 release 安装，显式保持“不启用”：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-21-x86-ubuntu20-v5
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
 DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
 ```
 
@@ -675,7 +675,7 @@ DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
 USB3 拓扑仍为占位符，服务必须拒绝启动。相机在生产入口始终按序列号绑定；
 USB3 拓扑用于独立审计，启动前还会用目标版本内的 Orbbec SDK 验证
 `序列号 ↔ 拓扑` 配对、厂商和 SuperSpeed，不允许在失败时自动降级到另一个设备。
-v5 的枚举器只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
+v6 延续 v5 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
 的超时预算内重试，并要求连续两次都得到恰好三条、唯一且与本车配置完全相同的配对。
 空、部分、额外、重复、畸形或超时快照都会清零连续成功计数并继续等待，直至预算耗尽后
 fail closed。原始 SDK stdout/stderr 不得直接写入 systemd journal。
@@ -749,6 +749,9 @@ release 配置；先停止并由配置负责人修正或受控清空后重新验
 - 不复制其他车的 `planning.db`、`operations.db`、地图和标定。
 - 不复制 `dock_calibration.yaml`。
 - 部署后现场建图、创建任务并执行充电桩标定。
+- 在首次建图前只能使用阶段 K 明确给出的
+  `stage_k_new_vehicle_no_map` 门禁。该门禁会以可见 WAL 的 SQLite 只读连接证明地图、
+  任务和动作历史为空，并要求任务保持 fail closed；它不是普通 smoke 失败后的降级选项。
 
 同一物理车辆更换主板：
 
@@ -756,6 +759,8 @@ release 配置；先停止并由配置负责人修正或受控清空后重新验
 - 迁移前后保存 SHA256 清单。
 - 仍需复核地图坐标、轮速方向、充电桩位置和标定有效性。
 - 不迁移 bag、构建目录、日志缓存或前端 SQLite 会话。
+- 只要迁移过地图、数据库或标定，就不得使用 `stage_k_new_vehicle_no_map`；必须按已有地图
+  车辆执行默认 task-ready 门禁，并复核迁移清单。
 
 ## 11. 阶段 H：无动作后端预检
 
@@ -1020,6 +1025,7 @@ sudo journalctl -u doraemon-runtime.service -n 200 --no-pager
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source /opt/doraemon/current/devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11311
 rosnode list
 rostopic list
 rosparam get /coverage_task_manager/auto_charge_enable
@@ -1038,16 +1044,80 @@ rostopic hz /gemini_cf/depth/points
 rostopic hz /gemini_nj/depth/points
 rostopic hz /gemini_front/depth/points
 rosrun coverage_planner check_ros_contracts.py --strict --exclude-manual-drive --text
-rosrun coverage_planner run_backend_runtime_smoke.py --text
 ```
 
-最后两个命令为只读/非执行动作验收入口。此阶段不要运行带
+`check_ros_contracts.py` 是只读/非执行动作验收入口。随后只能从下面两个互斥的 runtime
+smoke 入口中选择一个，不得先运行默认门禁，失败后再回退为“新车无地图”。
+
+从未建图、未迁移任何其他车辆数据且尚未生成充电桩标定的全新车辆执行：
+
+```bash
+rosrun coverage_planner run_backend_runtime_smoke.py \
+  --profile stage_k_new_vehicle_no_map \
+  --robot-id CR-001 \
+  --plan-db-path /data/coverage/planning.db \
+  --ops-db-path /data/coverage/operations.db \
+  --maps-root /data/maps \
+  --dock-calibration-path /data/coverage/dock_calibration.yaml \
+  --auto-charge-state-path /data/coverage/auto_charge_monitor_state.json \
+  --auto-charge-event-log-path /data/coverage/auto_charge_monitor_events.jsonl \
+  --text
+```
+
+阶段 K 的商业数据路径是不可替换的固定契约：`planning.db`、`operations.db`、地图根目录、
+地图导入目录、充电桩标定、自动充电状态和自动充电事件日志必须分别为
+`/data/coverage/planning.db`、`/data/coverage/operations.db`、`/data/maps`、
+`/data/maps/imports`、`/data/coverage/dock_calibration.yaml`、
+`/data/coverage/auto_charge_monitor_state.json` 和
+`/data/coverage/auto_charge_monitor_events.jsonl`。不得通过 `/etc/doraemon/runtime.env`、
+调用终端环境、`*_EXTRA_ARGS`、另一个路径或符号链接替换；任一路径不一致都是
+阶段 K `[停止条件]`。
+
+其中 `CR-001` 必须替换为当前单车记录中的精确资产编号。该 profile 只有在以下状态全部
+成立时才通过：两个数据库结构健康且车辆数据表为空；地图目录为空或只有空的 `imports/`；
+不存在标定文件或符号链接；自动充电状态、计数、周期和事件日志均为空；SLAM、任务、job 和 manual-assist
+均空闲；里程计健康；返回车辆身份精确匹配；`overall_ready=false`、
+`can_start_task=false`。后二者是新车尚未建图时正确的 fail-closed 证据，**不表示任务就绪**。
+门禁会在 ROS 只读检查前后各取一次语义快照；任何地图、任务、标定或动作状态变化都失败。
+该 profile 要求 readiness 精确包含 `battery_state missing`、`combined_status missing` 和
+`station bridge offline`；无地图时只额外允许下面这一条完整匹配的可选 warning：
+
+```text
+health warning latched: TF_LOOKUP_FAIL:"map" passed to lookupTransform argument target_frame does not exist.
+```
+
+该例外只适用于全新无地图 profile。大小写、标点或内容不同的 TF/health warning，以及
+上述集合之外的任何 warning，均为阶段 K `[停止条件]`。
+
+同车换板并已受控迁移地图，或本车已经完成过建图时，不得使用上述 profile。此类车辆执行
+默认 task-ready 门禁，并只允许无动作覆盖必然产生的三条精确 warning：
+
+```bash
+rosrun coverage_planner run_backend_runtime_smoke.py \
+  --profile task_ready \
+  --robot-id CR-001 \
+  --ignore-warning 'battery_state missing' \
+  --ignore-warning 'combined_status missing' \
+  --ignore-warning 'station bridge offline' \
+  --text
+```
+
+任一额外 warning、未知 blocker、车辆身份不符或地图/定位未达到 task-ready 都是停止条件。
+上述命令均为只读入口。此阶段不要运行带
 `--allow-write-actions`、`--actions` 或 `--run-task-cycle` 的脚本。当
 `DORAEMON_NO_ACTION_ACCEPTANCE=true` 时，启动脚本会拒绝非空的
 `BACKEND_RUNTIME_SMOKE_ACTIONS`、`BACKEND_RUNTIME_SMOKE_EXTRA_ARGS` 和
 `BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS`；如启用合并生产验收，只允许
 `read_only_gate` 且必须禁用写动作。
-`/coverage_task_manager/auto_charge_enable` 必须为 `false`，且 `rosnode list` 中不得
+`/etc/doraemon/runtime.env` 不得设置或启用 `RUN_BACKEND_RUNTIME_SMOKE`、
+`RUN_REVISION_DB_HEALTH_CHECK`、`RUN_BACKEND_PRODUCTION_ACCEPTANCE`、任何自动验收 profile，
+也不得设置验收 action/extra-args。阶段 K 验收只能由部署人员显式执行上述命令并
+归档输出。
+systemd unit 固定 `RUN_BACKEND_RUNTIME_SMOKE=0`、`RUN_REVISION_DB_HEALTH_CHECK=0` 和
+`RUN_BACKEND_PRODUCTION_ACCEPTANCE=0`，且无 active map 的启动分支会在后置 smoke 前
+安全返回；因此这里的 profile 必须由部署人员显式执行并归档，不能把“后端启动成功”
+当作门禁已经自动运行。`/coverage_task_manager/auto_charge_enable` 必须为 `false`，
+且 `rosnode list` 中不得
 出现上述任一动作传输节点，两个 `grep` 命令都应无输出；否则立即停止。
 
 无动作模式要求 manual-drive 节点/服务不存在，且 `/cmd_vel` 不能连接任何底盘订阅者。
@@ -1213,19 +1283,75 @@ MANUAL_DRIVE_REQUIRE_COMBINED_STATUS=true
 
 ### 15.2 建图和任务验收
 
-全新车辆必须建立当前现场地图，不使用其他车辆测试地图：
+全新车辆必须先在本现场受控建图、保存、验证、激活并完成定位，不使用其他车辆测试地图。
+写动作步骤和人工暂停/恢复入口见 `docs/backend_runtime_smoke_v1.md`；只有明确核对 profile、
+本车资产编号、地图名和现场状态后，才允许添加 `--allow-write-actions`。
+
+checkpoint v2 的 mapping resume 成功后，先从其报告记录精确 `map_name` 和
+`map_revision_id`。此时不得直接把“地图已激活”记作任务验收通过：必须先在前端为这个
+精确 revision 创建并复核 zone、plan 和 task，确认前端显示的车辆、地图和 revision
+均属于本车，再取得该 task 的正整数 ID。`task_id=0` 会跳过 task 配置绑定检查，不能作为
+阶段 L 任务验收结果。
+
+在当前终端加载固定环境，并输入上述已复核值；三个格式检查任一失败都立即停止：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source /etc/profile.d/doraemon-deps.sh
+source /opt/doraemon/current/devel/setup.bash
+export ROS_MASTER_URI=http://127.0.0.1:11311
+
+read -r -p '输入 mapping 报告中的 map_name: ' ACCEPTED_MAP_NAME
+read -r -p '输入 mapping 报告中的 map_revision_id: ' ACCEPTED_MAP_REVISION_ID
+read -r -p '输入前端中该 revision 绑定的正整数 task ID: ' ACCEPTED_TASK_ID
+[[ "${ACCEPTED_MAP_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+[[ "${ACCEPTED_MAP_REVISION_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+[[ "${ACCEPTED_TASK_ID}" =~ ^[1-9][0-9]*$ ]]
+```
+
+先通过专用写入口对精确 revision 执行 prepare，并验证正整数 task 绑定；不得恢复已删除的
+“建图后立即 prepare”一键 profile：
+
+```bash
+rosrun coverage_planner run_revision_workflow_acceptance.py \
+  --profile activate_revision_prepare_for_task \
+  --robot-id CR-001 \
+  --task-id "${ACCEPTED_TASK_ID}" \
+  --map-name "${ACCEPTED_MAP_NAME}" \
+  --map-revision-id "${ACCEPTED_MAP_REVISION_ID}" \
+  --allow-write-actions \
+  --text
+```
+
+该命令必须报告相同的车辆、地图、revision 和 task，并达到 task-ready；否则属于
+`[停止条件]`。随后用同一个正整数 task ID 执行严格只读 runtime smoke；此时不得继续使用
+阶段 K 的 `stage_k_new_vehicle_no_map`：
+
+```bash
+rosrun coverage_planner run_backend_runtime_smoke.py \
+  --profile task_ready \
+  --robot-id CR-001 \
+  --task-id "${ACCEPTED_TASK_ID}" \
+  --text
+```
+
+再以同一个 task ID 执行只读生产门禁：
 
 ```bash
 rosrun coverage_planner run_backend_production_acceptance.py \
   --profile read_only_gate \
   --plan-db-path /data/coverage/planning.db \
   --ops-db-path /data/coverage/operations.db \
+  --robot-id CR-001 \
+  --task-id "${ACCEPTED_TASK_ID}" \
   --text
+
+unset ACCEPTED_MAP_NAME ACCEPTED_MAP_REVISION_ID ACCEPTED_TASK_ID
 ```
 
-需要写入地图/任务的生产验收入口见 `docs/backend_runtime_smoke_v1.md`。
-只有明确核对 profile、地图名和现场状态后，才允许添加
-`--allow-write-actions`。
+以上三个 acceptance 命令的 `CR-001` 均必须替换为当前车辆资产编号。任一输出中的
+task/map/revision 绑定不一致，或未达到 localization/runtime-map match/task-ready，均属于
+阶段 L `[停止条件]`。单纯用 `task_id=0` 得到平台 readiness 不能替代本节正整数 task 验收。
 
 ### 15.3 充电桩标定验收
 
@@ -1566,7 +1692,8 @@ sudo journalctl -u clean-robot-site-gateway.service -n 150 --no-pager
 - [ ] 支持名称、电话和邮箱已替换为真实批准值，前端显示复验通过
 - [ ] 前端 SQLite 位于 `/var/lib/clean-robot-site`
 - [ ] 地图和数据库位于 `/data`，没有复制其他新车数据
-- [ ] 只读 contract 和 runtime smoke 通过
+- [ ] 阶段 K 新车无地图门禁通过并证明任务 fail closed；已有/迁移车辆未误用该 profile
+- [ ] 阶段 L 建图后已为精确 revision 创建 zone/plan/task，并以同一正整数 task ID 通过 prepare、严格 runtime smoke 与 production read-only gate
 - [ ] 无动作阶段 manual-drive 节点/服务不存在，`/cmd_vel` 无 subscriber 且 publisher 仅限已审计 allowlist
 - [ ] `9090`、`11311` 实测仅监听 loopback，阶段 K 两服务保持 disabled 且 `NRestarts=0`
 - [ ] 急停、低速底盘、传感器安全链通过

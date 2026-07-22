@@ -228,6 +228,10 @@ check_static_runtime_contract() {
     "RemainAfterExit=yes" \
     "Restart=no" \
     "KillMode=mixed" \
+    "Environment=ALLOW_NO_ACTIVE_MAP_STARTUP=1" \
+    "Environment=RUN_BACKEND_RUNTIME_SMOKE=0" \
+    "Environment=RUN_REVISION_DB_HEALTH_CHECK=0" \
+    "Environment=RUN_BACKEND_PRODUCTION_ACCEPTANCE=0" \
     "UMask=0027" \
     "NoNewPrivileges=true"; do
     unit_line_count="$(grep -Fxc -- "${required_unit_line}" "${unit_source}" || true)"
@@ -459,7 +463,11 @@ check_installed_runtime_contract() {
     "DORAEMON_ROS_SETUP=/opt/ros/noetic/setup.bash" \
     "ROS_HOME=/var/lib/doraemon/ros" \
     "ROS_MASTER_URI=http://127.0.0.1:11311" \
-    "LOG_DIR=/var/log/doraemon/startup"; do
+    "LOG_DIR=/var/log/doraemon/startup" \
+    "ALLOW_NO_ACTIVE_MAP_STARTUP=1" \
+    "RUN_BACKEND_RUNTIME_SMOKE=0" \
+    "RUN_REVISION_DB_HEALTH_CHECK=0" \
+    "RUN_BACKEND_PRODUCTION_ACCEPTANCE=0"; do
     [[ " ${actual} " == *" ${expected_environment} "* ]] && \
       ok "installed protected environment ${expected_environment%%=*}" || \
       fail "installed unit missing protected environment: ${expected_environment}"

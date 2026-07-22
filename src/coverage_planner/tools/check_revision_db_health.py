@@ -7,6 +7,7 @@ import os
 import sqlite3
 import sys
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 
 TERMINAL_RUN_STATES = {
@@ -21,10 +22,55 @@ TERMINAL_RUN_STATES = {
     "DONE",
 }
 
+REQUIRED_PLAN_SCHEMA = {
+    "map_revisions": {
+        "revision_id", "map_name", "enabled", "lifecycle_status",
+        "verification_status", "created_ts",
+    },
+    "map_assets": {"map_name", "current_revision_id"},
+    "zones": {"map_revision_id", "map_name", "zone_id", "current_zone_version"},
+    "zone_versions": {"map_revision_id", "map_name", "zone_id", "zone_version"},
+    "plans": {
+        "plan_id", "map_revision_id", "map_name", "zone_id", "zone_version",
+        "plan_profile_name",
+    },
+    "zone_active_plans": {
+        "map_revision_id", "map_name", "zone_id", "plan_profile_name", "active_plan_id",
+    },
+    "robot_active_map_revision": {"robot_id", "active_revision_id"},
+    "robot_pending_map_revision": {
+        "robot_id", "from_revision_id", "target_revision_id", "status",
+    },
+    "robot_pending_map_switch": {"robot_id", "from_map_name", "target_map_name", "status"},
+}
+
+REQUIRED_OPS_SCHEMA = {
+    "jobs": {"job_id", "map_name", "map_revision_id", "zone_id", "plan_profile_name"},
+    "job_schedules": {"schedule_id", "job_id"},
+    "mission_runs": {
+        "run_id", "job_id", "map_name", "map_revision_id", "zone_id",
+        "plan_profile_name", "plan_id", "state", "end_ts", "updated_ts",
+    },
+    "mission_checkpoints": {"run_id", "zone_id", "plan_id", "map_revision_id"},
+    "robot_runtime_state": {
+        "robot_id", "active_run_id", "active_job_id", "map_name", "map_revision_id",
+        "mission_state", "phase", "public_state", "executor_state",
+    },
+    "slam_jobs": {
+        "job_id", "robot_id", "requested_map_name", "requested_map_revision_id",
+        "resolved_map_name", "resolved_map_revision_id", "status", "done", "updated_ts",
+    },
+}
+
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path or ""))
+    path = os.path.abspath(str(db_path or ""))
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise FileNotFoundError("database must be an existing regular non-symlink file: %s" % path)
+    uri = "file:%s?mode=ro" % quote(path, safe="/")
+    conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only=ON;")
     return conn
 
 
@@ -37,10 +83,50 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 
 def _fetch_rows(conn: sqlite3.Connection, query: str, args: Sequence[object] = ()) -> List[sqlite3.Row]:
-    try:
-        return list(conn.execute(query, tuple(args)).fetchall() or [])
-    except Exception:
-        return []
+    return list(conn.execute(query, tuple(args)).fetchall() or [])
+
+
+def _validate_database(
+    conn: sqlite3.Connection,
+    *,
+    db_path: str,
+    required_schema: Dict[str, set],
+) -> None:
+    integrity_rows = [str(row[0] or "") for row in conn.execute("PRAGMA integrity_check;").fetchall()]
+    if integrity_rows != ["ok"]:
+        raise RuntimeError(
+            "database integrity_check failed path=%s result=%s"
+            % (str(db_path or ""), "; ".join(integrity_rows) or "empty")
+        )
+    foreign_key_rows = list(conn.execute("PRAGMA foreign_key_check;").fetchall() or [])
+    if foreign_key_rows:
+        raise RuntimeError(
+            "database foreign_key_check failed path=%s rows=%d"
+            % (str(db_path or ""), len(foreign_key_rows))
+        )
+
+    table_rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name ASC;"
+    ).fetchall()
+    table_names = {str(row[0] or "") for row in table_rows}
+    missing_tables = sorted(set(required_schema) - table_names)
+    if missing_tables:
+        raise RuntimeError(
+            "database schema missing required tables path=%s tables=%s"
+            % (str(db_path or ""), ",".join(missing_tables))
+        )
+
+    for table_name, required_columns in sorted(required_schema.items()):
+        column_rows = conn.execute(
+            'PRAGMA table_info("%s");' % str(table_name).replace('"', '""')
+        ).fetchall()
+        column_names = {str(row[1] or "") for row in column_rows}
+        missing_columns = sorted(set(required_columns) - column_names)
+        if missing_columns:
+            raise RuntimeError(
+                "database schema missing required columns path=%s table=%s columns=%s"
+                % (str(db_path or ""), table_name, ",".join(missing_columns))
+            )
 
 
 def _row_dicts(rows: Iterable[sqlite3.Row]) -> List[Dict[str, object]]:
@@ -234,6 +320,11 @@ def _build_revision_scope(plan_ctx: Dict[str, object], *, robot_id: str = "") ->
 def _plan_context(plan_db_path: str) -> Dict[str, object]:
     conn = _connect(plan_db_path)
     try:
+        _validate_database(
+            conn,
+            db_path=plan_db_path,
+            required_schema=REQUIRED_PLAN_SCHEMA,
+        )
         revisions = {
             _nonempty(row["revision_id"]): dict(row)
             for row in _fetch_rows(conn, "SELECT * FROM map_revisions ORDER BY map_name ASC, created_ts ASC;")
@@ -308,7 +399,7 @@ def _plan_context(plan_db_path: str) -> Dict[str, object]:
 
 
 def _ops_context(ops_db_path: str) -> Dict[str, object]:
-    if not ops_db_path or not os.path.exists(ops_db_path):
+    if not ops_db_path:
         return {
             "available": False,
             "jobs": [],
@@ -323,6 +414,11 @@ def _ops_context(ops_db_path: str) -> Dict[str, object]:
         }
     conn = _connect(ops_db_path)
     try:
+        _validate_database(
+            conn,
+            db_path=ops_db_path,
+            required_schema=REQUIRED_OPS_SCHEMA,
+        )
         jobs = _row_dicts(_fetch_rows(conn, "SELECT * FROM jobs ORDER BY job_id ASC;")) if _table_exists(conn, "jobs") else []
         job_schedules = (
             _row_dicts(_fetch_rows(conn, "SELECT * FROM job_schedules ORDER BY schedule_id ASC;"))

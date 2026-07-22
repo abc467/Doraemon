@@ -24,7 +24,12 @@ from coverage_planner.map_path_security import (
     validate_revision_id,
 )
 from coverage_planner.ros_contract import build_contract_report, validate_ros_contract
-from coverage_planner.slam_workflow.api import STOP_MAPPING, SUPPORTED_SUBMIT_OPERATIONS, normalize_map_name
+from coverage_planner.slam_workflow.api import (
+    RUNTIME_STOP_MAPPING,
+    STOP_MAPPING,
+    SUPPORTED_SUBMIT_OPERATIONS,
+    normalize_map_name,
+)
 from coverage_planner.slam_workflow.executor import LocalizationRequest
 
 
@@ -151,11 +156,8 @@ class SlamRuntimeServiceController:
             features=[
                 "runtime_operation_control",
                 "restart_localization",
-                "start_mapping",
-                "save_mapping",
-                "stop_mapping",
-                "verify_map_revision",
-                "activate_map_revision",
+                "synchronous_write_operations_disabled",
+                "async_slam_workflow_required",
                 "cleanrobot_app_msgs_parallel",
             ],
         )
@@ -239,7 +241,7 @@ class SlamRuntimeServiceController:
                 localization_state="not_localized",
                 current_mode="",
             )
-        if int(operation) == STOP_MAPPING:
+        if int(operation) == RUNTIME_STOP_MAPPING:
             effective_map_name = ""
             map_revision_id = ""
         else:
@@ -409,8 +411,20 @@ class SlamRuntimeServiceController:
     def handle_submit_job_app(self, req):
         backend = self._backend
         job_state = backend._job_state
-        robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
         operation = int(req.operation)
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != backend.robot_id:
+            return AppSubmitSlamCommandResponse(
+                accepted=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, backend.robot_id),
+                error_code="robot_id_mismatch",
+                job_id="",
+                operation=operation,
+                map_name="",
+                job=self._job_state_msg(None),
+            )
+        robot_id = str(backend.robot_id)
         try:
             raw_map_name = validate_map_name(req.map_name, allow_empty=True)
             map_revision_id = validate_revision_id(
@@ -474,8 +488,34 @@ class SlamRuntimeServiceController:
                 map_name=map_name,
                 job=job,
             )
-        if job_state.job_running():
-            active = job_state.get_job_snapshot()
+        requested_map_name = save_map_name if operation == int(req.save_mapping) and save_map_name else map_name
+
+        def make_job():
+            return job_state.make_job_record(
+                operation=operation,
+                robot_id=robot_id,
+                map_name=requested_map_name,
+                map_revision_id=map_revision_id,
+                set_active=bool(getattr(req, "set_active_on_save", False) or req.set_active),
+                description=str(req.description or ""),
+                frame_id=str(getattr(req, "frame_id", "map") or "map"),
+                has_initial_pose=bool(getattr(req, "has_initial_pose", False)),
+                initial_pose_x=float(getattr(req, "initial_pose_x", 0.0) or 0.0),
+                initial_pose_y=float(getattr(req, "initial_pose_y", 0.0) or 0.0),
+                initial_pose_yaw=float(getattr(req, "initial_pose_yaw", 0.0) or 0.0),
+                include_unfinished_submaps=bool(getattr(req, "include_unfinished_submaps", True)),
+                switch_to_localization_after_save=bool(
+                    getattr(req, "switch_to_localization_after_save", False)
+                ),
+                relocalize_after_switch=bool(getattr(req, "relocalize_after_switch", False)),
+            )
+
+        snapshot, active = job_state.try_reserve_and_publish_job(
+            make_job,
+            sync_runtime=True,
+            update_error=False,
+        )
+        if snapshot is None:
             active_msg = self._job_state_msg(active)
             return AppSubmitSlamCommandResponse(
                 accepted=False,
@@ -487,26 +527,6 @@ class SlamRuntimeServiceController:
                 job=active_msg,
             )
 
-        requested_map_name = save_map_name if operation == int(req.save_mapping) and save_map_name else map_name
-        job = job_state.make_job_record(
-            operation=operation,
-            robot_id=robot_id,
-            map_name=requested_map_name,
-            map_revision_id=map_revision_id,
-            set_active=bool(getattr(req, "set_active_on_save", False) or req.set_active),
-            description=str(req.description or ""),
-            frame_id=str(getattr(req, "frame_id", "map") or "map"),
-            has_initial_pose=bool(getattr(req, "has_initial_pose", False)),
-            initial_pose_x=float(getattr(req, "initial_pose_x", 0.0) or 0.0),
-            initial_pose_y=float(getattr(req, "initial_pose_y", 0.0) or 0.0),
-            initial_pose_yaw=float(getattr(req, "initial_pose_yaw", 0.0) or 0.0),
-            include_unfinished_submaps=bool(getattr(req, "include_unfinished_submaps", True)),
-            switch_to_localization_after_save=bool(
-                getattr(req, "switch_to_localization_after_save", False)
-            ),
-            relocalize_after_switch=bool(getattr(req, "relocalize_after_switch", False)),
-        )
-        snapshot = job_state.publish_job_snapshot(job, sync_runtime=True, update_error=False)
         worker = threading.Thread(
             target=backend._job_runner.run_job,
             args=(str(snapshot.get("job_id") or ""),),
@@ -527,7 +547,16 @@ class SlamRuntimeServiceController:
     def handle_get_job_app(self, req):
         backend = self._backend
         job_state = backend._job_state
-        robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != backend.robot_id:
+            return AppGetSlamJobResponse(
+                found=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, backend.robot_id),
+                error_code="robot_id_mismatch",
+                job=self._job_state_msg(None),
+            )
+        robot_id = str(backend.robot_id)
         snapshot = job_state.get_job_snapshot(str(req.job_id or ""))
         if not snapshot:
             return AppGetSlamJobResponse(
@@ -553,7 +582,20 @@ class SlamRuntimeServiceController:
     def _handle_operate(self, req):
         backend = self._backend
         job_state = backend._job_state
-        robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != backend.robot_id:
+            return self.response(
+                success=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, backend.robot_id),
+                error_code="robot_id_mismatch",
+                operation=int(req.operation),
+                map_name="",
+                map_revision_id="",
+                localization_state="not_localized",
+                current_mode="",
+            )
+        robot_id = str(backend.robot_id)
         try:
             raw_map_name = validate_map_name(req.map_name, allow_empty=True)
             map_revision_id = validate_revision_id(
@@ -600,6 +642,27 @@ class SlamRuntimeServiceController:
                 current_mode="",
             )
         operation = int(req.operation)
+        synchronous_write_operations = {
+            int(AppOperateSlamRuntime._request_class.start_mapping),
+            int(AppOperateSlamRuntime._request_class.save_mapping),
+            int(AppOperateSlamRuntime._request_class.stop_mapping),
+            int(AppOperateSlamRuntime._request_class.verify_map_revision),
+            int(AppOperateSlamRuntime._request_class.activate_map_revision),
+        }
+        if operation in synchronous_write_operations:
+            return self.response(
+                success=False,
+                message=(
+                    "synchronous state-changing operations are disabled; use the async "
+                    "submit_job commercial workflow"
+                ),
+                error_code="async_slam_workflow_required",
+                operation=operation,
+                map_name=map_name,
+                map_revision_id=map_revision_id,
+                localization_state="not_localized",
+                current_mode="",
+            )
         if job_state.job_running():
             active = job_state.get_job_snapshot()
             active_job_id = str((active or {}).get("job_id") or "").strip()

@@ -300,13 +300,17 @@ source /home/linaro/Doraemon/devel/setup.bash
 
 ## 11. 编译后快速检查
 
+以下及后续 runtime smoke 示例使用 `CR-001` 作为车辆资产编号示例。
+执行前必须替换为当前车辆的已登记唯一编号，不得使用默认身份。
+
 ```bash
+ROBOT_ID=CR-001
 source /opt/ros/noetic/setup.bash
 source /home/linaro/Doraemon/devel/setup.bash
 rospack find coverage_planner
 rospack find coverage_task_manager
 rosrun coverage_planner check_ros_contracts.py --help
-rosrun coverage_planner run_backend_runtime_smoke.py --help
+rosrun coverage_planner run_backend_runtime_smoke.py --robot-id "${ROBOT_ID}" --help
 ```
 
 这些命令能找到包和脚本，说明 workspace overlay 基本正常。
@@ -326,10 +330,12 @@ ROS_MASTER_URI=http://127.0.0.1:11311 roscore
 第二个终端启动 coverage planner 后端：
 
 ```bash
+ROBOT_ID=CR-001
 source /opt/ros/noetic/setup.bash
 source /home/linaro/Doraemon/devel/setup.bash
 mkdir -p /tmp/doraemon_smoke/coverage /tmp/doraemon_smoke/maps /tmp/doraemon_smoke/maps/imports
 ROS_MASTER_URI=http://127.0.0.1:11311 roslaunch coverage_planner frontend_editor_backend.launch \
+  robot_id:="${ROBOT_ID}" \
   start_rosbridge:=false \
   plan_db_path:=/tmp/doraemon_smoke/coverage/planning.db \
   ops_db_path:=/tmp/doraemon_smoke/coverage/operations.db \
@@ -341,9 +347,11 @@ ROS_MASTER_URI=http://127.0.0.1:11311 roslaunch coverage_planner frontend_editor
 第三个终端启动 task system 的最小软件后端：
 
 ```bash
+ROBOT_ID=CR-001
 source /opt/ros/noetic/setup.bash
 source /home/linaro/Doraemon/devel/setup.bash
 ROS_MASTER_URI=http://127.0.0.1:11311 roslaunch coverage_task_manager task_system.launch \
+  robot_id:="${ROBOT_ID}" \
   plan_db_path:=/tmp/doraemon_smoke/coverage/planning.db \
   ops_db_path:=/tmp/doraemon_smoke/coverage/operations.db \
   maps_root:=/tmp/doraemon_smoke/maps \
@@ -359,13 +367,14 @@ ROS_MASTER_URI=http://127.0.0.1:11311 roslaunch coverage_task_manager task_syste
 第四个终端补启动 restart localization contract：
 
 ```bash
+ROBOT_ID=CR-001
 source /opt/ros/noetic/setup.bash
 source /home/linaro/Doraemon/devel/setup.bash
 ROS_MASTER_URI=http://127.0.0.1:11311 rosrun coverage_planner localization_lifecycle_manager_node.py \
   __name:=localization_lifecycle_manager \
   _plan_db_path:=/tmp/doraemon_smoke/coverage/planning.db \
   _ops_db_path:=/tmp/doraemon_smoke/coverage/operations.db \
-  _robot_id:=local_robot \
+  _robot_id:="${ROBOT_ID}" \
   _runtime_ns:=/cartographer/runtime \
   _app_service_name:=/cartographer/runtime/app/restart_localization \
   _app_contract_param_ns:=/cartographer/runtime/contracts/app/restart_localization \
@@ -411,9 +420,10 @@ ROS_MASTER_URI=http://127.0.0.1:11311 rosrun coverage_planner check_ros_contract
 用户指定命令：
 
 ```bash
+ROBOT_ID=CR-001
 source /opt/ros/noetic/setup.bash
 source /home/linaro/Doraemon/devel/setup.bash
-ROS_MASTER_URI=http://127.0.0.1:11311 rosrun coverage_planner run_backend_runtime_smoke.py --text
+ROS_MASTER_URI=http://127.0.0.1:11311 rosrun coverage_planner run_backend_runtime_smoke.py --robot-id "${ROBOT_ID}" --text
 ```
 
 注意：这个 smoke 不是纯编译 smoke，它会检查真实运行态健康：
@@ -437,7 +447,8 @@ Summary: FAIL
 因此部署判断建议分两级：
 
 - 编译部署验收：`catkin build` 成功 + `check_ros_contracts.py` 的 `summary.ok=true`
-- 真实运行验收：启动完整机器人或仿真后，再要求 `run_backend_runtime_smoke.py --text` 通过
+- 真实运行验收：启动完整机器人或仿真后，再要求
+  `run_backend_runtime_smoke.py --robot-id "${ROBOT_ID}" --text` 通过
 
 ## 14. 常见问题
 
@@ -513,7 +524,8 @@ roslaunch coverage_planner frontend_editor_backend.launch start_rosbridge:=false
 先按第 12 节拉起最小后端，再运行 smoke。建议调试时用 `timeout` 防止一直挂住：
 
 ```bash
-timeout 45s rosrun coverage_planner run_backend_runtime_smoke.py --text
+ROBOT_ID=CR-001
+timeout 45s rosrun coverage_planner run_backend_runtime_smoke.py --robot-id "${ROBOT_ID}" --text
 ```
 
 ### 14.6 Contract 检查缺 restart_localization
@@ -542,4 +554,5 @@ service /cartographer/runtime/app/restart_localization has an invalid RPC URI [N
 11. `catkin build -j4`。
 12. `source devel/setup.bash`。
 13. 启动最小后端，运行 `check_ros_contracts.py`。
-14. 启动真实机器人或仿真运行态后，再运行 `run_backend_runtime_smoke.py --text`。
+14. 启动真实机器人或仿真运行态后，再运行
+    `run_backend_runtime_smoke.py --robot-id "${ROBOT_ID}" --text`。

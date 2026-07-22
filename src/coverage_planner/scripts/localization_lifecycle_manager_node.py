@@ -947,7 +947,17 @@ class LocalizationLifecycleManagerNode:
         return False, last_reason
 
     def _handle_restart(self, req):
-        robot_id = str(req.robot_id or self.robot_id).strip() or self.robot_id
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != self.robot_id:
+            return self._restart_response(
+                success=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, self.robot_id),
+                map_name="",
+                map_revision_id="",
+                localization_state="not_localized",
+            )
+        robot_id = str(self.robot_id)
         map_name = str(req.map_name or "").strip()
         map_revision_id = str(getattr(req, "map_revision_id", "") or "").strip()
         with self._localization_transition_lock:

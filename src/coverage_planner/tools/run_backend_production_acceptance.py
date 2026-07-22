@@ -13,7 +13,10 @@ if THIS_DIR not in sys.path:
     sys.path.insert(0, THIS_DIR)
 
 from check_revision_db_health import build_report as build_db_health_report
-from run_backend_runtime_smoke import build_report as build_runtime_smoke_report
+from run_backend_runtime_smoke import (
+    build_report as build_runtime_smoke_report,
+    require_explicit_commercial_robot_id,
+)
 from run_revision_workflow_acceptance import build_report as build_revision_acceptance_report
 
 
@@ -22,28 +25,54 @@ SUPPORTED_PROFILES = (
     "verify_revision_gate",
     "activate_revision_gate",
     "activate_revision_prepare_for_task_gate",
+)
+
+FORBIDDEN_MAPPING_PROFILES = {
     "candidate_save_gate",
     "revision_cycle_gate",
     "revision_cycle_prepare_for_task_gate",
-)
+}
 
 WRITE_PROFILES = {
     "verify_revision_gate",
     "activate_revision_gate",
     "activate_revision_prepare_for_task_gate",
-    "candidate_save_gate",
-    "revision_cycle_gate",
-    "revision_cycle_prepare_for_task_gate",
 }
 
 PROFILE_TO_REVISION_PROFILE = {
     "verify_revision_gate": "verify_revision",
     "activate_revision_gate": "activate_revision",
     "activate_revision_prepare_for_task_gate": "activate_revision_prepare_for_task",
-    "candidate_save_gate": "mapping_save_candidate",
-    "revision_cycle_gate": "mapping_save_verify_activate",
-    "revision_cycle_prepare_for_task_gate": "mapping_save_verify_activate_prepare_for_task",
 }
+
+COMMERCIAL_PLAN_DB_PATH = "/data/coverage/planning.db"
+COMMERCIAL_OPS_DB_PATH = "/data/coverage/operations.db"
+
+
+def require_commercial_database_paths(args) -> None:
+    plan_db_path = str(getattr(args, "plan_db_path", "") or "").strip()
+    ops_db_path = str(getattr(args, "ops_db_path", "") or "").strip()
+    if plan_db_path != COMMERCIAL_PLAN_DB_PATH:
+        raise ValueError(
+            "--plan-db-path is fixed at %s" % COMMERCIAL_PLAN_DB_PATH
+        )
+    if ops_db_path != COMMERCIAL_OPS_DB_PATH:
+        raise ValueError(
+            "--ops-db-path is fixed at %s" % COMMERCIAL_OPS_DB_PATH
+        )
+
+
+def require_supported_production_profile(profile: str) -> str:
+    profile_name = str(profile or "").strip()
+    if profile_name in FORBIDDEN_MAPPING_PROFILES:
+        raise ValueError(
+            "profile %s is prohibited by the commercial production gate; "
+            "run mapping with run_revision_workflow_acceptance.py checkpoint v2 "
+            "pause/resume" % profile_name
+        )
+    if profile_name not in SUPPORTED_PROFILES:
+        raise ValueError("unsupported production acceptance profile: %s" % profile_name)
+    return profile_name
 
 
 def _stage(name: str, report: Optional[Dict[str, object]], *, skipped: bool = False, skip_reason: str = "") -> Dict[str, object]:
@@ -82,7 +111,8 @@ def _summary_issues(report: Dict[str, object]) -> List[str]:
 
 def _smoke_args(args) -> SimpleNamespace:
     return SimpleNamespace(
-        task_id=int(args.task_id),
+        profile="task_ready",
+        task_id=(0 if str(args.profile or "") in WRITE_PROFILES else int(args.task_id)),
         service_timeout=float(args.service_timeout),
         job_timeout=float(args.smoke_job_timeout if args.smoke_job_timeout is not None else args.job_timeout),
         poll_interval=float(args.poll_interval),
@@ -103,7 +133,7 @@ def _smoke_args(args) -> SimpleNamespace:
         set_active_on_save=False,
         switch_to_localization_after_save=False,
         relocalize_after_switch=False,
-        run_task_cycle=bool(getattr(args, "run_task_cycle", False)),
+        run_task_cycle=False,
         task_timeout=float(getattr(args, "task_timeout", 300.0)),
         ignore_warning=list(args.ignore_warning or []),
         json=False,
@@ -125,6 +155,9 @@ def _revision_args(args) -> SimpleNamespace:
         frame_id=str(args.frame_id or "map"),
         description_prefix=str(args.description_prefix or "production_gate"),
         allow_write_actions=True,
+        pause_after_start_mapping=False,
+        checkpoint_path="",
+        resume_from_checkpoint="",
         ignore_warning=list(args.ignore_warning or []),
         json=False,
         text=False,
@@ -138,13 +171,14 @@ def build_report(
     smoke_report_builder: Callable[[object], Dict[str, object]] = build_runtime_smoke_report,
     revision_report_builder: Callable[[object], Dict[str, object]] = build_revision_acceptance_report,
 ) -> Dict[str, object]:
+    validate_args(args)
     stages: List[Dict[str, object]] = []
 
     db_report = db_report_builder(
         plan_db_path=str(args.plan_db_path or ""),
         ops_db_path=str(args.ops_db_path or ""),
         robot_id=str(args.robot_id or ""),
-        strict=bool(args.db_strict),
+        strict=True,
     )
     stages.append(_stage("revision_db_health", db_report))
 
@@ -153,7 +187,7 @@ def build_report(
 
     prechecks_ok = all(bool(stage.get("ok", False)) for stage in stages)
     if args.profile != "read_only_gate":
-        if prechecks_ok or bool(args.continue_on_precheck_failure):
+        if prechecks_ok:
             revision_report = revision_report_builder(_revision_args(args))
             stages.append(_stage("revision_acceptance", revision_report))
         else:
@@ -275,8 +309,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--job-timeout", type=float, default=120.0)
     parser.add_argument("--smoke-job-timeout", type=float, default=None)
     parser.add_argument("--poll-interval", type=float, default=1.0)
-    parser.add_argument("--robot-id", default="local_robot")
-    parser.add_argument("--run-task-cycle", action="store_true")
+    parser.add_argument("--robot-id", default="")
+    parser.add_argument(
+        "--run-task-cycle",
+        action="store_true",
+        help="prohibited; production runtime prechecks are strictly read-only",
+    )
     parser.add_argument("--task-timeout", type=float, default=300.0)
     parser.add_argument("--map-name", default="")
     parser.add_argument("--map-revision-id", default="")
@@ -284,8 +322,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frame-id", default="map")
     parser.add_argument("--description-prefix", default="production_gate")
     parser.add_argument("--allow-write-actions", action="store_true")
-    parser.add_argument("--continue-on-precheck-failure", action="store_true")
-    parser.add_argument("--db-strict", action="store_true")
     parser.add_argument(
         "--ignore-warning",
         action="append",
@@ -297,11 +333,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args) -> None:
+    args.profile = require_supported_production_profile(args.profile)
+    args.robot_id = require_explicit_commercial_robot_id(args.robot_id)
+    require_commercial_database_paths(args)
     if bool(getattr(args, "run_task_cycle", False)):
-        if int(args.task_id or 0) <= 0:
-            raise ValueError("--task-id must be > 0 when --run-task-cycle is enabled")
-        if not str(args.ops_db_path or "").strip():
-            raise ValueError("--ops-db-path is required when --run-task-cycle is enabled")
+        raise ValueError(
+            "--run-task-cycle is prohibited by the commercial production gate; "
+            "runtime prechecks must remain read-only"
+        )
+    if str(args.save_map_name or "").strip():
+        raise ValueError(
+            "--save-map-name is prohibited because the commercial production gate "
+            "does not provide mapping profiles"
+        )
     if args.profile in WRITE_PROFILES and not bool(args.allow_write_actions):
         raise ValueError("--allow-write-actions is required for profile %s" % str(args.profile))
     if args.profile in {
@@ -309,14 +353,18 @@ def validate_args(args) -> None:
         "activate_revision_gate",
         "activate_revision_prepare_for_task_gate",
     }:
-        if not (str(args.map_name or "").strip() or str(args.map_revision_id or "").strip()):
-            raise ValueError("--map-name or --map-revision-id is required for profile %s" % str(args.profile))
-    if args.profile in {
-        "candidate_save_gate",
-        "revision_cycle_gate",
-        "revision_cycle_prepare_for_task_gate",
-    } and not str(args.save_map_name or "").strip():
-        raise ValueError("--save-map-name is required for profile %s" % str(args.profile))
+        if not str(args.map_name or "").strip() or not str(args.map_revision_id or "").strip():
+            raise ValueError(
+                "--map-name and --map-revision-id are required for profile %s"
+                % str(args.profile)
+            )
+    if (
+        args.profile == "activate_revision_prepare_for_task_gate"
+        and int(args.task_id or 0) <= 0
+    ):
+        raise ValueError(
+            "--task-id must be > 0 for profile activate_revision_prepare_for_task_gate"
+        )
 
 
 def main() -> int:

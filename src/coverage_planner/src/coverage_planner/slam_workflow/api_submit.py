@@ -75,8 +75,22 @@ class SlamApiSubmitController:
         backend = self._backend
         runtime_client = backend._runtime_client
         state_controller = backend._state_controller
-        robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
         operation = int(req.operation)
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != backend.robot_id:
+            return self._submit_response(
+                response_cls,
+                job_cls,
+                job_converter,
+                accepted=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, backend.robot_id),
+                error_code="robot_id_mismatch",
+                job_id="",
+                operation=operation,
+                map_name="",
+            )
+        robot_id = str(backend.robot_id)
         try:
             map_name = validate_map_name(req.map_name, allow_empty=True)
             map_revision_id = validate_revision_id(
@@ -339,7 +353,16 @@ class SlamApiSubmitController:
     def handle_get_job_app(self, req):
         backend = self._backend
         runtime_client = backend._runtime_client
-        robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != backend.robot_id:
+            return AppGetSlamJobResponse(
+                found=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, backend.robot_id),
+                error_code="robot_id_mismatch",
+                job=AppSlamJobState(),
+            )
+        robot_id = str(backend.robot_id)
         job_id = str(req.job_id or "").strip()
         if runtime_client.runtime_get_job_available():
             try:

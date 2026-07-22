@@ -304,11 +304,20 @@ class OdometryHealthNode:
         self._state_pub.publish(self._build_state(self.robot_id))
 
     def _handle_get_status_app(self, req):
-        robot_id = str(req.robot_id or self.robot_id).strip() or self.robot_id
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != self.robot_id:
+            state = AppOdometryState()
+            state.robot_id = str(self.robot_id)
+            return AppGetOdometryStatusResponse(
+                success=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, self.robot_id),
+                state=state,
+            )
         return AppGetOdometryStatusResponse(
             success=True,
             message="ok",
-            state=self._build_state(robot_id),
+            state=self._build_state(self.robot_id),
         )
 
 

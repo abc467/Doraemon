@@ -7,7 +7,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import rospy
 from cleanrobot_app_msgs.msg import SlamJobState
@@ -190,18 +190,29 @@ class CartographerSlamJobController:
                 continue
             break
 
+    def _store_job_locked(self, snapshot: Dict[str, object]) -> Dict[str, object]:
+        self.remember_job_locked(snapshot)
+        job_id = str(snapshot.get("job_id") or "").strip()
+        if job_id:
+            if bool(snapshot.get("done", False)):
+                if self._active_job_id == job_id:
+                    self._active_job_id = ""
+            else:
+                self._active_job_id = job_id
+        return snapshot
+
     def store_job(self, job: Dict[str, object]) -> Dict[str, object]:
         snapshot = dict(job or {})
         with self._job_lock:
-            self.remember_job_locked(snapshot)
-            job_id = str(snapshot.get("job_id") or "").strip()
-            if job_id:
-                if bool(snapshot.get("done", False)):
-                    if self._active_job_id == job_id:
-                        self._active_job_id = ""
-                else:
-                    self._active_job_id = job_id
-        return snapshot
+            return self._store_job_locked(snapshot)
+
+    def _active_job_snapshot_locked(self) -> Optional[Dict[str, object]]:
+        if not self._active_job_id:
+            return None
+        active = dict(self._jobs.get(self._active_job_id) or {})
+        if not active or bool(active.get("done", False)):
+            return None
+        return active
 
     def get_job_snapshot(self, job_id: str = "") -> Optional[Dict[str, object]]:
         backend = self._backend
@@ -223,21 +234,54 @@ class CartographerSlamJobController:
 
     def job_running(self) -> bool:
         with self._job_lock:
-            if not self._active_job_id:
-                return False
-            job = dict(self._jobs.get(self._active_job_id) or {})
-            return bool(job) and (not bool(job.get("done", False)))
+            return self._active_job_snapshot_locked() is not None
 
-    def publish_job_snapshot(
+    def try_reserve_and_publish_job(
         self,
-        job: Dict[str, object],
+        make_job: Callable[[], Dict[str, object]],
         *,
         sync_runtime: bool = True,
         update_error: bool = False,
+    ) -> Tuple[Optional[Dict[str, object]], Optional[Dict[str, object]]]:
+        """Atomically compare, create, publish, and reserve a queued job.
+
+        The callable runs only after the active-job check and while ``_job_lock``
+        remains held.  This closes the service-layer check-then-publish race: a
+        competing submitter observes the reserved snapshot and never creates a
+        second record.  The return value is ``(reserved, None)`` on success or
+        ``(None, active)`` when another unfinished job already owns the slot.
+        """
+
+        if not callable(make_job):
+            raise TypeError("make_job must be callable")
+        with self._job_lock:
+            active = self._active_job_snapshot_locked()
+            if active is not None:
+                return None, active
+            snapshot = dict(make_job() or {})
+            if not str(snapshot.get("job_id") or "").strip():
+                raise ValueError("reserved slam job must have a job_id")
+            if bool(snapshot.get("done", False)):
+                raise ValueError("reserved slam job must be unfinished")
+            return (
+                self._publish_job_snapshot_locked(
+                    snapshot,
+                    sync_runtime=sync_runtime,
+                    update_error=update_error,
+                ),
+                None,
+            )
+
+    def _publish_job_snapshot_locked(
+        self,
+        job: Dict[str, object],
+        *,
+        sync_runtime: bool,
+        update_error: bool,
     ) -> Dict[str, object]:
         backend = self._backend
         runtime_state = backend._runtime_state
-        snapshot = self.store_job(job)
+        snapshot = self._store_job_locked(dict(job or {}))
         backend._ops.upsert_slam_job(self.snapshot_to_record(snapshot))
         robot_id = str(snapshot.get("robot_id") or backend.robot_id)
         active_job_id = "" if bool(snapshot.get("done", False)) else str(snapshot.get("job_id") or "")
@@ -272,6 +316,20 @@ class CartographerSlamJobController:
         backend._job_state_pub.publish(self.job_to_msg(snapshot))
         return snapshot
 
+    def publish_job_snapshot(
+        self,
+        job: Dict[str, object],
+        *,
+        sync_runtime: bool = True,
+        update_error: bool = False,
+    ) -> Dict[str, object]:
+        with self._job_lock:
+            return self._publish_job_snapshot_locked(
+                dict(job or {}),
+                sync_runtime=sync_runtime,
+                update_error=update_error,
+            )
+
     def restore_jobs_from_store(self):
         backend = self._backend
         runtime_param = backend._runtime_context.runtime_param
@@ -287,7 +345,7 @@ class CartographerSlamJobController:
                     snapshot.update(
                         {
                             "status": "failed",
-                            "phase": "interrupted",
+                            "phase": "failed",
                             "done": True,
                             "success": False,
                             "error_code": "runtime_manager_restarted",

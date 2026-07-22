@@ -9,6 +9,17 @@ commercial_value_is_placeholder() {
   [[ -z "${value}" || "${value}" == *REPLACE* ]]
 }
 
+commercial_pin_storage_paths() {
+  # These locations are part of the commercial on-vehicle storage contract.
+  # Set them after runtime.env has been sourced so neither the service manager
+  # environment nor a caller-provided environment can redirect production I/O.
+  export PLAN_DB_PATH="/data/coverage/planning.db"
+  export OPS_DB_PATH="/data/coverage/operations.db"
+  export MAPS_ROOT="/data/maps"
+  export EXTERNAL_MAPS_ROOT="/data/maps/imports"
+  export DOCK_CALIBRATION_STORAGE_PATH="/data/coverage/dock_calibration.yaml"
+}
+
 commercial_validate_required_orbbec_identities() {
   local serials=("$1" "$2" "$3")
   local paths=("$4" "$5" "$6")
@@ -35,12 +46,18 @@ commercial_validate_required_orbbec_identities() {
 
 commercial_runtime_env_key_is_reserved() {
   case "${1:-}" in
+    SCRIPT_DIR|REPO_ROOT|DORAEMON_PRODUCTION_ENTRY|\
     DORAEMON_REPO_ROOT|DORAEMON_RUNTIME_CONFIG_FILE|DORAEMON_WORKSPACE_SETUP|DORAEMON_ROS_SETUP|\
     DORAEMON_DEPS_ROOT|ABSEIL_ROOT|ORTOOLS_ROOT|FIELDS2COVER_ROOT|FLIRT_ROOT|absl_DIR|\
     HOME|ROS_HOME|ROS_LOG_DIR|LOG_DIR|STATUS_LOG|RESTART_LOCALIZATION_OUT|\
     SLAM_ROOT|SLAM_CONFIG_ROOT|WORKSPACE_SETUP|WORKSPACE_LIB_ROOT|WORKSPACE_LAYOUT|\
     ROS_MASTER_URI|ROS_IP|ROS_HOSTNAME|\
     START_FRONTEND_DEV|FRONTEND_DIR|FRONTEND_URL|ATTACH|\
+    ALLOW_NO_ACTIVE_MAP_STARTUP|RUN_BACKEND_RUNTIME_SMOKE|BACKEND_RUNTIME_SMOKE_TASK_ID|\
+    BACKEND_RUNTIME_SMOKE_ACTIONS|BACKEND_RUNTIME_SMOKE_EXTRA_ARGS|\
+    RUN_REVISION_DB_HEALTH_CHECK|REVISION_DB_HEALTH_STRICT|\
+    RUN_BACKEND_PRODUCTION_ACCEPTANCE|BACKEND_PRODUCTION_ACCEPTANCE_PROFILE|\
+    BACKEND_PRODUCTION_ACCEPTANCE_ALLOW_WRITE_ACTIONS|BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS|\
     LD_LIBRARY_PATH|LD_PRELOAD|LD_AUDIT|LD_ORIGIN_PATH|LIBRARY_PATH|\
     PYTHONPATH|CMAKE_PREFIX_PATH|PKG_CONFIG_PATH|\
     PATH|SHELL|BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|IFS|PS4|\
@@ -80,6 +97,38 @@ commercial_validate_runtime_env_file() {
         echo "[ERROR] runtime environment may not override reserved key: ${key}" >&2
         return 1
       fi
+      case "${key}" in
+        PLAN_DB_PATH)
+          [[ "${value}" == "/data/coverage/planning.db" ]] || {
+            echo "[ERROR] PLAN_DB_PATH is fixed at /data/coverage/planning.db" >&2
+            return 1
+          }
+          ;;
+        OPS_DB_PATH)
+          [[ "${value}" == "/data/coverage/operations.db" ]] || {
+            echo "[ERROR] OPS_DB_PATH is fixed at /data/coverage/operations.db" >&2
+            return 1
+          }
+          ;;
+        MAPS_ROOT)
+          [[ "${value}" == "/data/maps" ]] || {
+            echo "[ERROR] MAPS_ROOT is fixed at /data/maps" >&2
+            return 1
+          }
+          ;;
+        EXTERNAL_MAPS_ROOT)
+          [[ "${value}" == "/data/maps/imports" ]] || {
+            echo "[ERROR] EXTERNAL_MAPS_ROOT is fixed at /data/maps/imports" >&2
+            return 1
+          }
+          ;;
+        DOCK_CALIBRATION_STORAGE_PATH)
+          [[ "${value}" == "/data/coverage/dock_calibration.yaml" ]] || {
+            echo "[ERROR] DOCK_CALIBRATION_STORAGE_PATH is fixed at /data/coverage/dock_calibration.yaml" >&2
+            return 1
+          }
+          ;;
+      esac
     else
       echo "[ERROR] runtime environment contains an unsafe or non-assignment line" >&2
       return 1

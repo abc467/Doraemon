@@ -623,9 +623,21 @@ class SlamApiStateController:
 
     def handle_get_status_app(self, req):
         backend = self._backend
-        robot_id = str(req.robot_id or backend.robot_id).strip() or backend.robot_id
+        requested_robot_id = str(req.robot_id or "").strip()
+        if requested_robot_id and requested_robot_id != backend.robot_id:
+            state = AppSlamState()
+            state.robot_id = str(backend.robot_id)
+            return AppGetSlamStatusResponse(
+                success=False,
+                message="robot_id mismatch: requested=%s local=%s"
+                % (requested_robot_id, backend.robot_id),
+                state=state,
+            )
         return AppGetSlamStatusResponse(
             success=True,
             message="ok",
-            state=self.build_state(robot_id=robot_id, refresh_map_identity=bool(req.refresh_map_identity)),
+            state=self.build_state(
+                robot_id=backend.robot_id,
+                refresh_map_identity=bool(req.refresh_map_identity),
+            ),
         )

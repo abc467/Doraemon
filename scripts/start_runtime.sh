@@ -23,6 +23,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 else
   DORAEMON_RUNTIME_CONFIG_FILE="${DORAEMON_RUNTIME_CONFIG_FILE:-${REPO_ROOT}/config/runtime.a26022.env}"
 fi
+readonly SCRIPT_DIR REPO_ROOT DORAEMON_PRODUCTION_ENTRY
 DORAEMON_RUNTIME_CONFIG_LOADED="false"
 if [[ -f "${DORAEMON_RUNTIME_CONFIG_FILE}" ]]; then
   set -a
@@ -32,6 +33,7 @@ if [[ -f "${DORAEMON_RUNTIME_CONFIG_FILE}" ]]; then
   DORAEMON_RUNTIME_CONFIG_LOADED="true"
 fi
 if [[ "${DORAEMON_PRODUCTION_ENTRY}" == "true" ]]; then
+  commercial_pin_storage_paths
   export DORAEMON_REPO_ROOT="${REPO_ROOT}"
   export DORAEMON_RUNTIME_CONFIG_FILE="/etc/doraemon/runtime.env"
   export DORAEMON_ROS_SETUP="/opt/ros/noetic/setup.bash"
@@ -835,6 +837,8 @@ build_backend_runtime_smoke_cmd() {
     rosrun
     coverage_planner
     run_backend_runtime_smoke.py
+    --robot-id
+    "${ROBOT_ID}"
     --task-id
     "${BACKEND_RUNTIME_SMOKE_TASK_ID}"
     --text

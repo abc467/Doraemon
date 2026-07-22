@@ -7,7 +7,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from coverage_planner.slam_workflow.api import STOP_MAPPING, operation_name, running_phase_for_operation
+import rospy
+
+from coverage_planner.slam_workflow.api import (
+    START_MAPPING,
+    STOP_MAPPING,
+    operation_name,
+    running_phase_for_operation,
+)
 from coverage_planner.slam_workflow_semantics import (
     is_manual_assist_error_code,
     localization_is_ready,
@@ -29,7 +36,9 @@ class CartographerSlamJobRunner:
         operation = int(snapshot.get("operation") or 0)
         runtime_operation = int(snapshot.get("runtime_operation") or 0)
         op_name = str(snapshot.get("operation_name") or operation_name(operation))
+        start_mapping_operation = bool(operation == START_MAPPING or op_name == "start_mapping")
         stop_mapping_operation = bool(operation == STOP_MAPPING or op_name == "stop_mapping")
+        mapping_session_param = backend._runtime_context.runtime_param("mapping_session_id")
 
         snapshot = backend._job_state.update_job_fields(
             snapshot,
@@ -44,6 +53,8 @@ class CartographerSlamJobRunner:
         backend._job_events.job_started(snapshot)
 
         try:
+            if start_mapping_operation:
+                rospy.set_param(mapping_session_param, str(job_id))
             with backend._lock:
                 resp = backend._service_api.execute_operation(
                     operation=runtime_operation,
@@ -77,6 +88,18 @@ class CartographerSlamJobRunner:
         result_error_code = str(getattr(resp, "error_code", "") or "")
         result_message = str(getattr(resp, "message", "") or "")
         result_success = bool(getattr(resp, "success", False))
+        if start_mapping_operation and not result_success:
+            try:
+                rospy.set_param(mapping_session_param, "")
+            except Exception:
+                pass
+        if stop_mapping_operation and result_success:
+            try:
+                rospy.set_param(mapping_session_param, "")
+            except Exception as exc:
+                result_success = False
+                result_error_code = "mapping_session_token_clear_failed"
+                result_message = "mapping stopped but session token could not be cleared: %s" % str(exc)
         result_localization_state = str(getattr(resp, "localization_state", "") or "")
         manual_assist_required = bool(
             is_manual_assist_error_code(result_error_code)
