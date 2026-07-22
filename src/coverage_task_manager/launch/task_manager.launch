@@ -47,7 +47,7 @@
   <arg name="app_clean_schedule_contract_param_ns" default="/database_server/contracts/app/clean_schedule_service"/>
 
   <!-- auto charge enable (Task 层作为 owner) -->
-  <arg name="auto_charge_enable" default="true"/>
+  <arg name="auto_charge_enable" default="false"/>
   <arg name="low_soc" default="0.15"/>
   <arg name="resume_soc" default="0.95"/>
   <arg name="rearm_soc" default="0.95"/>
@@ -68,13 +68,20 @@
   <arg name="restart_localization_timeout_s" default="180.0"/>
   <arg name="clear_costmaps_service" default="/move_base_flex/clear_costmaps"/>
   <arg name="dock_two_stage_enable" default="true"/>
-  <arg name="dock_stage1_xyyaw" default="[-1.071339,-1.179026,1.583066]"/>
+  <!--
+    Dock poses are deliberately unset by default.  A persisted, vehicle-bound
+    calibration normally populates these parameters at runtime.  Static
+    configuration remains available for non-commercial development only when
+    the caller supplies both poses, a complete map identity, and explicitly
+    sets require_persisted_dock_calibration:=false.
+  -->
+  <arg name="dock_stage1_xyyaw" default="[]"/>
   <arg name="dock_stage2_controller" default="MyPlanner"/>
   <arg name="dock_stage2_disable_replanning" default="true"/>
   <arg name="dock_retry_limit" default="2"/>
 
   <!-- 第二预对接点（靠近充电桩，随后进入精准对接） -->
-  <arg name="dock_xyyaw" default="[-1.007252,1.073770,1.562763]"/>
+  <arg name="dock_xyyaw" default="[]"/>
 
   <!-- Dock calibration app interface -->
   <arg name="enable_dock_calibration_service" default="true"/>
@@ -86,6 +93,11 @@
   <arg name="dock_calibration_score_threshold" default="0.00012"/>
   <arg name="dock_calibration_target_dist" default="0.780"/>
   <arg name="dock_calibration_xy_tolerance" default="0.005"/>
+  <arg name="dock_calibration_state_stale_timeout_s" default="3.0"/>
+  <arg name="require_persisted_dock_calibration" default="true"/>
+  <arg name="dock_calibration_runtime_map_name" default=""/>
+  <arg name="dock_calibration_runtime_map_id" default=""/>
+  <arg name="dock_calibration_runtime_map_md5" default=""/>
 
   <!-- Scheduler：打开并加载 schedules -->
   <arg name="scheduler_enable" default="true"/>
@@ -194,6 +206,12 @@
     <param name="dock_stage2_controller" value="$(arg dock_stage2_controller)"/>
     <param name="dock_stage2_disable_replanning" value="$(arg dock_stage2_disable_replanning)"/>
     <param name="dock_retry_limit" value="$(arg dock_retry_limit)"/>
+    <param name="require_dock_calibration_before_return" value="true"/>
+    <param name="dock_calibration_state_topic" value="$(arg dock_calibration_state_topic)"/>
+    <param name="dock_calibration_state_stale_timeout_s" value="$(arg dock_calibration_state_stale_timeout_s)"/>
+    <param name="dock_calibration_storage_path" value="$(arg dock_calibration_storage_path)"/>
+    <param name="require_persisted_dock_calibration" value="$(arg require_persisted_dock_calibration)"/>
+    <param name="dock_calibration_persisted_loaded_param" value="/dock_calibration_service/persisted_calibration_loaded"/>
     <param name="trigger_when_idle" value="false"/>
     <param name="low_soc" value="$(arg low_soc)"/>
     <param name="resume_soc" value="$(arg resume_soc)"/>
@@ -281,6 +299,10 @@
     <param name="dock_score_threshold" value="$(arg dock_calibration_score_threshold)"/>
     <param name="dock_target_dist" value="$(arg dock_calibration_target_dist)"/>
     <param name="dock_xy_tolerance" value="$(arg dock_calibration_xy_tolerance)"/>
+    <param name="runtime_config_map_name" value="$(arg dock_calibration_runtime_map_name)"/>
+    <param name="runtime_config_map_id" value="$(arg dock_calibration_runtime_map_id)"/>
+    <param name="runtime_config_map_md5" value="$(arg dock_calibration_runtime_map_md5)"/>
+    <param name="require_persisted_calibration" value="$(arg require_persisted_dock_calibration)"/>
   </node>
 
   <node pkg="coverage_task_manager" type="task_api_service_node.py" name="task_api_service" output="screen"

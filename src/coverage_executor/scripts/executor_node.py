@@ -146,7 +146,13 @@ def main():
     )
 
     # AutoCharge params
-    auto_charge_enable = rospy.get_param("~auto_charge_enable", False)
+    requested_executor_auto_charge = bool(rospy.get_param("~auto_charge_enable", False))
+    if requested_executor_auto_charge:
+        rospy.logerr(
+            "[EXEC_NODE] ignoring ~auto_charge_enable=true: legacy executor auto-charge "
+            "has no vehicle-bound dock calibration gate; TaskManager is the only supported owner"
+        )
+    auto_charge_enable = False
     auto_charge_check_hz = rospy.get_param("~auto_charge_check_hz", 1.0)
     battery_topic = rospy.get_param("~battery_topic", "/battery_state")
     battery_stale_timeout_s = rospy.get_param("~battery_stale_timeout_s", 5.0)

@@ -173,6 +173,75 @@ class TaskManagerReadinessTest(unittest.TestCase):
 
         return mgr, get_param, fake_now
 
+    @staticmethod
+    def _runtime_snapshot_manager():
+        mgr = TaskManager.__new__(TaskManager)
+        mgr._runtime_map_topic = "/map"
+        mgr._plan_store = None
+        return mgr
+
+    @mock.patch(
+        "coverage_task_manager.task_manager.get_runtime_map_revision_id",
+        return_value="",
+    )
+    @mock.patch(
+        "coverage_task_manager.task_manager.get_runtime_map_scope",
+        return_value=("", ""),
+    )
+    def test_readiness_runtime_snapshot_without_refresh_never_writes_derived_identity(
+        self,
+        _scope,
+        _revision,
+    ):
+        mgr = self._runtime_snapshot_manager()
+        with mock.patch(
+            "coverage_task_manager.map_identity.get_runtime_map_identity",
+            return_value=("", ""),
+        ), mock.patch(
+            "coverage_task_manager.map_identity.compute_map_md5",
+            return_value="abcdef0123456789abcdef0123456789",
+        ), mock.patch(
+            "coverage_task_manager.map_identity.rospy.set_param"
+        ) as set_param:
+            snapshot = mgr._runtime_map_snapshot(refresh=False)
+
+        self.assertEqual(snapshot["map_id"], "map_abcdef01")
+        self.assertEqual(snapshot["map_md5"], "abcdef0123456789abcdef0123456789")
+        self.assertTrue(snapshot["ok"])
+        set_param.assert_not_called()
+
+    @mock.patch(
+        "coverage_task_manager.task_manager.get_runtime_map_revision_id",
+        return_value="",
+    )
+    @mock.patch(
+        "coverage_task_manager.task_manager.get_runtime_map_scope",
+        return_value=("", ""),
+    )
+    def test_readiness_runtime_snapshot_explicit_refresh_still_publishes_identity(
+        self,
+        _scope,
+        _revision,
+    ):
+        mgr = self._runtime_snapshot_manager()
+        with mock.patch(
+            "coverage_task_manager.map_identity.compute_map_md5",
+            return_value="0123456789abcdef",
+        ), mock.patch(
+            "coverage_task_manager.map_identity.rospy.set_param"
+        ) as set_param:
+            snapshot = mgr._runtime_map_snapshot(refresh=True)
+
+        self.assertEqual(snapshot["map_id"], "map_01234567")
+        self.assertEqual(snapshot["map_md5"], "0123456789abcdef")
+        self.assertTrue(snapshot["ok"])
+        set_param.assert_has_calls(
+            [
+                mock.call("/map_id", "map_01234567"),
+                mock.call("/map_md5", "0123456789abcdef"),
+            ]
+        )
+
     def test_ready_when_odometry_healthy_even_if_station_warning_exists(self):
         mgr, get_param, fake_now = self._build_manager(
             odometry_msg=self._odometry_msg(valid=True),
@@ -192,6 +261,36 @@ class TaskManagerReadinessTest(unittest.TestCase):
         odom_check = next(item for item in readiness.checks if item.key == "odometry")
         self.assertEqual(odom_check.level, "OK")
         self.assertEqual(odom_check.summary, "mode=odom_stream stream=true valid=true code=- msg=ok")
+
+    def test_latched_health_warning_uses_space_delimited_readiness_text(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            online_nodes={"/move_base_flex", "/mcore_tcp_bridge"},
+        )
+        mgr._health_error_code = "TF_LOOKUP_FAIL"
+        mgr._health_error_msg = (
+            '"map" passed to lookupTransform argument target_frame does not exist.'
+        )
+
+        with mock.patch(
+            "coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param
+        ), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch(
+            "coverage_task_manager.task_manager.time.time", return_value=self.now
+        ):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        expected = (
+            'health warning latched: TF_LOOKUP_FAIL "map" passed to '
+            'lookupTransform argument target_frame does not exist.'
+        )
+        self.assertIn(expected, list(readiness.warnings))
+        self.assertNotIn(
+            expected.replace("TF_LOOKUP_FAIL ", "TF_LOOKUP_FAIL:"),
+            list(readiness.warnings),
+        )
 
     def test_mcore_bridge_offline_is_diagnostic_not_readiness_blocker(self):
         mgr, get_param, fake_now = self._build_manager(

@@ -28,7 +28,7 @@ class CommercialImmutableReleaseTest(unittest.TestCase):
     def test_manifest_pins_backend_and_frontend_release_identities(self):
         text = MANIFEST.read_text(encoding="utf-8")
         self.assertIn(
-            "DORAEMON_BACKEND_DEPLOYMENT_TAG=deployment-2026-07-22-x86-ubuntu20-v6",
+            "DORAEMON_BACKEND_DEPLOYMENT_TAG=deployment-2026-07-22-x86-ubuntu20-v7",
             text,
         )
         self.assertIn(

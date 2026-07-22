@@ -102,7 +102,7 @@ def main():
     battery_topic = rospy.get_param("~battery_topic", "/battery_state")
     battery_stale_timeout_s = rospy.get_param("~battery_stale_timeout_s", 5.0)
 
-    auto_charge_enable = rospy.get_param("~auto_charge_enable", True)
+    auto_charge_enable = rospy.get_param("~auto_charge_enable", False)
     trigger_when_idle = rospy.get_param("~trigger_when_idle", False)
     low_soc = rospy.get_param("~low_soc", 0.15)
     resume_soc = rospy.get_param("~resume_soc", 0.95)
@@ -116,6 +116,25 @@ def main():
     dock_stage2_controller = rospy.get_param("~dock_stage2_controller", "MyPlanner")
     dock_stage2_disable_replanning = rospy.get_param("~dock_stage2_disable_replanning", True)
     dock_retry_limit = rospy.get_param("~dock_retry_limit", 2)
+    require_dock_calibration_before_return = rospy.get_param(
+        "~require_dock_calibration_before_return", True
+    )
+    dock_calibration_state_topic = rospy.get_param(
+        "~dock_calibration_state_topic", "/clean_robot_server/dock_calibration_state"
+    )
+    dock_calibration_state_stale_timeout_s = rospy.get_param(
+        "~dock_calibration_state_stale_timeout_s", 3.0
+    )
+    dock_calibration_storage_path = rospy.get_param(
+        "~dock_calibration_storage_path", "/data/coverage/dock_calibration.yaml"
+    )
+    require_persisted_dock_calibration = rospy.get_param(
+        "~require_persisted_dock_calibration", True
+    )
+    dock_calibration_persisted_loaded_param = rospy.get_param(
+        "~dock_calibration_persisted_loaded_param",
+        "/dock_calibration_service/persisted_calibration_loaded",
+    )
     undock_forward_m = rospy.get_param("~undock_forward_m", 0.6)
     dock_timeout_s = rospy.get_param("~dock_timeout_s", 600.0)
     wait_executor_paused_s = rospy.get_param("~wait_executor_paused_s", 20.0)
@@ -262,6 +281,12 @@ def main():
         dock_stage2_controller=str(dock_stage2_controller),
         dock_stage2_disable_replanning=bool(dock_stage2_disable_replanning),
         dock_retry_limit=int(dock_retry_limit),
+        require_dock_calibration_before_return=bool(require_dock_calibration_before_return),
+        dock_calibration_state_topic=str(dock_calibration_state_topic),
+        dock_calibration_state_stale_timeout_s=float(dock_calibration_state_stale_timeout_s),
+        dock_calibration_storage_path=str(dock_calibration_storage_path),
+        require_persisted_dock_calibration=bool(require_persisted_dock_calibration),
+        dock_calibration_persisted_loaded_param=str(dock_calibration_persisted_loaded_param),
         undock_forward_m=float(undock_forward_m),
         dock_timeout_s=float(dock_timeout_s),
         wait_executor_paused_s=float(wait_executor_paused_s),

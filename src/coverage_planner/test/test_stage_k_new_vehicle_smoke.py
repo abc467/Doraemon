@@ -23,6 +23,7 @@ from run_backend_runtime_smoke import (
     STAGE_K_REQUIRED_READINESS_WARNINGS,
     STAGE_K_SLAM_WARNINGS,
     _check_odometry,
+    _check_stage_k_new_vehicle_dock_calibration,
     _check_stage_k_new_vehicle_readiness,
     _check_stage_k_new_vehicle_slam,
     build_arg_parser,
@@ -129,6 +130,45 @@ def _valid_odometry_response(robot_id=ROBOT_ID):
             error_code="",
             message="ok",
             warnings=[],
+            stamp=_FakePayload(secs=1, nsecs=0),
+        ),
+    )
+
+
+def _valid_dock_calibration_response(robot_id=ROBOT_ID):
+    return _FakePayload(
+        success=True,
+        message="ok",
+        state=_FakePayload(
+            robot_id=robot_id,
+            frame_id="map",
+            active_map_name="",
+            active_map_id="",
+            active_map_md5="",
+            runtime_map_name="",
+            runtime_map_id="",
+            runtime_map_md5="",
+            runtime_map_ready=False,
+            active_map_match=False,
+            localization_state="",
+            localization_valid=False,
+            stage1_set=False,
+            stage1_x=0.0,
+            stage1_y=0.0,
+            stage1_yaw=0.0,
+            stage2_set=False,
+            stage2_x=0.0,
+            stage2_y=0.0,
+            stage2_yaw=0.0,
+            saved_map_name="",
+            saved_map_id="",
+            saved_map_md5="",
+            storage_path="/data/coverage/dock_calibration.yaml",
+            warnings=[
+                "tracked_pose is stale or missing",
+                "dock score is stale or missing",
+                "dock_pose is stale or missing",
+            ],
             stamp=_FakePayload(secs=1, nsecs=0),
         ),
     )
@@ -485,13 +525,42 @@ class StageKNewVehicleSmokeTest(unittest.TestCase):
     def test_accepts_exact_new_vehicle_slam_and_required_readiness_warnings(self):
         slam = _check_stage_k_new_vehicle_slam(_valid_slam_response(), ROBOT_ID)
         readiness = _check_stage_k_new_vehicle_readiness(_valid_readiness_response(), "")
+        dock = _check_stage_k_new_vehicle_dock_calibration(
+            _valid_dock_calibration_response(),
+            ROBOT_ID,
+        )
 
         self.assertTrue(slam["ok"], msg=slam["issues"])
         self.assertTrue(readiness["ok"], msg=readiness["issues"])
+        self.assertTrue(dock["ok"], msg=dock["issues"])
+
+    def test_rejects_new_vehicle_dock_status_with_default_or_foreign_calibration(self):
+        cases = {
+            "default stage coordinates": {"stage1_set": True, "stage1_x": -1.071339},
+            "saved map": {"saved_map_name": "copied-map"},
+            "wrong robot": {"robot_id": "CR-999"},
+            "alternate storage": {"storage_path": "/tmp/dock.yaml"},
+            "runtime map": {"runtime_map_name": "copied-map", "runtime_map_ready": True},
+        }
+        for label, changes in cases.items():
+            with self.subTest(label=label):
+                response = _valid_dock_calibration_response()
+                for field, value in changes.items():
+                    setattr(response.state, field, value)
+                result = _check_stage_k_new_vehicle_dock_calibration(response, ROBOT_ID)
+                self.assertFalse(result["ok"], msg=result)
 
     def test_accepts_only_the_exact_optional_map_tf_health_warning(self):
-        warnings = set(STAGE_K_REQUIRED_READINESS_WARNINGS)
-        warnings.update(STAGE_K_OPTIONAL_READINESS_WARNINGS)
+        optional_warning = (
+            'health warning latched: TF_LOOKUP_FAIL "map" passed to '
+            'lookupTransform argument target_frame does not exist.'
+        )
+        warnings = {
+            "battery_state missing",
+            "combined_status missing",
+            "station bridge offline",
+            optional_warning,
+        }
 
         result = _check_stage_k_new_vehicle_readiness(
             _valid_readiness_response(warnings=sorted(warnings)),
@@ -499,6 +568,31 @@ class StageKNewVehicleSmokeTest(unittest.TestCase):
         )
 
         self.assertTrue(result["ok"], msg=result["issues"])
+        self.assertEqual(STAGE_K_OPTIONAL_READINESS_WARNINGS, {optional_warning})
+
+    def test_rejects_colon_delimited_persistent_event_as_readiness_warning(self):
+        warnings = {
+            "battery_state missing",
+            "combined_status missing",
+            "station bridge offline",
+            'health warning latched: TF_LOOKUP_FAIL:"map" passed to '
+            'lookupTransform argument target_frame does not exist.',
+        }
+
+        result = _check_stage_k_new_vehicle_readiness(
+            _valid_readiness_response(warnings=sorted(warnings)),
+            "",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any(
+                'extra=[\'health warning latched: TF_LOOKUP_FAIL:"map" passed to '
+                "lookupTransform argument target_frame does not exist.']" in issue
+                for issue in result["issues"]
+            ),
+            msg=result["issues"],
+        )
 
     def test_rejects_extra_slam_blocker_and_warning(self):
         blockers = [
@@ -633,6 +727,10 @@ class StageKNewVehicleSmokeTest(unittest.TestCase):
                 self.readiness_refresh = refresh_map_identity
                 return _valid_readiness_response()
 
+            def get_dock_calibration_status(self, robot_id):
+                self.dock_robot_id = robot_id
+                return _valid_dock_calibration_response(robot_id=robot_id)
+
         client = FakeClient()
 
         checks = run_read_checks(
@@ -646,8 +744,13 @@ class StageKNewVehicleSmokeTest(unittest.TestCase):
         self.assertEqual(client.slam_robot_id, ROBOT_ID)
         self.assertEqual(client.odom_robot_id, ROBOT_ID)
         self.assertEqual(client.task_id, 0)
+        self.assertEqual(client.dock_robot_id, ROBOT_ID)
         self.assertFalse(client.slam_refresh)
         self.assertFalse(client.readiness_refresh)
+        self.assertEqual(
+            [item["name"] for item in checks],
+            ["slam_status", "odometry_status", "system_readiness", "dock_calibration_status"],
+        )
         self.assertTrue(all(item["ok"] for item in checks), msg=checks)
 
 

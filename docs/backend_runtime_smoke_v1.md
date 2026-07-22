@@ -32,6 +32,9 @@
 - Odom
 - System Readiness
 
+其中阶段 K 的 `stage_k_new_vehicle_no_map` profile 还会额外只读检查 Dock Calibration
+状态；它不会调用标定命令或生成标定文件。
+
 以下 workflow 不属于通用 smoke；只有通过独立 acceptance 工具和阶段 L 门禁才可执行：
 
 - `prepare_for_task`
@@ -103,11 +106,16 @@ rosrun coverage_planner run_backend_runtime_smoke.py \
 该 profile 要求地图、任务、动作历史和标定均为空，自动充电状态与事件日志也为空，
 里程计健康，并把
 `overall_ready=false`、`can_start_task=false` 作为尚未建图时的正确 fail-closed 状态。
+它还会只读调用 `/clean_robot_server/app/get_dock_calibration_status`：返回的 `robot_id`
+必须精确等于本车、`frame_id=map`、`storage_path` 必须固定为
+`/data/coverage/dock_calibration.yaml`，`stage1_set`/`stage2_set` 必须均为 `false`，
+且 saved/active/runtime 的地图 name/id/md5 必须全部为空。该服务检查前后仍由同一语义
+快照证明没有生成或修改标定文件。
 它要求 readiness 精确包含 `battery_state missing`、`combined_status missing` 和
 `station bridge offline`。无地图时只额外允许下面这一条完整匹配的可选 warning：
 
 ```text
-health warning latched: TF_LOOKUP_FAIL:"map" passed to lookupTransform argument target_frame does not exist.
+health warning latched: TF_LOOKUP_FAIL "map" passed to lookupTransform argument target_frame does not exist.
 ```
 
 该例外只适用于本 profile 的全新无地图状态；大小写、标点或内容不同的 TF/health warning

@@ -1,6 +1,6 @@
 # 清洁机器人 x86 Ubuntu 20.04 商业部署手册
 
-版本：2026-07-22 v6
+版本：2026-07-22 v7
 
 本文用于把 Doraemon 清洁机器人后端、清洁机器人前端和 Site Gateway
 部署到全新的 x86 主板。目标系统为 Ubuntu 20.04，部署操作用户为 `a`。
@@ -11,7 +11,7 @@
 
 | 工程 | GitHub | 部署标签 |
 | --- | --- | --- |
-| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-22-x86-ubuntu20-v6` |
+| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-22-x86-ubuntu20-v7` |
 | 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-21-frontend-v2` |
 
 不要用仓库默认分支或 `latest` 做批量生产。部署标签、依赖清单和验收记录
@@ -88,7 +88,7 @@ group/other 写权限。`current` 符号链接本身也必须为 `root:root`。
 | --- | --- |
 | 车辆资产编号 | `<公司资产系统中的唯一编号>` |
 | hostname | `clean-robot-<唯一序号>` |
-| 后端标签 | `deployment-2026-07-22-x86-ubuntu20-v6` |
+| 后端标签 | `deployment-2026-07-22-x86-ubuntu20-v7` |
 | 前端标签 | `deployment-2026-07-21-frontend-v2` |
 | 机器人内部网口 | 现场识别，例如 `eno1` |
 | A-box 地址 | `192.168.127.11/24` |
@@ -177,7 +177,7 @@ Ubuntu 维护方案和受控 APT/ROS 镜像，保存安装包与校验值，不�
 sudo install -d -o root -g root -m 0755 /opt/doraemon/releases
 sudo install -d -o root -g root -m 0755 /opt/doraemon/deps
 sudo install -d -o a -g a -m 0755 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 ```
 
@@ -187,21 +187,21 @@ stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-22-x86-ubuntu20-v6 \
+  --branch deployment-2026-07-22-x86-ubuntu20-v7 \
   https://github.com/abc467/Doraemon.git \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 ```
 
 验证：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
 git rev-parse HEAD
 git rev-parse --is-shallow-repository
 du -sh . .git
-release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 find "${release}" -xdev \
   -path "${release}/.git" -prune -o \
   \( \
@@ -261,7 +261,7 @@ FLIRT 兼容源码已小体积纳入 `third_party/flirt`，来源和修改说明
 依赖编译可能较久。并发数应按主板内存调整；首次部署建议从 4 开始：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 DORAEMON_BUILD_JOBS=4 ./scripts/install_x86_ubuntu20_dependencies.sh
 ```
 
@@ -292,7 +292,7 @@ reset/clean，也不得改成任意新版本来绕过错误。
 ### 6.3 依赖验收
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 cat /etc/doraemon/deps.env
 source /etc/profile.d/doraemon-deps.sh
 /opt/doraemon/deps/cmake-3.20.6/bin/cmake --version
@@ -371,7 +371,7 @@ test -z "$(find /opt/doraemon/deps -xdev \
 ## 7. 阶段 D：编译后端工作空间
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 ```
 
@@ -382,7 +382,7 @@ Fields2Cover、`coverage_planner`、`coverage_task_manager` 和
 检查：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source devel/setup.bash
@@ -481,7 +481,7 @@ udevadm info --query=property --name=/dev/ttyUSB0
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6/deploy/udev/99-doraemon-a26022-serial.rules.example \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7/deploy/udev/99-doraemon-a26022-serial.rules.example \
   /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 sudoedit /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 ```
@@ -503,7 +503,7 @@ ls -l /dev/imu /dev/wheel_odom /dev/mcore
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
   /etc/udev/rules.d/99-obsensor-ros1-libusb.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -533,7 +533,7 @@ systemctl is-enabled doraemon-runtime.service || true
 清理或替换 `build/`、`devel/`：
 
 ```bash
-release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 cd "${release}"
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
@@ -556,37 +556,37 @@ test -z "$(find "${release}" -xdev \
       -iname export.log -o -iname '*.db' -o -iname '*.sqlite*' \) \
   \) -print -quit)"
 sudo chown -hR root:root \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 sudo chmod -R go-w \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 sudo chown root:root /opt/doraemon/releases
 sudo chmod 0755 /opt/doraemon/releases
 sudo ln -sfn \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
   /opt/doraemon/current
 sudo chown -h root:root /opt/doraemon/current
 
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
   -xdev \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
   -xdev \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/doraemon/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/doraemon/current)" = 'root:root'
 test "$(readlink -f /opt/doraemon/current)" = \
-  '/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6'
+  '/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7'
 test "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
   describe --tags --exact-match)" = \
-  'deployment-2026-07-22-x86-ubuntu20-v6'
+  'deployment-2026-07-22-x86-ubuntu20-v7'
 test -z "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
   status --porcelain=v1 --untracked-files=all)"
 sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
+  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7 \
   rev-parse HEAD
 ```
 
@@ -608,7 +608,7 @@ allowlist 执行一次性 `sudo -n git` 只读检查；它们不得改用全局 
 只从这个已冻结的物理 release 安装，显式保持“不启用”：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v6
+cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v7
 DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
 ```
 
@@ -664,6 +664,11 @@ RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE=false
 DORAEMON_NO_ACTION_ACCEPTANCE=true
 DORAEMON_ACTION_TEST_APPROVED=false
 ENABLE_MANUAL_DRIVE_SERVICE=false
+TASK_AUTO_CHARGE_ENABLE=false
+EXECUTOR_AUTO_CHARGE_ENABLE=false
+AUTO_CHARGE_MONITOR_ENABLE=false
+AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false
+AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock
 MCORE_TRANSPORT=tcp
 MCORE_TCP_HOST=192.168.127.10
 MCORE_TCP_PORT=8080
@@ -675,7 +680,7 @@ DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
 USB3 拓扑仍为占位符，服务必须拒绝启动。相机在生产入口始终按序列号绑定；
 USB3 拓扑用于独立审计，启动前还会用目标版本内的 Orbbec SDK 验证
 `序列号 ↔ 拓扑` 配对、厂商和 SuperSpeed，不允许在失败时自动降级到另一个设备。
-v6 延续 v5 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
+v7 延续 v6 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
 的超时预算内重试，并要求连续两次都得到恰好三条、唯一且与本车配置完全相同的配对。
 空、部分、额外、重复、畸形或超时快照都会清零连续成功计数并继续等待，直至预算耗尽后
 fail closed。原始 SDK stdout/stderr 不得直接写入 systemd journal。
@@ -687,7 +692,14 @@ fail closed。原始 SDK stdout/stderr 不得直接写入 systemd journal。
 `DORAEMON_ACTION_TEST_APPROVED=false`。该组合会强制关闭底盘 `cmd_vel`、低电量
 自动回桩、充电恢复、充电桩 TCP、供排水/对桩控制栈和 Gateway 自动启动。只有进入阶段 L 且机器人测试
 负责人现场批准后，才允许先停止服务，把前者改为 `false`、后者改为 `true`，再重新
-受控启动；缺少任一条件都必须拒绝动作测试。这不是普通软件部署步骤。
+受控启动；这只批准分项动作验收，不批准自动回桩。`TASK_AUTO_CHARGE_ENABLE`、
+`AUTO_CHARGE_MONITOR_ENABLE` 和 `AUTO_CHARGE_MONITOR_RECOVERY_ENABLE` 必须继续保持 `false`，
+直到本车、本地图的持久充电桩标定和受控回桩验收全部通过。缺少任一条件都必须拒绝
+相应动作。这不是普通软件部署步骤。
+
+`EXECUTOR_AUTO_CHARGE_ENABLE` 在商业运行中永久固定为 `false`：旧 executor 绝对回桩路径
+没有本车/本地图标定门禁，不能启用。自动回桩只能由带完整标定门禁的 TaskManager 发起；
+恢复策略永久为 `redock`，不得使用会直接发布 `/cmd_vel` 的旧 `contact_jog`。
 
 校验环境文件语法：
 
@@ -1078,12 +1090,15 @@ rosrun coverage_planner run_backend_runtime_smoke.py \
 不存在标定文件或符号链接；自动充电状态、计数、周期和事件日志均为空；SLAM、任务、job 和 manual-assist
 均空闲；里程计健康；返回车辆身份精确匹配；`overall_ready=false`、
 `can_start_task=false`。后二者是新车尚未建图时正确的 fail-closed 证据，**不表示任务就绪**。
+门禁还会只读调用 `/clean_robot_server/app/get_dock_calibration_status`，严格要求本车
+`robot_id`、`frame_id=map`、固定 `storage_path=/data/coverage/dock_calibration.yaml`，
+两阶段均未设置、坐标为零，并且 saved/active/runtime 地图身份全部为空。
 门禁会在 ROS 只读检查前后各取一次语义快照；任何地图、任务、标定或动作状态变化都失败。
 该 profile 要求 readiness 精确包含 `battery_state missing`、`combined_status missing` 和
 `station bridge offline`；无地图时只额外允许下面这一条完整匹配的可选 warning：
 
 ```text
-health warning latched: TF_LOOKUP_FAIL:"map" passed to lookupTransform argument target_frame does not exist.
+health warning latched: TF_LOOKUP_FAIL "map" passed to lookupTransform argument target_frame does not exist.
 ```
 
 该例外只适用于全新无地图 profile。大小写、标点或内容不同的 TF/health warning，以及
@@ -1245,6 +1260,11 @@ done
 ```text
 DORAEMON_NO_ACTION_ACCEPTANCE=false
 DORAEMON_ACTION_TEST_APPROVED=true
+TASK_AUTO_CHARGE_ENABLE=false
+EXECUTOR_AUTO_CHARGE_ENABLE=false
+AUTO_CHARGE_MONITOR_ENABLE=false
+AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false
+AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock
 MCORE_MAX_ABS_LINEAR_VELOCITY=<机器人测试负责人批准的有限正数，单位 m/s>
 MCORE_MAX_ABS_ANGULAR_VELOCITY=<机器人测试负责人批准的有限正数，单位 rad/s>
 ```
@@ -1254,6 +1274,12 @@ MCORE_MAX_ABS_ANGULAR_VELOCITY=<机器人测试负责人批准的有限正数，
 批准的有限正数；单车部署记录必须写明数值、单位、批准人、批准时间和依据（测试方案、
 机械/控制参数版本或变更单）。空值、非数字、`NaN`、`Inf`、零或负数都是
 `[停止条件]`。
+
+阶段 L 初次动作启动仍必须显式关闭任务层自动回桩和充电恢复监视器。建图、任务创建、
+充电桩标定和人工监护的手动回桩不依赖这三个自动开关；不得为了提前测试其他动作而把它们
+设为 `true`。即使环境文件误设为 `true`，TaskManager 也必须在每次自动/手动回桩、恢复、
+二阶段对接和精确对接开始前，重新确认本车持久标定已加载且 saved/active/runtime 的
+`map_name`、`map_id`、`map_md5` 全量精确匹配。
 
 若阶段 L 要使用前端 manual drive，还必须显式设置 `ENABLE_MANUAL_DRIVE_SERVICE=true`，
 并让以下五个 manual-drive 门全部为 `true`：
@@ -1359,11 +1385,30 @@ task/map/revision 绑定不一致，或未达到 localization/runtime-map match/
 
 1. 在前端以授权的 service/engineer 角色进入充电桩标定。
 2. 确认当前地图和充电桩均属于当前车辆现场。
-3. 按界面流程采集、保存并读取标定。
-4. 确认文件写入 `/data/coverage/dock_calibration.yaml`。
-5. 先做低速、有人监护的回桩测试。
-6. 验证停止距离、航向、充电触点和充电状态。
-7. 重启后端，再次确认标定可读取并完成一次回桩。
+3. 按界面流程采集、保存并读取两阶段标定。
+4. 确认文件写入 `/data/coverage/dock_calibration.yaml`，文件中的 `robot_id` 精确等于本车，
+   `map.name`、`map.id`、`map.md5` 三项均非空并与当前 active/runtime 地图精确一致。
+5. 调用只读 `/clean_robot_server/app/get_dock_calibration_status`，确认固定 `storage_path`、
+   `stage1_set=true`、`stage2_set=true`，且 saved/active/runtime 三组地图身份一致。
+6. 在三个自动充电开关仍为 `false` 时，先做低速、有人监护的手动回桩测试。
+7. 验证停止距离、航向、充电触点和充电状态。
+8. 重启后端，再次确认持久标定可读取并完成一次有人监护的手动回桩。
+
+上述八项全部通过并记录后，必须再次停止后端并取得机器人测试负责人对自动回桩/充电恢复的
+单独批准，才可把下列三项改为 `true`，重新受控启动并执行有人监护的自动回桩测试：
+
+```text
+TASK_AUTO_CHARGE_ENABLE=true
+AUTO_CHARGE_MONITOR_ENABLE=true
+AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=true
+```
+
+即使这三项获批开启，`EXECUTOR_AUTO_CHARGE_ENABLE` 仍必须保持 `false`，
+`AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY` 仍必须保持 `redock`。任务层自动开关关闭时，
+任务完成回桩和充满后的重复循环也必须保持关闭；只允许现场受控的手动回桩。
+
+持久标定加载标记、两阶段状态或任一 saved/active/runtime 地图身份检查不通过时均为
+`[停止条件]`；不得使用 launch 默认坐标、仅同名地图或另车标定文件绕过。
 
 不要把 A 车的 `dock_calibration.yaml` 复制给 B 车。更换雷达、底盘、充电桩、
 机械安装位置或地图坐标后，原标定必须重新评估。

@@ -1,10 +1,15 @@
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from std_msgs.msg import String
 
-from coverage_task_manager.task_manager import AppExeTaskRequest, TaskManager
+from coverage_task_manager.task_manager import (
+    AppExeTaskRequest,
+    DockCalibrationSnapshot,
+    TaskManager,
+)
 
 
 class TaskCommandContractTest(unittest.TestCase):
@@ -46,6 +51,7 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._task_busy = lambda: False
         mgr._is_mission_running = lambda: False
         mgr._task_return_to_dock_on_finish = False
+        mgr.auto_charge_enable = False
         mgr._persist_now = lambda: None
         mgr._persist_if_changed = lambda force=False: None
         mgr._dock_supply_enable = False
@@ -79,6 +85,51 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._job_loops_done = 0
         mgr._active_run_loop_index = 1
         mgr.nav = type("Nav", (), {"cancel_all": lambda _self: None})()
+        mgr._dock_stage2_nav = type("Nav", (), {"cancel_all": lambda _self: None})()
+        return mgr
+
+    def _enable_calibration_gate(self, mgr, **changes):
+        values = {
+            "robot_id": "CR-001",
+            "frame_id": "map",
+            "storage_path": "/data/coverage/dock_calibration.yaml",
+            "tracked_pose_fresh": True,
+            "tracked_pose_frame": "map",
+            "stage1_set": True,
+            "stage1_x": 1.0,
+            "stage1_y": 2.0,
+            "stage1_yaw": 0.1,
+            "stage2_set": True,
+            "stage2_x": 3.0,
+            "stage2_y": 4.0,
+            "stage2_yaw": 0.2,
+            "saved_map_name": "site-a",
+            "saved_map_id": "map-a",
+            "saved_map_md5": "0123456789abcdef0123456789abcdef",
+            "active_map_name": "site-a",
+            "active_map_id": "map-a",
+            "active_map_md5": "0123456789abcdef0123456789abcdef",
+            "runtime_map_name": "site-a",
+            "runtime_map_id": "map-a",
+            "runtime_map_md5": "0123456789abcdef0123456789abcdef",
+            "runtime_map_ready": True,
+            "active_map_match": True,
+            "localization_valid": True,
+        }
+        values.update(changes)
+        mgr._require_dock_calibration_before_return = True
+        mgr._robot_id = "CR-001"
+        mgr.frame_id = "map"
+        mgr._dock_calibration_storage_path = "/data/coverage/dock_calibration.yaml"
+        mgr._dock_calibration_state_stale_timeout_s = 3.0
+        mgr._require_persisted_dock_calibration = False
+        mgr._dock_calibration_persisted_loaded_param = (
+            "/dock_calibration_service/persisted_calibration_loaded"
+        )
+        mgr._dock_calibration_state = DockCalibrationSnapshot(
+            msg=SimpleNamespace(**values),
+            ts=100.0,
+        )
         return mgr
 
     def test_send_exec_start_cmd_uses_canonical_fields(self):
@@ -825,6 +876,7 @@ class TaskCommandContractTest(unittest.TestCase):
     def test_auto_charge_recovery_exhausted_retreats_then_latches_fault(self):
         mgr = self._manager()
         mgr._auto_charge_recovery_exhausted_running = True
+        mgr._dock_calibration_gate = lambda: (True, "")
         calls = []
         mgr._cancel_supply_and_run_recovery_retreat = lambda: calls.append("retreat")
 
@@ -847,6 +899,7 @@ class TaskCommandContractTest(unittest.TestCase):
     def test_auto_charge_recovery_exhausted_faults_even_when_retreat_fails(self):
         mgr = self._manager()
         mgr._auto_charge_recovery_exhausted_running = True
+        mgr._dock_calibration_gate = lambda: (True, "")
         cancel_calls = []
         mgr._dock_supply_cancel = lambda: cancel_calls.append(True)
 
@@ -868,6 +921,19 @@ class TaskCommandContractTest(unittest.TestCase):
                     False,
                 )
             ],
+        )
+
+    def test_auto_charge_recovery_exhausted_never_retreats_without_live_calibration(self):
+        mgr = self._manager()
+        mgr._auto_charge_recovery_exhausted_running = True
+        mgr._dock_calibration_gate = lambda: (False, "slam stream stale")
+        mgr._cancel_supply_and_run_recovery_retreat = mock.Mock()
+
+        mgr._run_auto_charge_recovery_exhausted()
+
+        mgr._cancel_supply_and_run_recovery_retreat.assert_not_called()
+        self.assertTrue(
+            any("DOCK_REJECT:CALIBRATION:slam stream stale" == event for event in mgr._emit_events)
         )
 
     def test_actuator_debug_is_busy_and_blocks_low_soc_auto_charge(self):
@@ -914,6 +980,205 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertFalse(started)
         self.assertTrue(mgr._armed)
         self.assertIn("DOCK_REJECT:ACTUATOR_DEBUG", mgr._emit_events)
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
+    def test_dock_calibration_gate_accepts_only_complete_exact_live_binding(self, _time):
+        mgr = self._enable_calibration_gate(self._manager())
+
+        ok, message = mgr._dock_calibration_gate()
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual(mgr.dock_stage1_xyyaw, (1.0, 2.0, 0.1))
+        self.assertEqual(mgr.dock_xyyaw, (3.0, 4.0, 0.2))
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
+    def test_dock_calibration_gate_rejects_incomplete_or_mismatched_map_identity(self, _time):
+        cases = {
+            "wrong robot": {"robot_id": "CR-999"},
+            "wrong frame": {"frame_id": "odom"},
+            "wrong storage": {"storage_path": "/tmp/dock.yaml"},
+            "stage1 unset": {"stage1_set": False},
+            "nonfinite stage2": {"stage2_yaw": float("nan")},
+            "missing saved md5": {"saved_map_md5": ""},
+            "active id mismatch": {"active_map_id": "map-b"},
+            "runtime md5 mismatch": {"runtime_map_md5": "ffffffffffffffffffffffffffffffff"},
+            "runtime map not ready": {"runtime_map_ready": False},
+            "active map not matched": {"active_map_match": False},
+            "localization invalid": {"localization_valid": False},
+            "tracked pose stale": {"tracked_pose_fresh": False},
+            "tracked pose wrong frame": {"tracked_pose_frame": "odom"},
+        }
+        for label, changes in cases.items():
+            with self.subTest(label=label):
+                mgr = self._enable_calibration_gate(self._manager(), **changes)
+                ok, message = mgr._dock_calibration_gate()
+                self.assertFalse(ok)
+                self.assertTrue(message)
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=104.0)
+    def test_stale_calibration_blocks_normal_stage2_retry_and_supply_dispatch(self, _time):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._dock_retry_count = 0
+        mgr.dock_retry_limit = 2
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_start_cli = mock.Mock()
+        mgr._dock_supply_start_service = "/dock_supply/start"
+
+        self.assertFalse(mgr._start_dock_sequence(manual=True))
+        self.assertFalse(mgr._retry_dock_from_stage1(manual=True, reason="retry"))
+        self.assertFalse(mgr._start_dock_stage2(manual=True))
+        self.assertFalse(mgr._dock_supply_start())
+
+        mgr._dock_supply_start_cli.assert_not_called()
+        self.assertEqual(mgr._dock_retry_count, 0)
+        self.assertGreaterEqual(
+            sum(event.startswith("DOCK_REJECT:CALIBRATION:") for event in mgr._emit_events),
+            3,
+        )
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
+    def test_supply_dispatch_rechecks_map_binding_after_navigation(self, _time):
+        mgr = self._enable_calibration_gate(self._manager(), runtime_map_id="map-b")
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_start_cli = mock.Mock()
+        mgr._dock_supply_start_service = "/dock_supply/start"
+
+        started = mgr._dock_supply_start()
+
+        self.assertFalse(started)
+        mgr._dock_supply_start_cli.assert_not_called()
+        self.assertTrue(
+            any("runtime map id mismatch" in event for event in mgr._emit_events),
+            msg=mgr._emit_events,
+        )
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
+    @mock.patch("coverage_task_manager.task_manager.rospy.get_param", return_value=False)
+    def test_commercial_gate_requires_persisted_loaded_marker(self, _get_param, _time):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._require_persisted_dock_calibration = True
+
+        ok, message = mgr._dock_calibration_gate()
+
+        self.assertFalse(ok)
+        self.assertEqual(message, "persisted dock calibration is not loaded")
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
+    @mock.patch("coverage_task_manager.task_manager.rospy.get_param", return_value=True)
+    def test_commercial_gate_accepts_matching_persisted_loaded_marker(self, _get_param, _time):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._require_persisted_dock_calibration = True
+
+        ok, message = mgr._dock_calibration_gate()
+
+        self.assertTrue(ok, msg=message)
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=104.0)
+    def test_calibration_reject_does_not_rearm_low_soc_dispatch(self, _time):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._armed = False
+
+        started = mgr._start_dock_sequence(manual=False)
+
+        self.assertFalse(started)
+        self.assertFalse(mgr._armed)
+
+    def test_post_run_dock_failure_enters_explicit_blocking_fault(self):
+        mgr = self._manager()
+        mgr.auto_charge_enable = True
+        mgr._task_return_to_dock_on_finish = True
+        mgr._start_dock_sequence = mock.Mock(return_value=False)
+
+        mgr._finalize_terminal("DONE")
+
+        mgr._start_dock_sequence.assert_called_once_with(manual=False)
+        self.assertIn(
+            ("ERROR_POST_RUN_DOCK", "failed to start post-run dock sequence"),
+            mgr._faults,
+        )
+
+    def test_automatic_post_run_dock_and_repeat_are_disabled_with_auto_charge_flag(self):
+        mgr = self._manager()
+        mgr.auto_charge_enable = False
+        mgr._task_return_to_dock_on_finish = True
+        mgr._task_repeat_after_full_charge = True
+        mgr._active_job_id = "job-1"
+        mgr._start_dock_sequence = mock.Mock(return_value=True)
+
+        self.assertFalse(TaskManager._repeat_after_charge_enabled(mgr))
+        mgr._finalize_terminal("DONE")
+
+        mgr._start_dock_sequence.assert_not_called()
+
+    def test_active_run_calibration_fault_remains_paused_and_continue_is_allowed(self):
+        mgr = self._manager()
+        mgr._active_run_id = "run-alpha"
+        mgr._mission_state = "PAUSED"
+        mgr._phase = "MANUAL_DOCKING_STAGE1"
+        mgr._armed = False
+        mgr._dock_stage2_replanning_suppressed = False
+
+        TaskManager._enter_charge_fault(
+            mgr,
+            "ERROR_DOCK_CALIBRATION",
+            "dock_calibration_invalid:slam stale",
+            manual=True,
+        )
+
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._phase, "PAUSED_AUTO_CHARGE")
+        allowed, message = mgr._ensure_exe_task_allowed(AppExeTaskRequest.CONTINUE)
+        self.assertTrue(allowed, msg=message)
+
+    def test_manual_undock_rejects_busy_and_debug_phases(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_DOCKING_STAGE1"
+        allowed, reason = mgr._manual_undock_allowed()
+        self.assertFalse(allowed)
+        self.assertIn("phase_", reason)
+
+        mgr._phase = "IDLE"
+        mgr._executor_state = "ACTUATOR_DEBUG"
+        allowed, reason = mgr._manual_undock_allowed()
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "actuator_debug_active")
+
+    def test_dock_dispatch_rechecks_calibration_immediately_before_send_goal(self):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._dock_calibration_gate = mock.Mock(
+            side_effect=[(True, ""), (False, "slam stream stopped")]
+        )
+        mgr._is_mission_running = lambda: False
+        mgr._dock_sys_profile_name = ""
+        mgr.dock_two_stage_enable = False
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        started = mgr._start_dock_sequence(manual=True)
+
+        self.assertFalse(started)
+        mgr.nav.send_goal.assert_not_called()
+        mgr.nav.cancel_all.assert_called()
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_DOCK_CALIBRATION", "dock_calibration_invalid:slam stream stopped", True)],
+        )
+
+    def test_absolute_undock_cancels_immediately_when_calibration_stream_is_lost(self):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._phase = "AUTO_UNDOCKING"
+        mgr._dock_supply_managed_undocking = lambda: False
+        mgr._dock_calibration_gate = mock.Mock(return_value=(False, "tracked pose stale"))
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        mgr._handle_undocking_phase()
+
+        mgr.nav.cancel_all.assert_called()
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_DOCK_CALIBRATION", "dock_calibration_invalid:tracked pose stale", False)],
+        )
 
 
 if __name__ == "__main__":

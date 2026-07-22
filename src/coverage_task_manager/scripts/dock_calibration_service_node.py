@@ -4,6 +4,7 @@
 import json
 import math
 import os
+import tempfile
 import threading
 import time
 from typing import Optional, Tuple
@@ -60,6 +61,59 @@ def _parse_xyyaw(value, default: Optional[Tuple[float, float, float]] = None):
     return tuple(default)
 
 
+def _parse_xyyaw_strict(value):
+    """Return a finite three-element pose, or None for an unset/invalid value."""
+    values = None
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        values = value
+    elif isinstance(value, str):
+        s = value.strip().strip("[]")
+        parts = [p.strip() for p in s.replace(";", ",").split(",") if p.strip()]
+        if len(parts) == 3:
+            values = parts
+    if values is None:
+        return None
+    try:
+        pose = tuple(float(item) for item in values)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(item) for item in pose):
+        return None
+    return pose
+
+
+def _validate_stage_pose(value):
+    """Return a legal map-frame calibration pose without coercing bad input."""
+    pose = _parse_xyyaw_strict(value)
+    if pose is None:
+        raise ValueError("dock calibration pose must contain three finite numbers")
+    x, y, yaw = pose
+    # A million metres is deliberately far outside any supported occupancy
+    # map, while still avoiding an arbitrary site-size limit.
+    if abs(x) > 1.0e6 or abs(y) > 1.0e6:
+        raise ValueError("dock calibration x/y coordinate is outside the supported map range")
+    if yaw < -math.pi or yaw > math.pi:
+        raise ValueError("dock calibration yaw must be within [-pi, pi]")
+    return pose
+
+
+def _map_identity_match_issue(*, saved, active, runtime) -> str:
+    saved_values = {key: _text((saved or {}).get(key, "")) for key in ("name", "id", "md5")}
+    active_values = {key: _text((active or {}).get(key, "")) for key in ("name", "id", "md5")}
+    runtime_values = {key: _text((runtime or {}).get(key, "")) for key in ("name", "id", "md5")}
+    missing_saved = [key for key, value in saved_values.items() if not value]
+    if missing_saved:
+        return "saved dock points have incomplete map identity: missing %s" % ",".join(missing_saved)
+    for key, expected in saved_values.items():
+        if not expected:
+            continue
+        if active_values.get(key) != expected:
+            return "saved dock map %s does not match active map" % key
+        if runtime_values.get(key) != expected:
+            return "saved dock map %s does not match runtime map" % key
+    return ""
+
+
 def _yaw_from_quat(q) -> float:
     x = _as_float(getattr(q, "x", 0.0))
     y = _as_float(getattr(q, "y", 0.0))
@@ -108,6 +162,12 @@ class DockCalibrationServiceNode:
             rospy.get_param("~storage_path", "/data/coverage/dock_calibration.yaml")
         )
         self.load_persisted_on_start = bool(rospy.get_param("~load_persisted_on_start", True))
+        self.require_persisted_calibration = bool(
+            rospy.get_param("~require_persisted_calibration", True)
+        )
+        self._runtime_config_map_name = _text(rospy.get_param("~runtime_config_map_name", ""))
+        self._runtime_config_map_id = _text(rospy.get_param("~runtime_config_map_id", ""))
+        self._runtime_config_map_md5 = _text(rospy.get_param("~runtime_config_map_md5", ""))
 
         self.slam_state_stale_timeout_s = max(0.2, float(rospy.get_param("~slam_state_stale_timeout_s", 2.0)))
         self.dock_pose_stale_timeout_s = max(0.1, float(rospy.get_param("~dock_pose_stale_timeout_s", 1.0)))
@@ -149,9 +209,25 @@ class DockCalibrationServiceNode:
         self._dock_pose_ts = 0.0
         self._dock_score = float("nan")
         self._dock_score_ts = 0.0
-        self._saved_map_name = ""
-        self._saved_map_id = ""
-        self._saved_map_md5 = ""
+        self._saved_map_name = self._runtime_config_map_name
+        self._saved_map_id = self._runtime_config_map_id
+        self._saved_map_md5 = self._runtime_config_map_md5
+        runtime_stage1 = self._stage_param(self.stage1_param_name)[1]
+        runtime_stage2 = self._stage_param(self.stage2_param_name)[1]
+        self._runtime_config_valid = bool(
+            runtime_stage1 is not None
+            and runtime_stage2 is not None
+            and self._runtime_config_map_name
+            and self._runtime_config_map_id
+            and self._runtime_config_map_md5
+        )
+        self._calibration_source_valid = bool(
+            self._runtime_config_valid and not self.require_persisted_calibration
+        )
+        self._persisted_calibration_loaded = False
+        self._trusted_stage1 = runtime_stage1 if self._calibration_source_valid else None
+        self._trusted_stage2 = runtime_stage2 if self._calibration_source_valid else None
+        self._publish_persisted_loaded_marker()
         self._startup_reapply_remaining = 0
         self._startup_reapply_timer = None
 
@@ -256,6 +332,15 @@ class DockCalibrationServiceNode:
         }
 
     def _on_slam_state(self, msg: SlamState):
+        incoming_robot_id = _text(getattr(msg, "robot_id", ""))
+        if incoming_robot_id != self.robot_id:
+            rospy.logwarn_throttle(
+                5.0,
+                "[dock_calib] ignored slam state for robot_id=%s local=%s",
+                incoming_robot_id or "-",
+                self.robot_id,
+            )
+            return
         with self._lock:
             self._slam_state = msg
             self._slam_state_ts = time.time()
@@ -297,7 +382,7 @@ class DockCalibrationServiceNode:
     def _handle_status(self, req):
         state = self._build_state()
         robot_id = _text(getattr(req, "robot_id", ""))
-        if robot_id and robot_id != self.robot_id:
+        if robot_id != self.robot_id:
             return GetDockCalibrationStatusResponse(
                 success=False,
                 message="robot_id mismatch: requested=%s local=%s" % (robot_id, self.robot_id),
@@ -307,7 +392,7 @@ class DockCalibrationServiceNode:
 
     def _handle_command(self, req):
         robot_id = _text(getattr(req, "robot_id", ""))
-        if robot_id and robot_id != self.robot_id:
+        if robot_id != self.robot_id:
             return self._command_response(False, "ROBOT_ID_MISMATCH", "robot_id mismatch", int(req.operation))
 
         op = int(getattr(req, "operation", 0))
@@ -368,15 +453,74 @@ class DockCalibrationServiceNode:
         return self._set_stage(stage, state.current_x, state.current_y, state.current_yaw, operation=operation)
 
     def _set_stage(self, stage: int, x, y, yaw, *, operation: int):
-        pose = [_as_float(x), _as_float(y), _as_float(yaw)]
-        param_name = self.stage1_param_name if int(stage) == 1 else self.stage2_param_name
-        rospy.set_param(param_name, pose)
-        self._persist_storage()
+        pose = list(_validate_stage_pose((x, y, yaw)))
+        stage_number = int(stage)
+        if stage_number not in (1, 2):
+            raise ValueError("dock calibration stage must be 1 or 2")
+        param_name = self.stage1_param_name if stage_number == 1 else self.stage2_param_name
+        other_param_name = self.stage2_param_name if stage_number == 1 else self.stage1_param_name
+        with self._lock:
+            current_identity = self._current_calibration_map_identity()
+            snapshots = {}
+            for name in (self.stage1_param_name, self.stage2_param_name):
+                exists = bool(name and rospy.has_param(name))
+                snapshots[name] = (exists, rospy.get_param(name) if exists else None)
+            metadata_snapshot = (
+                self._saved_map_name,
+                self._saved_map_id,
+                self._saved_map_md5,
+                self._persisted_calibration_loaded,
+                self._calibration_source_valid,
+                self._trusted_stage1,
+                self._trusted_stage2,
+            )
+            saved_identity = self._saved_map_identity()
+            same_round = bool(
+                self._calibration_source_valid
+                and self._map_identities_equal(saved_identity, current_identity)
+            )
+            if not same_round:
+                # A map switch starts a new calibration round. Never carry the
+                # other stage from the old map into the new map binding.
+                self._clear_stage_param(other_param_name)
+            stage1 = tuple(pose) if stage_number == 1 else (self._trusted_stage1 if same_round else None)
+            stage2 = tuple(pose) if stage_number == 2 else (self._trusted_stage2 if same_round else None)
+            if stage1 is None:
+                self._clear_stage_param(self.stage1_param_name)
+            else:
+                rospy.set_param(self.stage1_param_name, list(stage1))
+            if stage2 is None:
+                self._clear_stage_param(self.stage2_param_name)
+            else:
+                rospy.set_param(self.stage2_param_name, list(stage2))
+            try:
+                self._persist_storage(
+                    expected_map_identity=current_identity,
+                    stage1=stage1,
+                    stage2=stage2,
+                )
+            except Exception:
+                for name, (existed, previous_value) in snapshots.items():
+                    if existed:
+                        rospy.set_param(name, previous_value)
+                    else:
+                        self._clear_stage_param(name)
+                (
+                    self._saved_map_name,
+                    self._saved_map_id,
+                    self._saved_map_md5,
+                    self._persisted_calibration_loaded,
+                    self._calibration_source_valid,
+                    self._trusted_stage1,
+                    self._trusted_stage2,
+                ) = metadata_snapshot
+                self._publish_persisted_loaded_marker()
+                raise
         self._state_pub.publish(self._build_state())
         return self._command_response(
             True,
             "",
-            "saved stage%d xyyaw=[%.6f, %.6f, %.6f]" % (int(stage), pose[0], pose[1], pose[2]),
+            "saved stage%d xyyaw=[%.6f, %.6f, %.6f]" % (stage_number, pose[0], pose[1], pose[2]),
             operation,
         )
 
@@ -398,10 +542,48 @@ class DockCalibrationServiceNode:
                 operation,
             )
 
-        self.dock_target_dist = float(target)
-        self.dock_xy_tolerance = float(tolerance)
-        self._apply_dock_params(target=self.dock_target_dist, tolerance=self.dock_xy_tolerance)
-        self._persist_storage()
+        with self._lock:
+            current_identity = self._current_calibration_map_identity()
+            if not self._calibration_source_valid or not self._map_identities_equal(
+                self._saved_map_identity(), current_identity
+            ):
+                raise ValueError(
+                    "dock parameters may only be changed on the map already bound to the calibration"
+                )
+            previous_target = self.dock_target_dist
+            previous_tolerance = self.dock_xy_tolerance
+            param_snapshots = {}
+            for name in (
+                self.docking_target_dist_param_name,
+                self.docking_controller_dist_param_name,
+                self.docking_xy_tolerance_param_name,
+            ):
+                if not name or name in param_snapshots:
+                    continue
+                exists = rospy.has_param(name)
+                param_snapshots[name] = (exists, rospy.get_param(name) if exists else None)
+            self.dock_target_dist = float(target)
+            self.dock_xy_tolerance = float(tolerance)
+            try:
+                self._apply_dock_params(
+                    target=self.dock_target_dist,
+                    tolerance=self.dock_xy_tolerance,
+                )
+                self._persist_storage(
+                    expected_map_identity=current_identity,
+                    require_existing_binding=True,
+                    stage1=self._trusted_stage1,
+                    stage2=self._trusted_stage2,
+                )
+            except Exception:
+                self.dock_target_dist = previous_target
+                self.dock_xy_tolerance = previous_tolerance
+                for name, (existed, previous_value) in param_snapshots.items():
+                    if existed:
+                        rospy.set_param(name, previous_value)
+                    else:
+                        self._clear_stage_param(name)
+                raise
         self._state_pub.publish(self._build_state())
         return self._command_response(
             True,
@@ -413,8 +595,52 @@ class DockCalibrationServiceNode:
 
     def _stage_param(self, param_name: str):
         if not param_name or not rospy.has_param(param_name):
-            return False, (0.0, 0.0, 0.0)
-        return True, _parse_xyyaw(rospy.get_param(param_name), default=(0.0, 0.0, 0.0))
+            return False, None
+        try:
+            pose = _validate_stage_pose(rospy.get_param(param_name))
+        except ValueError:
+            pose = None
+        return pose is not None, pose
+
+    @staticmethod
+    def _pose_or_zero(pose):
+        return pose if pose is not None else (0.0, 0.0, 0.0)
+
+    def _clear_stage_param(self, param_name: str):
+        if not param_name:
+            return
+        try:
+            if rospy.has_param(param_name):
+                rospy.delete_param(param_name)
+        except Exception:
+            pass
+
+    def _publish_persisted_loaded_marker(self):
+        try:
+            rospy.set_param(
+                "~persisted_calibration_loaded",
+                bool(self._persisted_calibration_loaded),
+            )
+        except Exception:
+            pass
+
+    def _invalidate_loaded_calibration(self):
+        self._persisted_calibration_loaded = False
+        self._calibration_source_valid = bool(
+            self._runtime_config_valid and not self.require_persisted_calibration
+        )
+        self._saved_map_name = self._runtime_config_map_name
+        self._saved_map_id = self._runtime_config_map_id
+        self._saved_map_md5 = self._runtime_config_map_md5
+        self._trusted_stage1 = None
+        self._trusted_stage2 = None
+        if self._calibration_source_valid:
+            self._trusted_stage1 = self._stage_param(self.stage1_param_name)[1]
+            self._trusted_stage2 = self._stage_param(self.stage2_param_name)[1]
+        if not self._calibration_source_valid:
+            self._clear_stage_param(self.stage1_param_name)
+            self._clear_stage_param(self.stage2_param_name)
+        self._publish_persisted_loaded_marker()
 
     def _target_dist(self) -> float:
         if self.docking_target_dist_param_name and rospy.has_param(self.docking_target_dist_param_name):
@@ -441,22 +667,51 @@ class DockCalibrationServiceNode:
             return False, age, "", 0.0, 0.0, 0.0
         pose_age = max(_as_float(getattr(msg, "tracked_pose_age_s", age), age), age)
         frame = _text(getattr(msg, "tracked_pose_frame", ""))
-        fresh = bool(getattr(msg, "tracked_pose_fresh", False)) and pose_age <= self.slam_state_stale_timeout_s
+        pose = _parse_xyyaw_strict(
+            (
+                getattr(msg, "tracked_pose_x", None),
+                getattr(msg, "tracked_pose_y", None),
+                getattr(msg, "tracked_pose_theta", None),
+            )
+        )
+        robot_matches = _text(getattr(msg, "robot_id", "")) == self.robot_id
+        fresh = bool(
+            robot_matches
+            and pose is not None
+            and getattr(msg, "tracked_pose_fresh", False)
+            and pose_age <= self.slam_state_stale_timeout_s
+        )
+        if pose is None:
+            pose = (0.0, 0.0, 0.0)
         return (
             fresh,
             pose_age,
             frame,
-            _as_float(getattr(msg, "tracked_pose_x", 0.0)),
-            _as_float(getattr(msg, "tracked_pose_y", 0.0)),
-            _as_float(getattr(msg, "tracked_pose_theta", 0.0)),
+            pose[0],
+            pose[1],
+            pose[2],
         )
 
     def _build_state(self):
         with self._lock:
             now = time.time()
             msg = self._slam_state
-            stage1_set, stage1 = self._stage_param(self.stage1_param_name)
-            stage2_set, stage2 = self._stage_param(self.stage2_param_name)
+            stage1_present, stage1 = self._stage_param(self.stage1_param_name)
+            stage2_present, stage2 = self._stage_param(self.stage2_param_name)
+            stage1_matches_trusted = bool(
+                stage1_present
+                and self._trusted_stage1 is not None
+                and tuple(stage1) == tuple(self._trusted_stage1)
+            )
+            stage2_matches_trusted = bool(
+                stage2_present
+                and self._trusted_stage2 is not None
+                and tuple(stage2) == tuple(self._trusted_stage2)
+            )
+            stage1_set = bool(stage1_matches_trusted and self._calibration_source_valid)
+            stage2_set = bool(stage2_matches_trusted and self._calibration_source_valid)
+            stage1 = self._pose_or_zero(self._trusted_stage1)
+            stage2 = self._pose_or_zero(self._trusted_stage2)
             pose_fresh, pose_age, pose_frame, current_x, current_y, current_yaw = self._current_pose_from_slam(now)
             dock_pose_age = (now - self._dock_pose_ts) if self._dock_pose_ts > 0.0 else float("inf")
             dock_pose_fresh = bool(self._dock_pose is not None and dock_pose_age <= self.dock_pose_stale_timeout_s)
@@ -488,6 +743,10 @@ class DockCalibrationServiceNode:
             stage2_save_recommended = bool(pose_fresh and pose_frame == self.frame_id and quality_ok)
 
             warnings = []
+            if self._calibration_source_valid and stage1_present and not stage1_matches_trusted:
+                warnings.append("dock stage1 ROS parameter differs from trusted calibration")
+            if self._calibration_source_valid and stage2_present and not stage2_matches_trusted:
+                warnings.append("dock stage2 ROS parameter differs from trusted calibration")
             if not pose_fresh:
                 warnings.append("tracked_pose is stale or missing")
             elif pose_frame != self.frame_id:
@@ -510,10 +769,31 @@ class DockCalibrationServiceNode:
                         "abs(dock_pose.yaw) %.3f is above %.3f"
                         % (_angle_abs(dock_yaw), self.stage2_abs_yaw_max_rad)
                     )
-            if msg is not None and self._saved_map_md5:
-                current_md5 = _text(getattr(msg, "active_map_md5", "")) or _text(getattr(msg, "runtime_map_md5", ""))
-                if current_md5 and current_md5 != self._saved_map_md5:
-                    warnings.append("saved dock points belong to a different map md5")
+            if stage1_present or stage2_present:
+                if not self._calibration_source_valid:
+                    warnings.append("dock points are not backed by vehicle-bound calibration")
+                elif msg is None:
+                    warnings.append("saved dock map identity cannot be checked without slam state")
+                else:
+                    map_issue = _map_identity_match_issue(
+                        saved={
+                            "name": self._saved_map_name,
+                            "id": self._saved_map_id,
+                            "md5": self._saved_map_md5,
+                        },
+                        active={
+                            "name": getattr(msg, "active_map_name", ""),
+                            "id": getattr(msg, "active_map_id", ""),
+                            "md5": getattr(msg, "active_map_md5", ""),
+                        },
+                        runtime={
+                            "name": getattr(msg, "runtime_map_name", ""),
+                            "id": getattr(msg, "runtime_map_id", ""),
+                            "md5": getattr(msg, "runtime_map_md5", ""),
+                        },
+                    )
+                    if map_issue:
+                        warnings.append(map_issue)
 
             state = DockCalibrationState()
             state.robot_id = self.robot_id
@@ -578,51 +858,158 @@ class DockCalibrationServiceNode:
             state.warnings = warnings
             return state
 
-    def _storage_payload(self):
-        stage1_set, stage1 = self._stage_param(self.stage1_param_name)
-        stage2_set, stage2 = self._stage_param(self.stage2_param_name)
+    def _saved_map_identity(self):
+        return {
+            "name": _text(self._saved_map_name),
+            "id": _text(self._saved_map_id),
+            "md5": _text(self._saved_map_md5),
+        }
+
+    @staticmethod
+    def _map_identities_equal(left, right) -> bool:
+        return all(
+            _text((left or {}).get(key, "")) == _text((right or {}).get(key, ""))
+            for key in ("name", "id", "md5")
+        )
+
+    def _current_calibration_map_identity(self):
+        """Return the fresh, exact live map binding or fail closed."""
         msg = self._slam_state
-        map_name = ""
-        map_id = ""
-        map_md5 = ""
-        if msg is not None:
-            map_name = _text(getattr(msg, "active_map_name", "")) or _text(getattr(msg, "runtime_map_name", ""))
-            map_id = _text(getattr(msg, "active_map_id", "")) or _text(getattr(msg, "runtime_map_id", ""))
-            map_md5 = _text(getattr(msg, "active_map_md5", "")) or _text(getattr(msg, "runtime_map_md5", ""))
-        if map_name or map_id or map_md5:
-            self._saved_map_name = map_name
-            self._saved_map_id = map_id
-            self._saved_map_md5 = map_md5
+        now = time.time()
+        age = (now - self._slam_state_ts) if self._slam_state_ts > 0.0 else float("inf")
+        if msg is None or age < 0.0 or age > self.slam_state_stale_timeout_s:
+            raise ValueError("cannot persist dock calibration without a fresh slam state")
+        if _text(getattr(msg, "robot_id", "")) != self.robot_id:
+            raise ValueError("slam state robot_id does not match local robot_id")
+        if not bool(getattr(msg, "runtime_map_ready", False)):
+            raise ValueError("runtime map is not ready")
+        if not bool(getattr(msg, "active_map_match", False)):
+            raise ValueError("active/runtime map match is not valid")
+        if not bool(getattr(msg, "localization_valid", False)):
+            raise ValueError("localization is not valid")
+        active = {
+            "name": _text(getattr(msg, "active_map_name", "")),
+            "id": _text(getattr(msg, "active_map_id", "")),
+            "md5": _text(getattr(msg, "active_map_md5", "")),
+        }
+        runtime = {
+            "name": _text(getattr(msg, "runtime_map_name", "")),
+            "id": _text(getattr(msg, "runtime_map_id", "")),
+            "md5": _text(getattr(msg, "runtime_map_md5", "")),
+        }
+        missing = [
+            "%s.%s" % (source, key)
+            for source, values in (("active", active), ("runtime", runtime))
+            for key in ("name", "id", "md5")
+            if not values[key]
+        ]
+        if missing:
+            raise ValueError(
+                "cannot persist dock calibration without complete map identity: missing %s"
+                % ",".join(missing)
+            )
+        if not self._map_identities_equal(active, runtime):
+            raise ValueError("active and runtime map identities do not match exactly")
+        return active
+
+    def _storage_payload(self, map_identity, *, stage1, stage2):
         return {
             "robot_id": self.robot_id,
             "saved_at_ms": _now_ms(),
             "frame_id": self.frame_id,
             "map": {
-                "name": self._saved_map_name,
-                "id": self._saved_map_id,
-                "md5": self._saved_map_md5,
+                "name": _text((map_identity or {}).get("name", "")),
+                "id": _text((map_identity or {}).get("id", "")),
+                "md5": _text((map_identity or {}).get("md5", "")),
             },
-            "dock_stage1_xyyaw": list(stage1) if stage1_set else None,
-            "dock_xyyaw": list(stage2) if stage2_set else None,
-            "dock_target_dist": float(self._target_dist()),
-            "dock_xy_tolerance": float(self._xy_tolerance()),
+            "dock_stage1_xyyaw": list(stage1) if stage1 is not None else None,
+            "dock_xyyaw": list(stage2) if stage2 is not None else None,
+            # Persist only values validated through this service. Public ROS
+            # parameters are downstream outputs and are never an authority.
+            "dock_target_dist": float(self.dock_target_dist),
+            "dock_xy_tolerance": float(self.dock_xy_tolerance),
         }
 
-    def _persist_storage(self):
-        if not self.storage_path:
-            return
-        payload = self._storage_payload()
-        directory = os.path.dirname(self.storage_path)
-        if directory:
+    def _persist_storage(
+        self,
+        *,
+        expected_map_identity=None,
+        require_existing_binding=False,
+        stage1=None,
+        stage2=None,
+    ):
+        with self._lock:
+            if not self.storage_path:
+                raise ValueError("dock calibration storage_path is required")
+            current_identity = self._current_calibration_map_identity()
+            if expected_map_identity is not None and not self._map_identities_equal(
+                current_identity, expected_map_identity
+            ):
+                raise ValueError("live map identity changed during dock calibration update")
+            if require_existing_binding and (
+                not self._calibration_source_valid
+                or not self._map_identities_equal(self._saved_map_identity(), current_identity)
+            ):
+                raise ValueError("live map identity does not match saved dock calibration")
+            stage1_validated = None if stage1 is None else _validate_stage_pose(stage1)
+            stage2_validated = None if stage2 is None else _validate_stage_pose(stage2)
+            payload = self._storage_payload(
+                current_identity,
+                stage1=stage1_validated,
+                stage2=stage2_validated,
+            )
+            directory = os.path.dirname(self.storage_path) or "."
             os.makedirs(directory, exist_ok=True)
-        with open(self.storage_path, "w", encoding="utf-8") as fh:
-            if yaml is not None:
-                yaml.safe_dump(payload, fh, default_flow_style=False, sort_keys=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".%s." % (os.path.basename(self.storage_path) or "dock_calibration"),
+                suffix=".tmp",
+                dir=directory,
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    if yaml is not None:
+                        yaml.safe_dump(payload, fh, default_flow_style=False, sort_keys=True)
+                    else:
+                        json.dump(payload, fh, indent=2, sort_keys=True)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, self.storage_path)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass
+                raise
+            self._saved_map_name = current_identity["name"]
+            self._saved_map_id = current_identity["id"]
+            self._saved_map_md5 = current_identity["md5"]
+            self._trusted_stage1 = stage1_validated
+            self._trusted_stage2 = stage2_validated
+            if self._trusted_stage1 is None:
+                self._clear_stage_param(self.stage1_param_name)
             else:
-                json.dump(payload, fh, indent=2, sort_keys=True)
+                try:
+                    rospy.set_param(self.stage1_param_name, list(self._trusted_stage1))
+                except Exception as e:
+                    rospy.logwarn("[dock_calib] failed to reapply trusted stage1 output: %s", str(e))
+            if self._trusted_stage2 is None:
+                self._clear_stage_param(self.stage2_param_name)
+            else:
+                try:
+                    rospy.set_param(self.stage2_param_name, list(self._trusted_stage2))
+                except Exception as e:
+                    rospy.logwarn("[dock_calib] failed to reapply trusted stage2 output: %s", str(e))
+            self._persisted_calibration_loaded = True
+            self._calibration_source_valid = True
+            self._publish_persisted_loaded_marker()
 
     def _load_storage(self, *, apply_params: bool, quiet: bool):
+        with self._lock:
+            return self._load_storage_locked(apply_params=apply_params, quiet=quiet)
+
+    def _load_storage_locked(self, *, apply_params: bool, quiet: bool):
         if not self.storage_path or not os.path.exists(self.storage_path):
+            self._invalidate_loaded_calibration()
             return False, "storage file does not exist"
         try:
             with open(self.storage_path, "r", encoding="utf-8") as fh:
@@ -631,26 +1018,154 @@ class DockCalibrationServiceNode:
                 else:
                     payload = json.load(fh)
         except Exception as e:
+            self._invalidate_loaded_calibration()
             if not quiet:
                 rospy.logerr("[dock_calib] load storage failed: %s", str(e))
             return False, str(e)
+
+        if not isinstance(payload, dict):
+            self._invalidate_loaded_calibration()
+            return False, "storage payload must be a mapping"
+        stored_robot_id = _text(payload.get("robot_id", ""))
+        if stored_robot_id != self.robot_id:
+            self._invalidate_loaded_calibration()
+            return False, "storage robot_id mismatch: stored=%s local=%s" % (
+                stored_robot_id or "-",
+                self.robot_id,
+            )
+        stored_frame_id = _text(payload.get("frame_id", ""))
+        if stored_frame_id != self.frame_id:
+            self._invalidate_loaded_calibration()
+            return False, "storage frame_id mismatch: stored=%s local=%s" % (
+                stored_frame_id or "-",
+                self.frame_id,
+            )
         map_info = payload.get("map") or {}
-        self._saved_map_name = _text(map_info.get("name", ""))
-        self._saved_map_id = _text(map_info.get("id", ""))
-        self._saved_map_md5 = _text(map_info.get("md5", ""))
+        if not isinstance(map_info, dict):
+            self._invalidate_loaded_calibration()
+            return False, "storage map identity must be a mapping"
+        stage1_raw = payload.get("dock_stage1_xyyaw")
+        stage2_raw = payload.get("dock_xyyaw")
+        try:
+            stage1 = None if stage1_raw is None else _validate_stage_pose(stage1_raw)
+        except ValueError:
+            self._invalidate_loaded_calibration()
+            return False, "invalid dock_stage1_xyyaw"
+        try:
+            stage2 = None if stage2_raw is None else _validate_stage_pose(stage2_raw)
+        except ValueError:
+            self._invalidate_loaded_calibration()
+            return False, "invalid dock_xyyaw"
+        try:
+            target = float(payload.get("dock_target_dist", self.dock_target_dist))
+            tolerance = float(payload.get("dock_xy_tolerance", self.dock_xy_tolerance))
+        except (TypeError, ValueError):
+            self._invalidate_loaded_calibration()
+            return False, "invalid dock distance parameters"
+        if not math.isfinite(target) or target < 0.20 or target > 2.00:
+            self._invalidate_loaded_calibration()
+            return False, "dock_target_dist must be within [0.20, 2.00] meters"
+        if not math.isfinite(tolerance) or tolerance < 0.0 or tolerance > 0.05:
+            self._invalidate_loaded_calibration()
+            return False, "dock_xy_tolerance must be within [0.000, 0.050] meters"
+
+        saved_map_name = _text(map_info.get("name", ""))
+        saved_map_id = _text(map_info.get("id", ""))
+        saved_map_md5 = _text(map_info.get("md5", ""))
+        missing_map_fields = [
+            field
+            for field, value in (
+                ("name", saved_map_name),
+                ("id", saved_map_id),
+                ("md5", saved_map_md5),
+            )
+            if not value
+        ]
+        if missing_map_fields:
+            self._invalidate_loaded_calibration()
+            return False, "storage map identity is incomplete: missing %s" % ",".join(
+                missing_map_fields
+            )
         if apply_params:
-            stage1 = payload.get("dock_stage1_xyyaw")
-            stage2 = payload.get("dock_xyyaw")
-            if isinstance(stage1, (list, tuple)) and len(stage1) >= 3:
-                rospy.set_param(self.stage1_param_name, list(_parse_xyyaw(stage1)))
-            if isinstance(stage2, (list, tuple)) and len(stage2) >= 3:
-                rospy.set_param(self.stage2_param_name, list(_parse_xyyaw(stage2)))
-            target = _as_float(payload.get("dock_target_dist"), self.dock_target_dist)
-            tolerance = _as_float(payload.get("dock_xy_tolerance"), self.dock_xy_tolerance)
-            if math.isfinite(target) and math.isfinite(tolerance):
+            output_names = (
+                self.stage1_param_name,
+                self.stage2_param_name,
+                self.docking_target_dist_param_name,
+                self.docking_controller_dist_param_name,
+                self.docking_xy_tolerance_param_name,
+            )
+            param_snapshots = {}
+            for name in output_names:
+                if not name or name in param_snapshots:
+                    continue
+                exists = rospy.has_param(name)
+                param_snapshots[name] = (exists, rospy.get_param(name) if exists else None)
+            memory_snapshot = (
+                self.dock_target_dist,
+                self.dock_xy_tolerance,
+                self._saved_map_name,
+                self._saved_map_id,
+                self._saved_map_md5,
+                self._persisted_calibration_loaded,
+                self._calibration_source_valid,
+                self._trusted_stage1,
+                self._trusted_stage2,
+            )
+            try:
+                if stage1 is None:
+                    self._clear_stage_param(self.stage1_param_name)
+                else:
+                    rospy.set_param(self.stage1_param_name, list(stage1))
+                if stage2 is None:
+                    self._clear_stage_param(self.stage2_param_name)
+                else:
+                    rospy.set_param(self.stage2_param_name, list(stage2))
                 self.dock_target_dist = float(target)
                 self.dock_xy_tolerance = float(tolerance)
-                self._apply_dock_params(target=self.dock_target_dist, tolerance=self.dock_xy_tolerance)
+                self._apply_dock_params(
+                    target=self.dock_target_dist,
+                    tolerance=self.dock_xy_tolerance,
+                )
+            except Exception as e:
+                restore_ok = True
+                for name, (existed, previous_value) in param_snapshots.items():
+                    try:
+                        if existed:
+                            rospy.set_param(name, previous_value)
+                        elif rospy.has_param(name):
+                            rospy.delete_param(name)
+                    except Exception:
+                        restore_ok = False
+                (
+                    self.dock_target_dist,
+                    self.dock_xy_tolerance,
+                    self._saved_map_name,
+                    self._saved_map_id,
+                    self._saved_map_md5,
+                    self._persisted_calibration_loaded,
+                    self._calibration_source_valid,
+                    self._trusted_stage1,
+                    self._trusted_stage2,
+                ) = memory_snapshot
+                if restore_ok:
+                    self._publish_persisted_loaded_marker()
+                else:
+                    self._persisted_calibration_loaded = False
+                    self._calibration_source_valid = False
+                    self._trusted_stage1 = None
+                    self._trusted_stage2 = None
+                    self._clear_stage_param(self.stage1_param_name)
+                    self._clear_stage_param(self.stage2_param_name)
+                    self._publish_persisted_loaded_marker()
+                return False, "failed to apply dock calibration atomically: %s" % str(e)
+        self._saved_map_name = saved_map_name
+        self._saved_map_id = saved_map_id
+        self._saved_map_md5 = saved_map_md5
+        self._trusted_stage1 = stage1
+        self._trusted_stage2 = stage2
+        self._persisted_calibration_loaded = True
+        self._calibration_source_valid = True
+        self._publish_persisted_loaded_marker()
         if not quiet:
             rospy.loginfo("[dock_calib] loaded storage: %s", self.storage_path)
         return True, "loaded"

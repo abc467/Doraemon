@@ -4,7 +4,7 @@
   <arg name="reset_on_start" default="false"/>
   <arg name="count_auto_only" default="true"/>
 
-  <arg name="recovery_enable" default="true"/>
+  <arg name="recovery_enable" default="false"/>
   <arg name="recovery_strategy" default="redock"/>
   <arg name="recovery_timeout_s" default="180.0"/>
   <arg name="recovery_min_soc_delta" default="0.001"/>

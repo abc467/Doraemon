@@ -46,6 +46,20 @@
 
 自动回充触发、恢复、重置和目标电量阈值。
 
+`TASK_AUTO_CHARGE_ENABLE=false`
+`EXECUTOR_AUTO_CHARGE_ENABLE=false`
+`AUTO_CHARGE_MONITOR_ENABLE=false`
+`AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false`
+`AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock`
+
+商业模板和启动脚本默认关闭这三项。只有本车持久标定文件中的 `robot_id` 精确匹配，
+saved/active/runtime 的 `map_name`、`map_id`、`map_md5` 全量一致，并完成商业手册规定的
+人工监护回桩验收后，才可由负责人显式开启；launch 中不再提供可运行的旧车默认坐标。
+其中 `EXECUTOR_AUTO_CHARGE_ENABLE` 在商业运行中永久为 `false`，因为 executor 的旧绝对
+回桩路径没有车辆/地图标定门禁；自动回桩只能由 TaskManager 发起。恢复策略永久为
+`redock`，旧 `contact_jog` 会绕过 TaskManager 直接发布 `/cmd_vel`，因此不可启用。
+任务层自动开关关闭时，任务完成回桩和充满后的重复循环同样不会自动执行。
+
 `DOCK_SUPPLY_ENABLE_DRAIN=true`
 `DOCK_SUPPLY_ENABLE_REFILL=false`
 `DOCK_SUPPLY_DRAIN_TIMEOUT_S=600.0`

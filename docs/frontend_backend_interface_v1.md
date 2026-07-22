@@ -651,6 +651,8 @@
 - `can_relocalize`
   - 这两个字段是动作能力位
   - 页面动作命名应统一按 `switch_map_and_localize / relocalize`
+- `can_verify_map_revision`
+- `can_activate_map_revision`
 - `can_start_mapping`
 - `can_save_mapping`
 - `can_stop_mapping`
@@ -663,6 +665,8 @@
 - 如果 submit backend 不可用，前端应直接把这些动作视为不可提交，不要再本地宽松放开
 - 此时 `warnings[]` 会带 `slam submit backend unavailable`
 - `can_switch_map_and_localize / can_relocalize` 还包含公共重定位前置条件：`localization backend available + odometry valid`
+- `can_switch_map_and_localize / can_verify_map_revision / can_activate_map_revision` 还要求库存中至少存在一个启用的地图目标：当前 active map，或已存储的 enabled map asset/revision；全新车辆库存为空时这三个能力位必须 fail closed
+- 上述三个字段是库存级公共能力位，不表示前端随后选择的某个具体 revision 已通过全部门禁；提交和执行路径仍会按目标复核存在性、enabled 状态及该操作所需的验证状态
 - `can_start_mapping` 还包含 `mapping runtime available + odometry valid`
 - `can_stop_mapping` 只表示当前可退出建图运行时；停止建图不会自动切回 active map 或触发重定位
 - `tracked_pose_*` 来自后端订阅 Cartographer `/tracked_pose` 后归一化出的机器人实时位姿；`tracked_pose_frame == "map"` 时，`x/y` 单位为米，`theta` 为 ROS map 坐标系下弧度朝向

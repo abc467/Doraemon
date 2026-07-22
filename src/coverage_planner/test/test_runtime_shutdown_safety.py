@@ -281,6 +281,7 @@ clear_previous_runtime
             "TASK_AUTO_CHARGE_ENABLE=false",
             "EXECUTOR_AUTO_CHARGE_ENABLE=false",
             "AUTO_CHARGE_MONITOR_ENABLE=false",
+            "AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false",
             "MCORE_ENABLE_CMD_VEL=false",
             "START_MCORE_BRIDGE=false",
             "START_MCORE_VELOCITY_SENDER=false",

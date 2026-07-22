@@ -86,17 +86,17 @@
   <arg name="dock_supply_drain_settle_s" default="30.0"/>
   <arg name="dock_supply_combined_status_wait_s" default="5.0"/>
   <arg name="dock_supply_combined_status_stale_timeout_s" default="3.0"/>
-  <arg name="task_auto_charge_enable" default="true"/>
+  <arg name="task_auto_charge_enable" default="false"/>
   <arg name="executor_auto_charge_enable" default="false"/>
   <arg name="default_return_to_dock_on_finish" default="false"/>
   <arg name="low_soc" default="0.15"/>
   <arg name="resume_soc" default="0.95"/>
   <arg name="rearm_soc" default="0.95"/>
   <arg name="dock_calibration_storage_path" default="/data/coverage/dock_calibration.yaml"/>
-  <arg name="auto_charge_monitor_enable" default="true"/>
+  <arg name="auto_charge_monitor_enable" default="false"/>
   <arg name="auto_charge_monitor_reset_on_start" default="false"/>
   <arg name="auto_charge_monitor_count_auto_only" default="true"/>
-  <arg name="auto_charge_monitor_recovery_enable" default="true"/>
+  <arg name="auto_charge_monitor_recovery_enable" default="false"/>
   <arg name="auto_charge_monitor_recovery_timeout_s" default="300.0"/>
   <arg name="auto_charge_monitor_recovery_min_soc_delta" default="0.001"/>
   <arg name="auto_charge_monitor_recovery_max_attempts" default="1"/>

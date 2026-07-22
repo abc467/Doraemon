@@ -48,7 +48,7 @@ STAGE_K_REQUIRED_READINESS_WARNINGS = {
     "station bridge offline",
 }
 STAGE_K_OPTIONAL_READINESS_WARNINGS = {
-    'health warning latched: TF_LOOKUP_FAIL:"map" passed to lookupTransform argument target_frame does not exist.',
+    'health warning latched: TF_LOOKUP_FAIL "map" passed to lookupTransform argument target_frame does not exist.',
 }
 STAGE_K_SLAM_WARNINGS = {
     "no current active map selected",
@@ -713,6 +713,7 @@ class BackendRuntimeSmokeClient:
         from cleanrobot_app_msgs.msg import PgmData
         from cleanrobot_app_msgs.srv import (
             ExeTask,
+            GetDockCalibrationStatus,
             GetOdometryStatus,
             GetSlamJob,
             GetSlamStatus,
@@ -729,6 +730,10 @@ class BackendRuntimeSmokeClient:
         self._pgm_data_cls = PgmData
         self._get_slam_status = rospy.ServiceProxy("/clean_robot_server/app/get_slam_status", GetSlamStatus)
         self._get_odometry_status = rospy.ServiceProxy("/clean_robot_server/app/get_odometry_status", GetOdometryStatus)
+        self._get_dock_calibration_status = rospy.ServiceProxy(
+            "/clean_robot_server/app/get_dock_calibration_status",
+            GetDockCalibrationStatus,
+        )
         self._get_system_readiness = rospy.ServiceProxy(
             "/coverage_task_manager/app/get_system_readiness",
             GetSystemReadiness,
@@ -791,6 +796,9 @@ class BackendRuntimeSmokeClient:
 
     def get_odometry_status(self, robot_id: str):
         return self._get_odometry_status(robot_id=str(robot_id or ""))
+
+    def get_dock_calibration_status(self, robot_id: str):
+        return self._get_dock_calibration_status(robot_id=str(robot_id or ""))
 
     def get_system_readiness(self, task_id: int, refresh_map_identity: bool = True):
         return self._get_system_readiness(task_id=int(task_id), refresh_map_identity=bool(refresh_map_identity))
@@ -1417,6 +1425,111 @@ def _check_stage_k_new_vehicle_slam(resp, expected_robot_id: str) -> Dict[str, o
     return result
 
 
+def _check_stage_k_new_vehicle_dock_calibration(
+    resp,
+    expected_robot_id: str,
+) -> Dict[str, object]:
+    state = getattr(resp, "state", None)
+    issues = []
+    if not bool(getattr(resp, "success", False)):
+        issues.append(
+            "service success=false message=%s"
+            % str(getattr(resp, "message", "") or "")
+        )
+    if state is None:
+        issues.append("missing dock calibration state")
+        state_dict = {}
+    else:
+        state_dict = {
+            "robot_id": str(getattr(state, "robot_id", "") or ""),
+            "frame_id": str(getattr(state, "frame_id", "") or ""),
+            "active_map_name": str(getattr(state, "active_map_name", "") or ""),
+            "active_map_id": str(getattr(state, "active_map_id", "") or ""),
+            "active_map_md5": str(getattr(state, "active_map_md5", "") or ""),
+            "runtime_map_name": str(getattr(state, "runtime_map_name", "") or ""),
+            "runtime_map_id": str(getattr(state, "runtime_map_id", "") or ""),
+            "runtime_map_md5": str(getattr(state, "runtime_map_md5", "") or ""),
+            "runtime_map_ready": bool(getattr(state, "runtime_map_ready", False)),
+            "active_map_match": bool(getattr(state, "active_map_match", False)),
+            "localization_state": str(getattr(state, "localization_state", "") or ""),
+            "localization_valid": bool(getattr(state, "localization_valid", False)),
+            "stage1_set": bool(getattr(state, "stage1_set", False)),
+            "stage1_x": float(getattr(state, "stage1_x", 0.0) or 0.0),
+            "stage1_y": float(getattr(state, "stage1_y", 0.0) or 0.0),
+            "stage1_yaw": float(getattr(state, "stage1_yaw", 0.0) or 0.0),
+            "stage2_set": bool(getattr(state, "stage2_set", False)),
+            "stage2_x": float(getattr(state, "stage2_x", 0.0) or 0.0),
+            "stage2_y": float(getattr(state, "stage2_y", 0.0) or 0.0),
+            "stage2_yaw": float(getattr(state, "stage2_yaw", 0.0) or 0.0),
+            "saved_map_name": str(getattr(state, "saved_map_name", "") or ""),
+            "saved_map_id": str(getattr(state, "saved_map_id", "") or ""),
+            "saved_map_md5": str(getattr(state, "saved_map_md5", "") or ""),
+            "storage_path": str(getattr(state, "storage_path", "") or ""),
+            "warnings": [str(item) for item in list(getattr(state, "warnings", []) or [])],
+            "stamp": _ros_time_to_dict(getattr(state, "stamp", None) or object()),
+        }
+        if state_dict["robot_id"] != str(expected_robot_id):
+            issues.append(
+                "robot_id mismatch expected=%s observed=%s"
+                % (str(expected_robot_id), state_dict["robot_id"] or "-")
+            )
+        if state_dict["frame_id"] != "map":
+            issues.append("frame_id must be map")
+        if state_dict["storage_path"] != STAGE_K_COMMERCIAL_STORAGE_PATHS["dock_calibration_path"]:
+            issues.append(
+                "storage_path mismatch expected=%s observed=%s"
+                % (
+                    STAGE_K_COMMERCIAL_STORAGE_PATHS["dock_calibration_path"],
+                    state_dict["storage_path"] or "-",
+                )
+            )
+        for field in (
+            "active_map_name",
+            "active_map_id",
+            "active_map_md5",
+            "runtime_map_name",
+            "runtime_map_id",
+            "runtime_map_md5",
+            "saved_map_name",
+            "saved_map_id",
+            "saved_map_md5",
+        ):
+            if state_dict[field].strip():
+                issues.append("%s must be empty" % field)
+        for field in (
+            "runtime_map_ready",
+            "active_map_match",
+            "localization_valid",
+            "stage1_set",
+            "stage2_set",
+        ):
+            if bool(state_dict[field]):
+                issues.append("%s must be false" % field)
+        if state_dict["localization_state"].strip() not in ("", "not_localized"):
+            issues.append("localization_state must be empty or not_localized")
+        for field in (
+            "stage1_x",
+            "stage1_y",
+            "stage1_yaw",
+            "stage2_x",
+            "stage2_y",
+            "stage2_yaw",
+        ):
+            if state_dict[field] != 0.0:
+                issues.append("%s must be zero while unset" % field)
+    return {
+        "name": "dock_calibration_status",
+        "ok": not issues,
+        "issues": issues,
+        "profile": STAGE_K_NEW_VEHICLE_PROFILE,
+        "response": {
+            "success": bool(getattr(resp, "success", False)),
+            "message": str(getattr(resp, "message", "") or ""),
+            "state": state_dict,
+        },
+    }
+
+
 def _check_stage_k_new_vehicle_readiness(resp, localization_state: str) -> Dict[str, object]:
     result = _check_readiness(resp, ignored_warnings=[])
     readiness = dict((result.get("response") or {}).get("readiness") or {})
@@ -1543,6 +1656,7 @@ def run_read_checks(
         refresh_map_identity=refresh_map_identity,
     )
     if profile == STAGE_K_NEW_VEHICLE_PROFILE:
+        dock_calibration_response = client.get_dock_calibration_status(robot_id=robot_id)
         slam = _check_stage_k_new_vehicle_slam(slam_response, expected_robot_id=robot_id)
         odometry = _check_odometry(odometry_response, ignored_warnings=[], expected_robot_id=robot_id)
         odometry_state = dict((odometry.get("response") or {}).get("state") or {})
@@ -1572,7 +1686,11 @@ def run_read_checks(
             readiness_response,
             localization_state=str(slam_state.get("localization_state") or ""),
         )
-        checks.extend([slam, odometry, readiness])
+        dock_calibration = _check_stage_k_new_vehicle_dock_calibration(
+            dock_calibration_response,
+            expected_robot_id=robot_id,
+        )
+        checks.extend([slam, odometry, readiness, dock_calibration])
     else:
         checks.append(_check_slam(slam_response, ignored_warnings, expected_robot_id=robot_id))
         checks.append(_check_odometry(odometry_response, ignored_warnings, expected_robot_id=robot_id))

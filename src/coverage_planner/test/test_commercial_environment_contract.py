@@ -152,6 +152,92 @@ class CommercialEnvironmentValidatorTest(unittest.TestCase):
             msg="stdout:\n%s\nstderr:\n%s" % (result.stdout, result.stderr),
         )
 
+    def test_auto_charge_defaults_remain_off_until_persisted_calibration_acceptance(self):
+        template = RUNTIME_TEMPLATE.read_text(encoding="utf-8")
+        start = START_RUNTIME.read_text(encoding="utf-8")
+        task_system = (
+            REPO_ROOT / "src" / "coverage_task_manager" / "launch" / "task_system.launch"
+        ).read_text(encoding="utf-8")
+        task_manager = (
+            REPO_ROOT / "src" / "coverage_task_manager" / "launch" / "task_manager.launch"
+        ).read_text(encoding="utf-8")
+        real_bringup = (
+            REPO_ROOT / "src" / "robot_hw_bridge" / "launch" / "bringup_real_robot.launch"
+        ).read_text(encoding="utf-8")
+        monitor_launch = (
+            REPO_ROOT / "src" / "coverage_task_manager" / "launch" / "auto_charge_monitor.launch"
+        ).read_text(encoding="utf-8")
+        task_node = (
+            REPO_ROOT / "src" / "coverage_task_manager" / "scripts" / "task_manager_node.py"
+        ).read_text(encoding="utf-8")
+        task_code = (
+            REPO_ROOT / "src" / "coverage_task_manager" / "src" / "coverage_task_manager" / "task_manager.py"
+        ).read_text(encoding="utf-8")
+        monitor_code = (
+            REPO_ROOT / "src" / "coverage_task_manager" / "scripts" / "auto_charge_monitor_node.py"
+        ).read_text(encoding="utf-8")
+        executor_code = (
+            REPO_ROOT / "src" / "coverage_executor" / "scripts" / "executor_node.py"
+        ).read_text(encoding="utf-8")
+
+        for assignment in (
+            "TASK_AUTO_CHARGE_ENABLE=false",
+            "AUTO_CHARGE_MONITOR_ENABLE=false",
+            "AUTO_CHARGE_MONITOR_RECOVERY_ENABLE=false",
+        ):
+            self.assertIn(assignment, template)
+        for fallback in (
+            'TASK_AUTO_CHARGE_ENABLE="${TASK_AUTO_CHARGE_ENABLE:-false}"',
+            'AUTO_CHARGE_MONITOR_ENABLE="${AUTO_CHARGE_MONITOR_ENABLE:-false}"',
+            'AUTO_CHARGE_MONITOR_RECOVERY_ENABLE="${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE:-false}"',
+        ):
+            self.assertIn(fallback, start)
+        for wiring in (
+            'task_auto_charge_enable:="${TASK_AUTO_CHARGE_ENABLE}"',
+            'auto_charge_monitor_enable:="${AUTO_CHARGE_MONITOR_ENABLE}"',
+            'auto_charge_monitor_recovery_enable:="${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE}"',
+        ):
+            self.assertIn(wiring, start)
+        self.assertIn('<arg name="task_auto_charge_enable" default="false"/>', task_system)
+        self.assertIn('<arg name="auto_charge_monitor_enable" default="false"/>', task_system)
+        self.assertIn('<arg name="auto_charge_monitor_recovery_enable" default="false"/>', task_system)
+        self.assertIn('<arg name="auto_charge_enable" default="false"/>', task_manager)
+        self.assertIn('<arg name="require_persisted_dock_calibration" default="true"/>', task_manager)
+        self.assertIn('<arg name="task_auto_charge_enable" default="false"/>', real_bringup)
+        self.assertIn('<arg name="executor_auto_charge_enable" default="false"/>', real_bringup)
+        self.assertIn('<arg name="auto_charge_monitor_enable" default="false"/>', real_bringup)
+        self.assertIn('<arg name="auto_charge_monitor_recovery_enable" default="false"/>', real_bringup)
+        self.assertIn('<arg name="recovery_enable" default="false"/>', monitor_launch)
+        self.assertIn('rospy.get_param("~auto_charge_enable", False)', task_node)
+        self.assertIn('auto_charge_enable: bool = False', task_code)
+        self.assertIn('rospy.get_param("~recovery_enable", False)', monitor_code)
+        self.assertIn('auto_charge_enable = False', executor_code)
+        self.assertIn('EXECUTOR_AUTO_CHARGE_ENABLE=false', start)
+        self.assertIn('AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=redock', start)
+        self.assertIn('self.recovery_strategy = "redock"', monitor_code)
+
+    def test_hostile_legacy_auto_charge_environment_is_ignored_by_runtime_entry(self):
+        script = r'''
+set -euo pipefail
+export DORAEMON_RUNTIME_CONFIG_FILE=/dev/null
+export EXECUTOR_AUTO_CHARGE_ENABLE=true
+export AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY=contact_jog
+source scripts/start_runtime.sh
+printf '%s\n%s\n' "${EXECUTOR_AUTO_CHARGE_ENABLE}" "${AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY}"
+'''
+        result = subprocess.run(
+            ["bash", "-c", script],
+            cwd=str(REPO_ROOT),
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip().splitlines(), ["false", "redock"])
+
     def test_production_storage_paths_override_hostile_parent_environment(self):
         expected = "\n".join(
             (

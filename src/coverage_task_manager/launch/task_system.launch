@@ -9,10 +9,12 @@
       roslaunch coverage_task_manager task_system.launch
 
     若你要单独验证 Executor 的 AutoChargeManager（不建议在系统模式长期这样开）：
-      roslaunch coverage_task_manager task_system.launch task_auto_charge_enable:=false executor_auto_charge_enable:=true
+      roslaunch coverage_task_manager task_system.launch task_auto_charge_enable:=true executor_auto_charge_enable:=false
   -->
 
-  <arg name="task_auto_charge_enable" default="true"/>
+  <arg name="task_auto_charge_enable" default="false"/>
+  <!-- Compatibility input only. The legacy executor path has no vehicle/map-bound
+       dock calibration gate and is therefore hard-disabled below. -->
   <arg name="executor_auto_charge_enable" default="false"/>
   <arg name="default_return_to_dock_on_finish" default="false"/>
   <arg name="scheduler_enable" default="true"/>
@@ -36,6 +38,13 @@
   <arg name="dock_calibration_score_threshold" default="0.00012"/>
   <arg name="dock_calibration_target_dist" default="0.780"/>
   <arg name="dock_calibration_xy_tolerance" default="0.005"/>
+  <arg name="dock_stage1_xyyaw" default="[]"/>
+  <arg name="dock_xyyaw" default="[]"/>
+  <arg name="dock_calibration_state_stale_timeout_s" default="3.0"/>
+  <arg name="require_persisted_dock_calibration" default="true"/>
+  <arg name="dock_calibration_runtime_map_name" default=""/>
+  <arg name="dock_calibration_runtime_map_id" default=""/>
+  <arg name="dock_calibration_runtime_map_md5" default=""/>
   <arg name="app_restart_localization_service" default="/cartographer/runtime/app/restart_localization"/>
   <arg name="app_slam_submit_command_service" default="/clean_robot_server/app/submit_slam_command"/>
   <arg name="app_slam_get_job_service" default="/clean_robot_server/app/get_slam_job"/>
@@ -87,12 +96,12 @@
   <arg name="app_clean_schedule_contract_param_ns" default="/database_server/contracts/app/clean_schedule_service"/>
   <arg name="task_restore_enable" default="false"/>
   <arg name="run_map_migration" default="false"/>
-  <arg name="auto_charge_monitor_enable" default="true"/>
+  <arg name="auto_charge_monitor_enable" default="false"/>
   <arg name="auto_charge_monitor_state_path" default="/data/coverage/auto_charge_monitor_state.json"/>
   <arg name="auto_charge_monitor_event_log_path" default="/data/coverage/auto_charge_monitor_events.jsonl"/>
   <arg name="auto_charge_monitor_reset_on_start" default="false"/>
   <arg name="auto_charge_monitor_count_auto_only" default="true"/>
-  <arg name="auto_charge_monitor_recovery_enable" default="true"/>
+  <arg name="auto_charge_monitor_recovery_enable" default="false"/>
   <arg name="auto_charge_monitor_recovery_strategy" default="redock"/>
   <arg name="auto_charge_monitor_recovery_timeout_s" default="180.0"/>
   <arg name="auto_charge_monitor_recovery_min_soc_delta" default="0.001"/>
@@ -148,7 +157,7 @@
   </node>
 
   <include file="$(find coverage_executor)/launch/executor.launch">
-    <arg name="auto_charge_enable" value="$(arg executor_auto_charge_enable)"/>
+    <arg name="auto_charge_enable" value="false"/>
     <arg name="low_soc" value="$(arg low_soc)"/>
     <arg name="resume_soc" value="$(arg resume_soc)"/>
     <arg name="rearm_soc" value="$(arg rearm_soc)"/>
@@ -183,6 +192,13 @@
     <arg name="dock_calibration_score_threshold" value="$(arg dock_calibration_score_threshold)"/>
     <arg name="dock_calibration_target_dist" value="$(arg dock_calibration_target_dist)"/>
     <arg name="dock_calibration_xy_tolerance" value="$(arg dock_calibration_xy_tolerance)"/>
+    <arg name="dock_stage1_xyyaw" value="$(arg dock_stage1_xyyaw)"/>
+    <arg name="dock_xyyaw" value="$(arg dock_xyyaw)"/>
+    <arg name="dock_calibration_state_stale_timeout_s" value="$(arg dock_calibration_state_stale_timeout_s)"/>
+    <arg name="require_persisted_dock_calibration" value="$(arg require_persisted_dock_calibration)"/>
+    <arg name="dock_calibration_runtime_map_name" value="$(arg dock_calibration_runtime_map_name)"/>
+    <arg name="dock_calibration_runtime_map_id" value="$(arg dock_calibration_runtime_map_id)"/>
+    <arg name="dock_calibration_runtime_map_md5" value="$(arg dock_calibration_runtime_map_md5)"/>
     <arg name="scheduler_enable" value="$(arg scheduler_enable)"/>
     <arg name="load_schedules_yaml" value="$(arg load_schedules_yaml)"/>
     <arg name="schedules_yaml" value="$(arg schedules_yaml)"/>

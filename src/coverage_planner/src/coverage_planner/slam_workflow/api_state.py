@@ -95,6 +95,42 @@ def _active_map_matches_runtime(
         return runtime_map_name == active_map_name
     return False
 
+
+def _map_operation_target_available(
+    *,
+    plan_store: Any,
+    active_map: Dict[str, object],
+) -> bool:
+    """Return whether a stored, enabled map target exists for map operations."""
+    active_map = dict(active_map or {})
+    if bool(active_map.get("enabled", True)) and (
+        str(active_map.get("map_name") or "").strip()
+        or str(active_map.get("revision_id") or "").strip()
+    ):
+        return True
+
+    for method_name in ("list_map_assets", "list_map_revisions"):
+        list_candidates = getattr(plan_store, method_name, None)
+        if not callable(list_candidates):
+            continue
+        try:
+            candidates = list_candidates() or []
+        except Exception:
+            # State projection must remain available if inventory lookup fails,
+            # while action capabilities fail closed.
+            continue
+        for candidate in candidates:
+            candidate = dict(candidate or {})
+            if not bool(candidate.get("enabled", True)):
+                continue
+            if (
+                str(candidate.get("map_name") or "").strip()
+                or str(candidate.get("revision_id") or "").strip()
+            ):
+                return True
+    return False
+
+
 class SlamApiStateController:
     def __init__(self, backend: Any):
         self._backend = backend
@@ -137,7 +173,10 @@ class SlamApiStateController:
             map_id, map_md5, ok = ensure_map_identity(
                 map_topic=backend.map_topic,
                 timeout_s=backend.map_identity_timeout_s,
-                set_global_params=True,
+                # Query services use refresh=False for a strictly read-only
+                # projection.  Only an explicit refresh may publish a newly
+                # derived identity back to the global ROS parameter namespace.
+                set_global_params=bool(refresh),
                 set_private_params=False,
                 refresh=bool(refresh),
             )
@@ -234,6 +273,10 @@ class SlamApiStateController:
         pending_map_name = str(pending_switch.get("target_map_name") or "").strip()
         pending_map_revision_id = str(pending_switch.get("target_revision_id") or "").strip()
         pending_map_switch_status = str(pending_switch.get("status") or "").strip()
+        map_operation_target_available = _map_operation_target_available(
+            plan_store=backend._plan_store,
+            active_map=active_map,
+        )
         runtime_revision_id = str(runtime_map.get("revision_id") or "").strip()
         runtime_map_name = str(runtime_map.get("map_name") or "").strip()
         runtime_map_id = str(runtime_map.get("map_id") or "").strip()
@@ -472,6 +515,7 @@ class SlamApiStateController:
             and current_mode != "mapping"
             and restart_available
             and odometry_valid
+            and map_operation_target_available
         )
         can_relocalize = bool(
             submit_available

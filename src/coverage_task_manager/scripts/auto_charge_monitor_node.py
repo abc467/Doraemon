@@ -99,14 +99,16 @@ class AutoChargeMonitor:
         self.reset_on_start = bool(rospy.get_param("~reset_on_start", False))
         self.max_recent_cycles = max(1, int(rospy.get_param("~max_recent_cycles", 200)))
         self.publish_period_s = max(0.5, float(rospy.get_param("~publish_period_s", 5.0)))
-        self.recovery_enable = bool(rospy.get_param("~recovery_enable", True))
-        self.recovery_strategy = str(rospy.get_param("~recovery_strategy", "redock")).strip().lower() or "redock"
-        if self.recovery_strategy not in ("redock", "contact_jog"):
+        self.recovery_enable = bool(rospy.get_param("~recovery_enable", False))
+        requested_recovery_strategy = str(
+            rospy.get_param("~recovery_strategy", "redock")
+        ).strip().lower() or "redock"
+        if requested_recovery_strategy != "redock":
             rospy.logwarn(
-                "[AUTO_CHARGE_MON] invalid recovery_strategy=%s, fallback to redock",
-                self.recovery_strategy,
+                "[AUTO_CHARGE_MON] ignoring legacy recovery_strategy=%s; only gated redock is supported",
+                requested_recovery_strategy,
             )
-            self.recovery_strategy = "redock"
+        self.recovery_strategy = "redock"
         self.recovery_no_soc_change_timeout_s = max(
             1.0, float(rospy.get_param("~recovery_no_soc_change_timeout_s", 180.0))
         )

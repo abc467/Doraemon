@@ -30,6 +30,7 @@ except Exception:  # pragma: no cover - allows contract tests without full ROS d
     ReconfigureRequest = None
 
 from cleanrobot_app_msgs.msg import (
+    DockCalibrationState,
     OdometryState,
     SlamState,
     SystemReadiness as SystemReadinessMsg,
@@ -300,6 +301,12 @@ class SlamStateSnapshot:
 
 
 @dataclass
+class DockCalibrationSnapshot:
+    msg: Optional[DockCalibrationState] = None
+    ts: float = 0.0
+
+
+@dataclass
 class ReadinessGateResult:
     blockers: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
@@ -369,7 +376,7 @@ class TaskManager:
         battery_topic: str = "/battery_state",
         battery_stale_timeout_s: float = 5.0,
 
-        auto_charge_enable: bool = True,
+        auto_charge_enable: bool = False,
         trigger_when_idle: bool = False,
         low_soc: float = 0.15,
         resume_soc: float = 0.95,
@@ -380,6 +387,12 @@ class TaskManager:
         dock_stage2_controller: str = "MyPlanner",
         dock_stage2_disable_replanning: bool = True,
         dock_retry_limit: int = 2,
+        require_dock_calibration_before_return: bool = True,
+        dock_calibration_state_topic: str = "/clean_robot_server/dock_calibration_state",
+        dock_calibration_state_stale_timeout_s: float = 3.0,
+        dock_calibration_storage_path: str = "/data/coverage/dock_calibration.yaml",
+        require_persisted_dock_calibration: bool = True,
+        dock_calibration_persisted_loaded_param: str = "/dock_calibration_service/persisted_calibration_loaded",
         undock_forward_m: float = 0.6,
         dock_timeout_s: float = 600.0,
         wait_executor_paused_s: float = 20.0,
@@ -622,6 +635,27 @@ class TaskManager:
         self._dock_stage2_saved_planner_frequency: Optional[float] = None
         self._dock_stage2_replanning_suppressed = False
         self.dock_retry_limit = max(0, int(dock_retry_limit))
+        self._require_dock_calibration_before_return = bool(require_dock_calibration_before_return)
+        self._dock_calibration_state_topic = (
+            str(dock_calibration_state_topic or "/clean_robot_server/dock_calibration_state").strip()
+            or "/clean_robot_server/dock_calibration_state"
+        )
+        self._dock_calibration_state_stale_timeout_s = max(
+            0.5,
+            float(dock_calibration_state_stale_timeout_s),
+        )
+        self._dock_calibration_storage_path = (
+            str(dock_calibration_storage_path or "/data/coverage/dock_calibration.yaml").strip()
+            or "/data/coverage/dock_calibration.yaml"
+        )
+        self._require_persisted_dock_calibration = bool(require_persisted_dock_calibration)
+        self._dock_calibration_persisted_loaded_param = (
+            str(
+                dock_calibration_persisted_loaded_param
+                or "/dock_calibration_service/persisted_calibration_loaded"
+            ).strip()
+            or "/dock_calibration_service/persisted_calibration_loaded"
+        )
         self.undock_forward_m = float(undock_forward_m)
         self.dock_timeout_s = float(dock_timeout_s)
         self.wait_executor_paused_s = float(wait_executor_paused_s)
@@ -636,6 +670,7 @@ class TaskManager:
         self._station_connected = BoolSnapshot()
         self._odometry_state = OdometrySnapshot()
         self._slam_state = SlamStateSnapshot()
+        self._dock_calibration_state = DockCalibrationSnapshot()
         self._executor_state = ""
         # Initialize health fault fields before subscribers come online, otherwise
         # early executor callbacks can hit _snapshot() before these attributes exist.
@@ -860,6 +895,13 @@ class TaskManager:
             rospy.Subscriber(self._odometry_state_topic, OdometryState, self._on_odometry_state, queue_size=10)
         if self._slam_state_topic:
             rospy.Subscriber(self._slam_state_topic, SlamState, self._on_slam_state, queue_size=10)
+        if self._dock_calibration_state_topic:
+            rospy.Subscriber(
+                self._dock_calibration_state_topic,
+                DockCalibrationState,
+                self._on_dock_calibration_state,
+                queue_size=10,
+            )
 
         self._app_readiness_srv = rospy.Service(
             self._app_readiness_service_name,
@@ -1079,6 +1121,11 @@ class TaskManager:
             self._odometry_state.msg = msg
             self._odometry_state.ts = time.time()
 
+    def _on_dock_calibration_state(self, msg: DockCalibrationState):
+        with self._lock:
+            self._dock_calibration_state.msg = msg
+            self._dock_calibration_state.ts = time.time()
+
     def _on_slam_state(self, msg: SlamState):
         now = time.time()
         should_enforce_safety = False
@@ -1257,7 +1304,10 @@ class TaskManager:
             map_id, map_md5, ok = ensure_map_identity(
                 map_topic=str(self._runtime_map_topic),
                 timeout_s=1.0,
-                set_global_params=True,
+                # Readiness queries pass refresh=False when they must remain
+                # observational.  Preserve parameter publication only for an
+                # explicit identity refresh.
+                set_global_params=bool(refresh),
                 set_private_params=False,
                 refresh=bool(refresh),
             )
@@ -2978,27 +3028,60 @@ class TaskManager:
         # Continue an unfinished auto-charge workflow after restart (best-effort).
         if self._phase in ["AUTO_DOCKING_STAGE1", "MANUAL_DOCKING_STAGE1"]:
             self._emit("RESTORE:DOCKING_STAGE1")
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._reject_unready_dock_calibration(calibration_reason)
+                self._mission_state = "PAUSED" if self._active_run_id else "IDLE"
+                self._phase = "PAUSED_AUTO_CHARGE" if self._active_run_id else "IDLE"
+                self._public_state = "ERROR_DOCK_CALIBRATION"
+                return
             self._dock_nav_started_ts = time.time()
             try:
                 self._send_exec_cmd("suspend")
             except Exception:
                 pass
+            if not self._recheck_calibration_before_dock_motion(
+                manual=self._phase.startswith("MANUAL_")
+            ):
+                return
             self.nav.send_goal(self._dock_stage1_pose())
         elif self._phase in ["AUTO_DOCKING_STAGE2", "MANUAL_DOCKING_STAGE2"]:
             self._emit("RESTORE:DOCKING_STAGE2")
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._reject_unready_dock_calibration(calibration_reason)
+                self._mission_state = "PAUSED" if self._active_run_id else "IDLE"
+                self._phase = "PAUSED_AUTO_CHARGE" if self._active_run_id else "IDLE"
+                self._public_state = "ERROR_DOCK_CALIBRATION"
+                return
             self._dock_nav_started_ts = time.time()
             try:
                 self._send_exec_cmd("suspend")
             except Exception:
                 pass
+            if not self._recheck_calibration_before_dock_motion(
+                manual=self._phase.startswith("MANUAL_")
+            ):
+                return
             self._dock_stage2_nav.send_goal(self._dock_pose())
         elif self._phase in ["AUTO_DOCKING", "MANUAL_DOCKING"]:
             self._emit("RESTORE:DOCKING")
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._reject_unready_dock_calibration(calibration_reason)
+                self._mission_state = "PAUSED" if self._active_run_id else "IDLE"
+                self._phase = "PAUSED_AUTO_CHARGE" if self._active_run_id else "IDLE"
+                self._public_state = "ERROR_DOCK_CALIBRATION"
+                return
             self._dock_nav_started_ts = time.time()
             try:
                 self._send_exec_cmd("suspend")
             except Exception:
                 pass
+            if not self._recheck_calibration_before_dock_motion(
+                manual=self._phase.startswith("MANUAL_")
+            ):
+                return
             self.nav.send_goal(self._dock_pose())
         elif self._phase in ["AUTO_SUPPLY", "MANUAL_SUPPLY", "AUTO_CHARGING", "MANUAL_CHARGING"]:
             manual = self._phase.startswith("MANUAL_")
@@ -3036,7 +3119,18 @@ class TaskManager:
                     self._dock_supply_request_exit()
                 self._publish_state(self._phase)
             else:
+                calibration_ok, calibration_reason = self._dock_calibration_gate()
+                if not calibration_ok:
+                    self._reject_unready_dock_calibration(calibration_reason)
+                    self._mission_state = "PAUSED" if self._active_run_id else "IDLE"
+                    self._phase = "PAUSED_AUTO_CHARGE" if self._active_run_id else "IDLE"
+                    self._public_state = "ERROR_DOCK_CALIBRATION"
+                    return
                 self._undock_nav_started_ts = time.time()
+                if not self._recheck_calibration_before_dock_motion(
+                    manual=self._phase.startswith("MANUAL_")
+                ):
+                    return
                 pose, _ = self._undock_pose()
                 self.nav.send_goal(pose)
         elif self._phase == "AUTO_RELOCALIZING":
@@ -3122,7 +3216,127 @@ class TaskManager:
             return True
         return self._is_mission_running()
 
+    def _dock_calibration_gate(self) -> Tuple[bool, str]:
+        """Validate the live, vehicle-bound calibration before any dock motion."""
+        if not bool(getattr(self, "_require_dock_calibration_before_return", False)):
+            return True, ""
+
+        with self._lock:
+            snapshot = getattr(self, "_dock_calibration_state", DockCalibrationSnapshot())
+            state = getattr(snapshot, "msg", None)
+            state_ts = float(getattr(snapshot, "ts", 0.0) or 0.0)
+        if state is None or state_ts <= 0.0:
+            return False, "dock calibration state missing"
+        age_s = time.time() - state_ts
+        if age_s < 0.0 or age_s > float(self._dock_calibration_state_stale_timeout_s):
+            return False, "dock calibration state stale"
+        if str(getattr(state, "robot_id", "") or "").strip() != self._robot_id:
+            return False, "dock calibration robot_id mismatch"
+        if str(getattr(state, "frame_id", "") or "").strip() != self.frame_id:
+            return False, "dock calibration frame_id mismatch"
+        if str(getattr(state, "storage_path", "") or "").strip() != self._dock_calibration_storage_path:
+            return False, "dock calibration storage_path mismatch"
+        if not bool(getattr(state, "tracked_pose_fresh", False)):
+            return False, "dock calibration slam/tracked pose stream is not fresh"
+        if str(getattr(state, "tracked_pose_frame", "") or "").strip() != self.frame_id:
+            return False, "dock calibration tracked pose frame mismatch"
+        if bool(getattr(self, "_require_persisted_dock_calibration", False)):
+            try:
+                persisted_loaded = bool(
+                    rospy.get_param(self._dock_calibration_persisted_loaded_param, False)
+                )
+            except Exception:
+                persisted_loaded = False
+            if not persisted_loaded:
+                return False, "persisted dock calibration is not loaded"
+        if not bool(getattr(state, "stage1_set", False)):
+            return False, "dock calibration stage1 is not set"
+        if not bool(getattr(state, "stage2_set", False)):
+            return False, "dock calibration stage2 is not set"
+
+        stage1 = (
+            float(getattr(state, "stage1_x", float("nan"))),
+            float(getattr(state, "stage1_y", float("nan"))),
+            float(getattr(state, "stage1_yaw", float("nan"))),
+        )
+        stage2 = (
+            float(getattr(state, "stage2_x", float("nan"))),
+            float(getattr(state, "stage2_y", float("nan"))),
+            float(getattr(state, "stage2_yaw", float("nan"))),
+        )
+        if not all(math.isfinite(value) for value in stage1 + stage2):
+            return False, "dock calibration pose is not finite"
+
+        saved = {
+            "name": str(getattr(state, "saved_map_name", "") or "").strip(),
+            "id": str(getattr(state, "saved_map_id", "") or "").strip(),
+            "md5": str(getattr(state, "saved_map_md5", "") or "").strip(),
+        }
+        active = {
+            "name": str(getattr(state, "active_map_name", "") or "").strip(),
+            "id": str(getattr(state, "active_map_id", "") or "").strip(),
+            "md5": str(getattr(state, "active_map_md5", "") or "").strip(),
+        }
+        runtime = {
+            "name": str(getattr(state, "runtime_map_name", "") or "").strip(),
+            "id": str(getattr(state, "runtime_map_id", "") or "").strip(),
+            "md5": str(getattr(state, "runtime_map_md5", "") or "").strip(),
+        }
+        missing_saved = [key for key, value in saved.items() if not value]
+        if missing_saved:
+            return False, "dock calibration saved map identity incomplete: missing %s" % ",".join(missing_saved)
+        for key, expected in saved.items():
+            if not expected:
+                continue
+            if active.get(key) != expected:
+                return False, "dock calibration active map %s mismatch" % key
+            if runtime.get(key) != expected:
+                return False, "dock calibration runtime map %s mismatch" % key
+        if not bool(getattr(state, "runtime_map_ready", False)):
+            return False, "dock calibration runtime map is not ready"
+        if not bool(getattr(state, "active_map_match", False)):
+            return False, "dock calibration active/runtime map mismatch"
+        if not bool(getattr(state, "localization_valid", False)):
+            return False, "dock calibration localization is not valid"
+
+        # The latched calibration state is the authoritative coordinate source.
+        # Do not re-read an independently mutable ROS parameter after this gate.
+        self.dock_stage1_xyyaw = stage1
+        self.dock_xyyaw = stage2
+        return True, ""
+
+    def _reject_unready_dock_calibration(self, reason: str):
+        reason_s = str(reason or "dock calibration unavailable").strip()
+        self._emit("DOCK_REJECT:CALIBRATION:%s" % reason_s)
+        rospy.logerr("[TASK] dock motion rejected: %s", reason_s)
+
+    def _fail_dock_motion_for_calibration(self, reason: str, *, manual: bool) -> bool:
+        """Cancel absolute dock motion and enter the calibration-specific fault."""
+        reason_s = str(reason or "dock calibration unavailable").strip()
+        self._reject_unready_dock_calibration(reason_s)
+        if self._is_stage2_docking_phase():
+            self._restore_dock_stage2_replanning(reason="dock_calibration_invalid")
+        self.nav.cancel_all()
+        self._dock_stage2_nav.cancel_all()
+        self._enter_charge_fault(
+            "ERROR_DOCK_CALIBRATION",
+            reason="dock_calibration_invalid:%s" % reason_s,
+            manual=bool(manual),
+        )
+        return False
+
+    def _recheck_calibration_before_dock_motion(self, *, manual: bool) -> bool:
+        calibration_ok, calibration_reason = self._dock_calibration_gate()
+        if calibration_ok:
+            return True
+        return self._fail_dock_motion_for_calibration(
+            calibration_reason,
+            manual=manual,
+        )
+
     def _refresh_dock_stage1_xyyaw_param(self):
+        if bool(getattr(self, "_require_dock_calibration_before_return", False)):
+            return
         try:
             raw = rospy.get_param("~dock_stage1_xyyaw", None)
             if raw is None:
@@ -3134,6 +3348,8 @@ class TaskManager:
 
     def _refresh_dock_xyyaw_param(self):
         """Refresh dock pose from ROS param '~dock_xyyaw' if present."""
+        if bool(getattr(self, "_require_dock_calibration_before_return", False)):
+            return
         try:
             raw = rospy.get_param("~dock_xyyaw", None)
             if raw is None:
@@ -3189,7 +3405,12 @@ class TaskManager:
         )
 
     def _repeat_after_charge_enabled(self) -> bool:
-        return bool(self._task_repeat_after_full_charge and self._task_return_to_dock_on_finish and self._active_job_id)
+        return bool(
+            self.auto_charge_enable
+            and self._task_repeat_after_full_charge
+            and self._task_return_to_dock_on_finish
+            and self._active_job_id
+        )
 
     def _dock_supply_managed_undocking(self) -> bool:
         if self._dock_supply_exit_inflight:
@@ -3924,6 +4145,10 @@ class TaskManager:
     def _retry_dock_from_stage1(self, *, manual: bool, reason: str) -> bool:
         if self._dock_retry_count >= self.dock_retry_limit:
             return False
+        calibration_ok, calibration_reason = self._dock_calibration_gate()
+        if not calibration_ok:
+            self._reject_unready_dock_calibration(calibration_reason)
+            return False
         self._dock_retry_count += 1
         self._emit(
             "DOCK_RETRY:%d/%d reason=%s"
@@ -3942,6 +4167,8 @@ class TaskManager:
             self._phase = "MANUAL_DOCKING_STAGE1" if manual else "AUTO_DOCKING_STAGE1"
             self._dock_nav_started_ts = time.time()
             self._publish_state(self._dock_public_state(manual))
+            if not self._recheck_calibration_before_dock_motion(manual=manual):
+                return False
             x, y, yaw = self.dock_stage1_xyyaw
             self._emit_dock_stage1_goal_event(
                 manual=manual,
@@ -3956,6 +4183,8 @@ class TaskManager:
             self._phase = "MANUAL_DOCKING" if manual else "AUTO_DOCKING"
             self._dock_nav_started_ts = time.time()
             self._publish_state(self._dock_public_state(manual))
+            if not self._recheck_calibration_before_dock_motion(manual=manual):
+                return False
             x, y, yaw = self.dock_xyyaw
             self._emit_dock_retry_goal_event(
                 x,
@@ -3968,13 +4197,25 @@ class TaskManager:
         return True
 
     def _start_dock_stage2(self, *, manual: bool):
+        calibration_ok, calibration_reason = self._dock_calibration_gate()
+        if not calibration_ok:
+            self._reject_unready_dock_calibration(calibration_reason)
+            self._enter_charge_fault(
+                "ERROR_DOCK_CALIBRATION",
+                reason="dock_calibration_invalid:%s" % calibration_reason,
+                manual=manual,
+            )
+            return False
         self._suppress_dock_stage2_replanning()
         self._phase = "MANUAL_DOCKING_STAGE2" if manual else "AUTO_DOCKING_STAGE2"
         self._dock_nav_started_ts = time.time()
         self._publish_state(self._dock_public_state(manual))
+        if not self._recheck_calibration_before_dock_motion(manual=manual):
+            return False
         x, y, yaw = self.dock_xyyaw
         self._emit_dock_stage2_goal_event(x, y, yaw, self.dock_stage2_controller)
         self._dock_stage2_nav.send_goal(self._dock_pose())
+        return True
 
     def _begin_supply_or_charge_after_dock(self, *, manual: bool, soc: Optional[float], fresh: bool):
         self._emit_dock_succeeded()
@@ -4387,6 +4628,15 @@ class TaskManager:
     def _handle_undocking_phase(self):
         if self._phase not in ["AUTO_UNDOCKING", "MANUAL_UNDOCKING"]:
             return
+        if not self._dock_supply_managed_undocking():
+            manual_undocking = self._phase == "MANUAL_UNDOCKING"
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._fail_dock_motion_for_calibration(
+                    calibration_reason,
+                    manual=manual_undocking,
+                )
+                return
         if self._dock_sequence_timed_out(self._undock_nav_started_ts):
             if self._dock_supply_managed_undocking():
                 self._dock_supply_cancel()
@@ -5443,7 +5693,11 @@ class TaskManager:
     def _finalize_terminal(self, status: str):
         st = str(status or "").upper()
         run_id = str(self._active_run_id or "")
-        finish_dock = (st == "DONE") and bool(self._task_return_to_dock_on_finish)
+        finish_dock = bool(
+            st == "DONE"
+            and self.auto_charge_enable
+            and self._task_return_to_dock_on_finish
+        )
 
         if run_id:
             self._mission_update_state(run_id, st)
@@ -5466,7 +5720,11 @@ class TaskManager:
             self._publish_state(st or "IDLE")
         if finish_dock:
             self._emit("POST_RUN_DOCK")
-            self._start_dock_sequence(manual=True)
+            if not self._start_dock_sequence(manual=False):
+                self._enter_blocking_fault(
+                    "ERROR_POST_RUN_DOCK",
+                    "failed to start post-run dock sequence",
+                )
 
     def _start_job(self, job: ScheduleJob, *, fire_ts: Optional[float] = None, source: str = "SCHED") -> Tuple[bool, str]:
         if not job or not getattr(job, "enabled", False):
@@ -5805,8 +6063,13 @@ class TaskManager:
             return
 
         if verb == "undock":
+            allowed, reason = self._manual_undock_allowed()
+            if not allowed:
+                self._emit("CMD_REJECT:UNDOCK:%s" % reason)
+                return
             self._emit("MANUAL_UNDOCK")
-            self._start_undock_only()
+            if not self._start_undock_only():
+                self._emit("CMD_REJECT:UNDOCK:failed_to_start")
             return
 
         if verb == "set_plan_profile":
@@ -5871,6 +6134,10 @@ class TaskManager:
             # window between the auto-charge predicate and this dispatch.
             self._armed = True
             return False
+        calibration_ok, calibration_reason = self._dock_calibration_gate()
+        if not calibration_ok:
+            self._reject_unready_dock_calibration(calibration_reason)
+            return False
         mission_was_running = self._is_mission_running()
         if self._is_mission_running():
             self._send_exec_cmd("suspend")
@@ -5903,6 +6170,8 @@ class TaskManager:
         self._undock_nav_started_ts = 0.0
         self._clear_charge_monitor()
         self._publish_state(self._dock_public_state(manual))
+        if not self._recheck_calibration_before_dock_motion(manual=manual):
+            return False
         if self.dock_two_stage_enable:
             x, y, yaw = self.dock_stage1_xyyaw
             self._emit_dock_stage1_goal_event(manual=manual, x=x, y=y, yaw=yaw)
@@ -5926,6 +6195,10 @@ class TaskManager:
             rospy.sleep(min(0.2, max(0.0, end_ts - time.time())))
 
     def _cancel_supply_and_run_recovery_retreat(self):
+        # This service is deliberately limited to dock_supply_manager's
+        # quiescent-state, exit_mode=back, open-loop relative backing sequence.
+        # It does not consume dock/map coordinates; all subsequent absolute
+        # redock motion is gated again by _start_dock_sequence.
         self._dock_supply_cancel()
 
         def _supply_quiesced():
@@ -6015,6 +6288,10 @@ class TaskManager:
         ok = False
         error = ""
         try:
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._reject_unready_dock_calibration(calibration_reason)
+                raise RuntimeError("dock calibration invalid: %s" % calibration_reason)
             rospy.logwarn("[TASK] auto charge redock recovery: cancel supply, request standard retreat, then restart full auto dock")
             self._cancel_supply_and_run_recovery_retreat()
 
@@ -6077,6 +6354,10 @@ class TaskManager:
         retreat_ok = False
         error = ""
         try:
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._reject_unready_dock_calibration(calibration_reason)
+                raise RuntimeError("dock calibration invalid: %s" % calibration_reason)
             rospy.logerr(
                 "[TASK] auto charge recovery exhausted: cancel supply, retreat from dock, then latch charge fault"
             )
@@ -6133,6 +6414,10 @@ class TaskManager:
     def _dock_supply_start(self) -> bool:
         if not self._dock_supply_enable or self._dock_supply_start_cli is None:
             return False
+        calibration_ok, calibration_reason = self._dock_calibration_gate()
+        if not calibration_ok:
+            self._reject_unready_dock_calibration(calibration_reason)
+            return False
         try:
             rospy.wait_for_service(self._dock_supply_start_service, timeout=1.0)
             resp = self._dock_supply_start_cli()
@@ -6188,7 +6473,7 @@ class TaskManager:
         self._dock_supply_exit_inflight = False
         self._armed = True
 
-        if (not manual) and self._active_run_id:
+        if self._active_run_id:
             self._mission_update_state(self._active_run_id, "PAUSED", reason=reason_s or state_name.lower())
             self._mission_state = "PAUSED"
             self._phase = "PAUSED_AUTO_CHARGE"
@@ -6200,19 +6485,30 @@ class TaskManager:
         self._publish_state(state_name)
 
     def _transition_to_undocking(self, *, manual: bool):
+        use_managed_exit = bool(
+            self._dock_supply_enable
+            and str(self._dock_supply_state or "").upper() == "READY_TO_EXIT"
+        )
+        if not use_managed_exit:
+            calibration_ok, calibration_reason = self._dock_calibration_gate()
+            if not calibration_ok:
+                self._reject_unready_dock_calibration(calibration_reason)
+                return False
         self._clear_charge_monitor()
         self._reset_dock_retry_state()
         self._dock_nav_started_ts = 0.0
         self._phase = "MANUAL_UNDOCKING" if manual else "AUTO_UNDOCKING"
         self._undock_nav_started_ts = time.time()
         self._publish_state(self._phase)
-        if self._dock_supply_enable and str(self._dock_supply_state or "").upper() == "READY_TO_EXIT":
+        if use_managed_exit:
             if not self._dock_supply_request_exit():
                 self._dock_supply_exit_inflight = False
                 return False
             self._emit_undock_exit_requested()
             return True
 
+        if not self._recheck_calibration_before_dock_motion(manual=manual):
+            return False
         pose, xyyaw = self._undock_pose()
         self._emit_undock_goal_event(xyyaw[0], xyyaw[1], xyyaw[2])
         self.nav.send_goal(pose)
@@ -6223,7 +6519,26 @@ class TaskManager:
             return False
         return (time.time() - float(started_ts)) >= float(self.dock_timeout_s)
 
+    def _manual_undock_allowed(self) -> Tuple[bool, str]:
+        if self._executor_in_actuator_debug():
+            return False, "actuator_debug_active"
+        phase = str(self._phase or "IDLE").strip().upper()
+        dock_state = str(self._dock_supply_state or "IDLE").strip().upper()
+        if phase == "MANUAL_SUPPLY" and dock_state == "READY_TO_EXIT":
+            return True, ""
+        if phase == "MANUAL_CHARGING":
+            return True, ""
+        if phase != "IDLE":
+            return False, "phase_%s" % (phase or "unknown")
+        if self._task_busy():
+            return False, "task_busy"
+        return True, ""
+
     def _start_undock_only(self):
+        allowed, reason = self._manual_undock_allowed()
+        if not allowed:
+            self._emit("UNDOCK_REJECT:%s" % reason)
+            return False
         if self._dock_supply_enable and str(self._dock_supply_state or "").upper() == "READY_TO_EXIT":
             self._clear_charge_monitor()
             self._phase = "MANUAL_UNDOCKING"
@@ -6237,6 +6552,11 @@ class TaskManager:
                 )
                 return False
             return True
+
+        calibration_ok, calibration_reason = self._dock_calibration_gate()
+        if not calibration_ok:
+            self._reject_unready_dock_calibration(calibration_reason)
+            return False
 
         if self._dock_supply_enable and self._is_dock_supply_owner_phase():
             self._dock_supply_cancel()
@@ -6257,6 +6577,8 @@ class TaskManager:
         self._phase = "MANUAL_UNDOCKING"
         self._undock_nav_started_ts = time.time()
         self._publish_state(self._phase)
+        if not self._recheck_calibration_before_dock_motion(manual=True):
+            return False
         pose, xyyaw = self._undock_pose()
         self._emit_undock_goal_event(xyyaw[0], xyyaw[1], xyyaw[2])
         self.nav.send_goal(pose)
@@ -6286,6 +6608,14 @@ class TaskManager:
                 self._start_dock_sequence(manual=False)
 
             # Docking done?
+            if self._phase in ["AUTO_DOCKING", "MANUAL_DOCKING", "AUTO_DOCKING_STAGE1", "MANUAL_DOCKING_STAGE1", "AUTO_DOCKING_STAGE2", "MANUAL_DOCKING_STAGE2"]:
+                manual_docking = self._phase.startswith("MANUAL_")
+                calibration_ok, calibration_reason = self._dock_calibration_gate()
+                if not calibration_ok:
+                    self._fail_dock_motion_for_calibration(
+                        calibration_reason,
+                        manual=manual_docking,
+                    )
             if self._phase in ["AUTO_DOCKING", "MANUAL_DOCKING", "AUTO_DOCKING_STAGE1", "MANUAL_DOCKING_STAGE1", "AUTO_DOCKING_STAGE2", "MANUAL_DOCKING_STAGE2"]:
                 if self._dock_sequence_timed_out(self._dock_nav_started_ts):
                     self._dock_nav_client().cancel_all()

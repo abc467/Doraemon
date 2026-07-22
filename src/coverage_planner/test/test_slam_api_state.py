@@ -27,15 +27,18 @@ from coverage_planner.slam_workflow.node_wiring import SlamApiNodeWiring
 class _FakePlanStore:
     def __init__(self):
         self.pending_switch = None
-
-    def get_active_map(self, *, robot_id: str):
-        del robot_id
-        return {
+        self.active_map = {
             "revision_id": "rev_demo_01",
             "map_name": "demo_map",
             "map_id": "map_1",
             "map_md5": "md5_1",
         }
+        self.map_assets = [dict(self.active_map)]
+        self.map_revisions = [dict(self.active_map)]
+
+    def get_active_map(self, *, robot_id: str):
+        del robot_id
+        return dict(self.active_map or {})
 
     def get_pending_map_switch(self, *, robot_id: str):
         del robot_id
@@ -44,6 +47,16 @@ class _FakePlanStore:
     def find_map_assets_by_identity(self, *, map_id: str, map_md5: str):
         del map_id, map_md5
         return [{"map_name": "demo_map"}]
+
+    def list_map_assets(self):
+        return [dict(asset) for asset in self.map_assets]
+
+    def list_map_revisions(self, *, map_name: str = ""):
+        return [
+            dict(revision)
+            for revision in self.map_revisions
+            if not map_name or str(revision.get("map_name") or "") == map_name
+        ]
 
     def resolve_map_revision(self, *, revision_id: str = "", map_name: str = "", robot_id: str = "local_robot"):
         del map_name, robot_id
@@ -149,6 +162,66 @@ class SlamApiStateControllerTest(unittest.TestCase):
         self.assertEqual(self.backend._tracked_pose_xyyaw[1], 4.0)
         self.assertAlmostEqual(self.backend._tracked_pose_xyyaw[2], yaw)
 
+    @mock.patch(
+        "coverage_planner.slam_workflow.api_state.get_runtime_map_revision_id",
+        return_value="",
+    )
+    @mock.patch(
+        "coverage_planner.slam_workflow.api_state.get_runtime_map_scope",
+        return_value=("", ""),
+    )
+    def test_runtime_map_snapshot_without_refresh_never_writes_derived_identity(
+        self,
+        _scope,
+        _revision,
+    ):
+        with mock.patch(
+            "coverage_planner.map_identity.get_runtime_map_identity",
+            return_value=("", ""),
+        ), mock.patch(
+            "coverage_planner.map_identity.compute_map_md5",
+            return_value="abcdef0123456789abcdef0123456789",
+        ), mock.patch(
+            "coverage_planner.map_identity.rospy.set_param"
+        ) as set_param:
+            snapshot = self.controller.runtime_map_snapshot(refresh=False)
+
+        self.assertEqual(snapshot["map_id"], "map_abcdef01")
+        self.assertEqual(snapshot["map_md5"], "abcdef0123456789abcdef0123456789")
+        self.assertTrue(snapshot["ok"])
+        set_param.assert_not_called()
+
+    @mock.patch(
+        "coverage_planner.slam_workflow.api_state.get_runtime_map_revision_id",
+        return_value="",
+    )
+    @mock.patch(
+        "coverage_planner.slam_workflow.api_state.get_runtime_map_scope",
+        return_value=("", ""),
+    )
+    def test_runtime_map_snapshot_explicit_refresh_still_publishes_identity(
+        self,
+        _scope,
+        _revision,
+    ):
+        with mock.patch(
+            "coverage_planner.map_identity.compute_map_md5",
+            return_value="0123456789abcdef",
+        ), mock.patch(
+            "coverage_planner.map_identity.rospy.set_param"
+        ) as set_param:
+            snapshot = self.controller.runtime_map_snapshot(refresh=True)
+
+        self.assertEqual(snapshot["map_id"], "map_01234567")
+        self.assertEqual(snapshot["map_md5"], "0123456789abcdef")
+        self.assertTrue(snapshot["ok"])
+        set_param.assert_has_calls(
+            [
+                mock.call("/map_id", "map_01234567"),
+                mock.call("/map_md5", "0123456789abcdef"),
+            ]
+        )
+
     @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
     @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
     @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
@@ -174,6 +247,75 @@ class SlamApiStateControllerTest(unittest.TestCase):
         self.assertEqual(msg.runtime_map_name, "demo_map")
         self.assertEqual(msg.active_map_revision_id, "rev_demo_01")
         self.assertEqual(msg.runtime_map_revision_id, "")
+
+    @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("", "", False))
+    @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("", ""))
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
+    def test_build_state_new_vehicle_without_any_map_target_fails_map_operations_closed(
+        self,
+        get_param,
+        time_now,
+        _scope,
+        _identity,
+    ):
+        time_now.return_value = mock.Mock()
+        self.backend._plan_store.active_map = {}
+        self.backend._plan_store.map_assets = []
+        self.backend._plan_store.map_revisions = []
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/mode": "localization",
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "not_localized",
+            "/cartographer/runtime/localization_valid": False,
+        }.get(key, default)
+
+        msg = self.controller.build_state(robot_id="local_robot", refresh_map_identity=False)
+
+        self.assertFalse(msg.can_switch_map_and_localize)
+        self.assertFalse(msg.can_verify_map_revision)
+        self.assertFalse(msg.can_activate_map_revision)
+        self.assertFalse(msg.can_relocalize)
+        self.assertTrue(msg.can_start_mapping)
+
+    @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("", "", False))
+    @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("", ""))
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.Time.now")
+    @mock.patch("coverage_planner.slam_workflow.api_state.rospy.get_param")
+    def test_build_state_without_active_map_preserves_operations_for_stored_revision(
+        self,
+        get_param,
+        time_now,
+        _scope,
+        _identity,
+    ):
+        time_now.return_value = mock.Mock()
+        self.backend._plan_store.active_map = {}
+        self.backend._plan_store.map_assets = []
+        self.backend._plan_store.map_revisions = [
+            {
+                "revision_id": "rev_candidate_01",
+                "map_name": "candidate_map",
+                "enabled": True,
+                "lifecycle_status": "available",
+                "verification_status": "verified",
+                "map_id": "map_candidate_01",
+                "map_md5": "md5_candidate_01",
+            }
+        ]
+        get_param.side_effect = lambda key, default=None: {
+            "/cartographer/runtime/mode": "localization",
+            "/cartographer/runtime/current_mode": "localization",
+            "/cartographer/runtime/localization_state": "not_localized",
+            "/cartographer/runtime/localization_valid": False,
+        }.get(key, default)
+
+        msg = self.controller.build_state(robot_id="local_robot", refresh_map_identity=False)
+
+        self.assertTrue(msg.can_switch_map_and_localize)
+        self.assertTrue(msg.can_verify_map_revision)
+        self.assertTrue(msg.can_activate_map_revision)
+        self.assertFalse(msg.can_relocalize)
 
     @mock.patch("coverage_planner.slam_workflow.api_state.ensure_map_identity", return_value=("map_1", "md5_1", True))
     @mock.patch("coverage_planner.slam_workflow.api_state.get_runtime_map_scope", return_value=("demo_map", "robot"))
