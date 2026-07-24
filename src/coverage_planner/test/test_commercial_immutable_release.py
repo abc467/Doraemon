@@ -13,6 +13,12 @@ INSTALLER = REPO_ROOT / "scripts" / "install_doraemon_runtime_service.sh"
 VERIFIER = REPO_ROOT / "scripts" / "verify_x86_ubuntu20_deployment.sh"
 BUILD_SCRIPT = REPO_ROOT / "scripts" / "build_x86_ubuntu20_workspace.sh"
 MANIFEST = REPO_ROOT / "deploy" / "manifests" / "x86_ubuntu20_versions.env"
+COMMERCIAL_MANUAL = REPO_ROOT / "docs" / "x86_ubuntu20_commercial_deployment.md"
+RELEASE_NOTES = (
+    REPO_ROOT
+    / "docs"
+    / "release_notes_deployment-2026-07-24-x86-ubuntu20-v9.md"
+)
 
 
 def _call_security_function(function_call):
@@ -27,19 +33,41 @@ def _call_security_function(function_call):
 class CommercialImmutableReleaseTest(unittest.TestCase):
     def test_manifest_pins_backend_and_frontend_release_identities(self):
         text = MANIFEST.read_text(encoding="utf-8")
-        self.assertIn(
-            "DORAEMON_BACKEND_DEPLOYMENT_TAG=deployment-2026-07-22-x86-ubuntu20-v8",
-            text,
-        )
+        identities = {
+            "DORAEMON_BACKEND_DEPLOYMENT_TAG": "deployment-2026-07-24-x86-ubuntu20-v9",
+            "DORAEMON_FRONTEND_DEPLOYMENT_TAG": "deployment-2026-07-22-frontend-v3",
+            "DORAEMON_FRONTEND_VERSION": "0.1.0-rc.11",
+        }
+        for key, value in identities.items():
+            with self.subTest(key=key):
+                self.assertEqual(
+                    [
+                        line
+                        for line in text.splitlines()
+                        if line.startswith("%s=" % key)
+                    ],
+                    ["%s=%s" % (key, value)],
+                )
         self.assertIn(
             "DORAEMON_BACKEND_GIT_URL=https://github.com/abc467/Doraemon.git",
             text,
         )
-        self.assertIn(
-            "DORAEMON_FRONTEND_DEPLOYMENT_TAG=deployment-2026-07-21-frontend-v2",
-            text,
-        )
-        self.assertIn("DORAEMON_FRONTEND_VERSION=0.1.0-rc.10", text)
+
+        manual = COMMERCIAL_MANUAL.read_text(encoding="utf-8")
+        release_notes = RELEASE_NOTES.read_text(encoding="utf-8")
+        for value in identities.values():
+            with self.subTest(release_identity=value):
+                self.assertIn(value, manual)
+                self.assertIn(value, release_notes)
+
+        for stale_identity in (
+            "deployment-2026-07-22-x86-ubuntu20-v8",
+            "deployment-2026-07-21-frontend-v2",
+            "0.1.0-rc.10",
+        ):
+            with self.subTest(stale_identity=stale_identity):
+                self.assertNotIn(stale_identity, manual)
+                self.assertNotIn(stale_identity, release_notes)
 
     def test_escaping_and_dangling_symlinks_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="doraemon-release-symlink-") as tmp:

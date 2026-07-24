@@ -1,6 +1,6 @@
 # 清洁机器人 x86 Ubuntu 20.04 商业部署手册
 
-版本：2026-07-22 v8
+版本：2026-07-24 v9
 
 本文用于把 Doraemon 清洁机器人后端、清洁机器人前端和 Site Gateway
 部署到全新的 x86 主板。目标系统为 Ubuntu 20.04，部署操作用户为 `a`。
@@ -11,8 +11,8 @@
 
 | 工程 | GitHub | 部署标签 |
 | --- | --- | --- |
-| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-22-x86-ubuntu20-v8` |
-| 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-21-frontend-v2` |
+| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-24-x86-ubuntu20-v9` |
+| 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-22-frontend-v3` |
 
 不要用仓库默认分支或 `latest` 做批量生产。部署标签、依赖清单和验收记录
 必须一起冻结。
@@ -88,8 +88,8 @@ group/other 写权限。`current` 符号链接本身也必须为 `root:root`。
 | --- | --- |
 | 车辆资产编号 | `<公司资产系统中的唯一编号>` |
 | hostname | `clean-robot-<唯一序号>` |
-| 后端标签 | `deployment-2026-07-22-x86-ubuntu20-v8` |
-| 前端标签 | `deployment-2026-07-21-frontend-v2` |
+| 后端标签 | `deployment-2026-07-24-x86-ubuntu20-v9` |
+| 前端标签 | `deployment-2026-07-22-frontend-v3` |
 | 机器人内部网口 | 现场识别，例如 `eno1` |
 | A-box 地址 | `192.168.127.11/24` |
 | M-box 地址 | `192.168.127.10` |
@@ -177,7 +177,7 @@ Ubuntu 维护方案和受控 APT/ROS 镜像，保存安装包与校验值，不�
 sudo install -d -o root -g root -m 0755 /opt/doraemon/releases
 sudo install -d -o root -g root -m 0755 /opt/doraemon/deps
 sudo install -d -o a -g a -m 0755 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 ```
 
@@ -187,21 +187,21 @@ stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-22-x86-ubuntu20-v8 \
+  --branch deployment-2026-07-24-x86-ubuntu20-v9 \
   https://github.com/abc467/Doraemon.git \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 ```
 
 验证：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
 git rev-parse HEAD
 git rev-parse --is-shallow-repository
 du -sh . .git
-release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+release=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 find "${release}" -xdev \
   -path "${release}/.git" -prune -o \
   \( \
@@ -261,7 +261,7 @@ FLIRT 兼容源码已小体积纳入 `third_party/flirt`，来源和修改说明
 依赖编译可能较久。并发数应按主板内存调整；首次部署建议从 4 开始：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 DORAEMON_BUILD_JOBS=4 ./scripts/install_x86_ubuntu20_dependencies.sh
 ```
 
@@ -292,7 +292,7 @@ reset/clean，也不得改成任意新版本来绕过错误。
 ### 6.3 依赖验收
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 cat /etc/doraemon/deps.env
 source /etc/profile.d/doraemon-deps.sh
 /opt/doraemon/deps/cmake-3.20.6/bin/cmake --version
@@ -371,7 +371,7 @@ test -z "$(find /opt/doraemon/deps -xdev \
 ## 7. 阶段 D：编译后端工作空间
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 ```
 
@@ -396,7 +396,7 @@ catkin_test_results --all build/mcore_chassis_bridge/test_results
 检查：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source devel/setup.bash
@@ -496,7 +496,7 @@ udevadm info --query=property --name=/dev/ttyUSB0
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8/deploy/udev/99-doraemon-a26022-serial.rules.example \
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9/deploy/udev/99-doraemon-a26022-serial.rules.example \
   /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 sudoedit /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 ```
@@ -518,7 +518,7 @@ ls -l /dev/imu /dev/wheel_odom /dev/mcore
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
   /etc/udev/rules.d/99-obsensor-ros1-libusb.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -548,7 +548,7 @@ systemctl is-enabled doraemon-runtime.service || true
 清理或替换 `build/`、`devel/`：
 
 ```bash
-release=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+release=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 cd "${release}"
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
@@ -571,37 +571,37 @@ test -z "$(find "${release}" -xdev \
       -iname export.log -o -iname '*.db' -o -iname '*.sqlite*' \) \
   \) -print -quit)"
 sudo chown -hR root:root \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 sudo chmod -R go-w \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 sudo chown root:root /opt/doraemon/releases
 sudo chmod 0755 /opt/doraemon/releases
 sudo ln -sfn \
-  /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
   /opt/doraemon/current
 sudo chown -h root:root /opt/doraemon/current
 
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
   -xdev \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
   -xdev \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/doraemon/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/doraemon/current)" = 'root:root'
 test "$(readlink -f /opt/doraemon/current)" = \
-  '/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8'
+  '/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9'
 test "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  -C /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
   describe --tags --exact-match)" = \
-  'deployment-2026-07-22-x86-ubuntu20-v8'
+  'deployment-2026-07-24-x86-ubuntu20-v9'
 test -z "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  -C /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
   status --porcelain=v1 --untracked-files=all)"
 sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
-  -C /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  -C /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
   rev-parse HEAD
 ```
 
@@ -623,7 +623,7 @@ allowlist 执行一次性 `sudo -n git` 只读检查；它们不得改用全局 
 只从这个已冻结的物理 release 安装，显式保持“不启用”：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-22-x86-ubuntu20-v8
+cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
 DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
 ```
 
@@ -695,7 +695,7 @@ DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
 USB3 拓扑仍为占位符，服务必须拒绝启动。相机在生产入口始终按序列号绑定；
 USB3 拓扑用于独立审计，启动前还会用目标版本内的 Orbbec SDK 验证
 `序列号 ↔ 拓扑` 配对、厂商和 SuperSpeed，不允许在失败时自动降级到另一个设备。
-v8 延续 v7 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
+v9 延续 v8 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
 的超时预算内重试，并要求连续两次都得到恰好三条、唯一且与本车配置完全相同的配对。
 空、部分、额外、重复、畸形或超时快照都会清零连续成功计数并继续等待，直至预算耗尽后
 fail closed。原始 SDK stdout/stderr 不得直接写入 systemd journal。
@@ -836,7 +836,7 @@ stat -c '%U:%G %a %n' /opt/clean-robot-site/releases
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-21-frontend-v2 \
+  --branch deployment-2026-07-22-frontend-v3 \
   https://github.com/yeqiangsheng/clean-robot-frontend.git \
   /home/a/clean-robot-frontend-build
 cd /home/a/clean-robot-frontend-build
@@ -867,7 +867,7 @@ cd /home/a/clean-robot-frontend-build
 npm ci
 npm run verify
 npm run package:trial
-cd release/clean-robot-site-v0.1.0-rc.10
+cd release/clean-robot-site-v0.1.0-rc.11
 npm ci --omit=dev
 ```
 
@@ -879,33 +879,33 @@ npm ci --omit=dev
 
 ```bash
 sudo install -d -o root -g root -m 0755 \
-  /opt/clean-robot-site/releases/0.1.0-rc.10
+  /opt/clean-robot-site/releases/0.1.0-rc.11
 sudo cp -a \
-  /home/a/clean-robot-frontend-build/release/clean-robot-site-v0.1.0-rc.10/. \
-  /opt/clean-robot-site/releases/0.1.0-rc.10/
-sudo chown -hR root:root /opt/clean-robot-site/releases/0.1.0-rc.10
-sudo chmod -R go-w /opt/clean-robot-site/releases/0.1.0-rc.10
+  /home/a/clean-robot-frontend-build/release/clean-robot-site-v0.1.0-rc.11/. \
+  /opt/clean-robot-site/releases/0.1.0-rc.11/
+sudo chown -hR root:root /opt/clean-robot-site/releases/0.1.0-rc.11
+sudo chmod -R go-w /opt/clean-robot-site/releases/0.1.0-rc.11
 sudo chown root:root /opt/clean-robot-site/releases
 sudo chmod 0755 /opt/clean-robot-site/releases
 sudo ln -sfn \
-  /opt/clean-robot-site/releases/0.1.0-rc.10 \
+  /opt/clean-robot-site/releases/0.1.0-rc.11 \
   /opt/clean-robot-site/current
 sudo chown -h root:root /opt/clean-robot-site/current
 
-test -z "$(find /opt/clean-robot-site/releases/0.1.0-rc.10 -xdev \
+test -z "$(find /opt/clean-robot-site/releases/0.1.0-rc.11 -xdev \
   \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/clean-robot-site/releases/0.1.0-rc.10 -xdev \
+test -z "$(find /opt/clean-robot-site/releases/0.1.0-rc.11 -xdev \
   \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/clean-robot-site/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/clean-robot-site/current)" = 'root:root'
 test "$(readlink -f /opt/clean-robot-site/current)" = \
-  '/opt/clean-robot-site/releases/0.1.0-rc.10'
+  '/opt/clean-robot-site/releases/0.1.0-rc.11'
 ```
 
 `[停止条件]` Node/npm 固定版本检查、`npm ci`、`npm run verify`、生产打包或生产依赖
 安装失败，制品内容不完整，release/父目录冻结失败，或 `current` 不是 root 所有并精确
-指向 `0.1.0-rc.10` 时停止。不得从旧机复制 `node_modules`、发布包或前端 SQLite。
+指向 `0.1.0-rc.11` 时停止。不得从旧机复制 `node_modules`、发布包或前端 SQLite。
 
 ## 13. 阶段 J：前端独立配置和服务
 

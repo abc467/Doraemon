@@ -284,6 +284,13 @@ class MapAssetServiceNode:
             return 0
 
     @staticmethod
+    def _required_count_from_conn(conn, query: str, args=()) -> int:
+        row = conn.execute(query, tuple(args or ())).fetchone()
+        if row is None:
+            raise RuntimeError("required reference count query returned no row")
+        return int(row["count"] or 0)
+
+    @staticmethod
     def _json_summary(data) -> str:
         try:
             return json.dumps(dict(data or {}), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -304,22 +311,53 @@ class MapAssetServiceNode:
             "tasks": 0,
             "schedules": 0,
             "schedule_state": 0,
+            "mission_runs": 0,
+            "mission_checkpoints": 0,
+            "robot_runtime_state": 0,
+            "unfinished_slam_jobs": 0,
+            "operations_db_scan_errors": 0,
         }
         ops = getattr(self, "ops", None)
-        if (not revision_id) or ops is None:
+        if not revision_id:
+            return refs
+        if ops is None:
+            refs["operations_db_scan_errors"] = 1
             return refs
         conn = None
         try:
             conn = ops._connect()
-            if not ops._table_exists(conn, "jobs") or "map_revision_id" not in ops._table_columns(conn, "jobs"):
-                return refs
+            required_schema = {
+                "jobs": {"job_id", "map_revision_id"},
+                "job_schedules": {"schedule_id", "job_id"},
+                "job_schedule_state": {"schedule_id"},
+                "mission_runs": {"run_id", "map_revision_id"},
+                "mission_checkpoints": {"run_id", "map_revision_id"},
+                "robot_runtime_state": {"map_revision_id"},
+                "slam_jobs": {
+                    "done",
+                    "requested_map_revision_id",
+                    "resolved_map_revision_id",
+                },
+            }
+            for table, required_columns in required_schema.items():
+                if not ops._table_exists(conn, table):
+                    raise RuntimeError("required operations table is missing: %s" % table)
+                missing_columns = sorted(
+                    required_columns - set(ops._table_columns(conn, table))
+                )
+                if missing_columns:
+                    raise RuntimeError(
+                        "required operations columns are missing from %s: %s"
+                        % (table, ",".join(missing_columns))
+                    )
+
             job_rows = conn.execute(
                 "SELECT job_id FROM jobs WHERE map_revision_id=?;",
                 (revision_id,),
             ).fetchall()
             job_ids = [str(row["job_id"] or "").strip() for row in job_rows or [] if str(row["job_id"] or "").strip()]
             refs["tasks"] = len(job_ids)
-            if job_ids and ops._table_exists(conn, "job_schedules"):
+            if job_ids:
                 placeholders = ",".join("?" for _ in job_ids)
                 schedule_rows = conn.execute(
                     "SELECT schedule_id FROM job_schedules WHERE job_id IN (%s);" % placeholders,
@@ -331,14 +369,55 @@ class MapAssetServiceNode:
                     if str(row["schedule_id"] or "").strip()
                 ]
                 refs["schedules"] = len(schedule_ids)
-                if schedule_ids and ops._table_exists(conn, "job_schedule_state"):
-                    refs["schedule_state"] = self._count_from_conn(
+                if schedule_ids:
+                    refs["schedule_state"] = self._required_count_from_conn(
                         conn,
                         "SELECT COUNT(*) AS count FROM job_schedule_state WHERE schedule_id IN (%s);" % ",".join("?" for _ in schedule_ids),
                         tuple(schedule_ids),
                     )
+            run_rows = conn.execute(
+                "SELECT run_id FROM mission_runs WHERE map_revision_id=?;",
+                (revision_id,),
+            ).fetchall()
+            run_ids = [
+                str(row["run_id"] or "").strip()
+                for row in run_rows or []
+                if str(row["run_id"] or "").strip()
+            ]
+            refs["mission_runs"] = len(run_ids)
+            checkpoint_predicates = ["map_revision_id=?"]
+            checkpoint_args = [revision_id]
+            if run_ids:
+                checkpoint_predicates.append(
+                    "run_id IN (%s)" % self._sql_placeholders(run_ids)
+                )
+                checkpoint_args.extend(run_ids)
+            refs["mission_checkpoints"] = self._required_count_from_conn(
+                conn,
+                "SELECT COUNT(*) AS count FROM mission_checkpoints WHERE %s;"
+                % " OR ".join("(%s)" % predicate for predicate in checkpoint_predicates),
+                tuple(checkpoint_args),
+            )
+            refs["robot_runtime_state"] = self._required_count_from_conn(
+                conn,
+                "SELECT COUNT(*) AS count FROM robot_runtime_state WHERE map_revision_id=?;",
+                (revision_id,),
+            )
+            refs["unfinished_slam_jobs"] = self._required_count_from_conn(
+                conn,
+                """
+                SELECT COUNT(*) AS count
+                FROM slam_jobs
+                WHERE COALESCE(done, 0)=0
+                  AND (requested_map_revision_id=? OR resolved_map_revision_id=?);
+                """,
+                (revision_id, revision_id),
+            )
         except Exception:
-            return refs
+            # Hard deletion must fail closed when the operations database cannot
+            # be scanned. Otherwise a transient/schema error could turn an
+            # unknown audit reference into an apparent zero reference count.
+            refs["operations_db_scan_errors"] = 1
         finally:
             try:
                 if conn is not None:
@@ -365,47 +444,53 @@ class MapAssetServiceNode:
             "tasks": 0,
             "schedules": 0,
             "schedule_state": 0,
+            "planning_db_scan_errors": 0,
         }
         if not revision_id:
             return refs
-        for table in (
-            "zones",
-            "zone_versions",
-            "zone_editor_metadata",
-            "plans",
-            "zone_active_plans",
-            "map_constraint_revision_versions",
-            "map_revision_no_go_areas",
-            "map_revision_virtual_walls",
-            "map_active_constraint_revisions",
-            "map_alignment_revision_configs",
-            "map_active_alignment_revisions",
-        ):
-            try:
-                if not self.store._table_exists(table) or "map_revision_id" not in self.store._table_columns(table):
-                    continue
-                refs[table] = self._count_from_conn(
+        try:
+            revision_tables = (
+                "zones",
+                "zone_versions",
+                "zone_editor_metadata",
+                "plans",
+                "zone_active_plans",
+                "map_constraint_revision_versions",
+                "map_revision_no_go_areas",
+                "map_revision_virtual_walls",
+                "map_active_constraint_revisions",
+                "map_alignment_revision_configs",
+                "map_active_alignment_revisions",
+            )
+            for table in revision_tables:
+                if not self.store._table_exists(table):
+                    raise RuntimeError("required planning table is missing: %s" % table)
+                if "map_revision_id" not in self.store._table_columns(table):
+                    raise RuntimeError(
+                        "required planning column is missing from %s: map_revision_id"
+                        % table
+                    )
+                refs[table] = self._required_count_from_conn(
                     self.store.conn,
                     "SELECT COUNT(*) AS count FROM %s WHERE map_revision_id=?;" % table,
                     (revision_id,),
                 )
-            except Exception:
-                continue
-        try:
-            if refs["plans"] and self.store._table_exists("plan_blocks"):
+            if not self.store._table_exists("plan_blocks"):
+                raise RuntimeError("required planning table is missing: plan_blocks")
+            if refs["plans"]:
                 plan_rows = self.store.conn.execute(
                     "SELECT plan_id FROM plans WHERE map_revision_id=?;",
                     (revision_id,),
                 ).fetchall()
                 plan_ids = [str(row["plan_id"] or "").strip() for row in plan_rows or [] if str(row["plan_id"] or "").strip()]
                 if plan_ids:
-                    refs["plan_blocks"] = self._count_from_conn(
+                    refs["plan_blocks"] = self._required_count_from_conn(
                         self.store.conn,
                         "SELECT COUNT(*) AS count FROM plan_blocks WHERE plan_id IN (%s);" % ",".join("?" for _ in plan_ids),
                         tuple(plan_ids),
                     )
         except Exception:
-            pass
+            refs["planning_db_scan_errors"] = 1
         refs.update(self._ops_business_refs_for_revision(revision_id))
         return refs
 
@@ -445,9 +530,29 @@ class MapAssetServiceNode:
             blockers.append("cannot hard-delete a pending map switch revision")
 
         business_refs = self._business_refs_for_revision(revision_id)
+        # Mission execution history is audit evidence, not a deletable child
+        # asset. Even an explicitly confirmed cascade may delete task/plan
+        # definitions only when no run/checkpoint/runtime evidence still binds
+        # the revision. This keeps strict revision health checks meaningful.
+        audit_ref_keys = {
+            "mission_runs",
+            "mission_checkpoints",
+            "robot_runtime_state",
+            "unfinished_slam_jobs",
+        }
+        scan_error_keys = {
+            "operations_db_scan_errors",
+            "planning_db_scan_errors",
+        }
+        for table, count in sorted((k, v) for k, v in business_refs.items() if int(v or 0) > 0):
+            if table in audit_ref_keys:
+                blockers.append("audit-referenced by %s: %d" % (table, count))
+            elif table in scan_error_keys:
+                blockers.append("reference scan failed for %s" % table)
         if not bool(cascade):
             for table, count in sorted((k, v) for k, v in business_refs.items() if int(v or 0) > 0):
-                blockers.append("referenced by %s: %d" % (table, count))
+                if table not in audit_ref_keys and table not in scan_error_keys:
+                    blockers.append("referenced by %s: %d" % (table, count))
 
         paths = self._revision_file_paths(asset)
         for path in paths:
@@ -694,6 +799,29 @@ class MapAssetServiceNode:
         reclaimed_bytes = 0
         if not revision_id:
             raise ValueError("map_revision_id is required")
+
+        # A dry-run or earlier request scan is only advisory. Re-resolve and
+        # scan again at the final destructive entry point so a reference added
+        # after candidate selection cannot be silently orphaned. Always use
+        # cascade=False here: cascade callers must already have removed every
+        # deletable business definition, while audit/history references remain
+        # permanent blockers.
+        live_asset = self.store.resolve_map_asset(
+            revision_id=revision_id,
+            robot_id=self.robot_id,
+        )
+        if not live_asset:
+            raise ValueError("map revision no longer exists")
+        refreshed = self._gc_candidate_for_asset(live_asset, cascade=False)
+        if refreshed["blockers"]:
+            raise ValueError(
+                "pre-delete reference check blocked: %s"
+                % "; ".join(str(item) for item in refreshed["blockers"])
+            )
+        for key in ("asset", "paths", "business_refs", "reclaimable_bytes"):
+            candidate[key] = refreshed[key]
+        asset = dict(candidate.get("asset") or {})
+        map_name = str(asset.get("map_name") or "").strip()
 
         self._validate_hard_delete_candidate_files(candidate)
         existing_paths = []

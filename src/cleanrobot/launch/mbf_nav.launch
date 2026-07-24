@@ -39,6 +39,7 @@
 
   <node pkg="coverage_planner" type="map_constraints_node.py" name="map_constraints" output="screen">
     <param name="plan_db_path" value="$(arg plan_db_path)"/>
+    <param name="robot_id" value="$(arg robot_id)"/>
     <param name="map_topic" value="/map"/>
     <param name="frame_id" value="map"/>
     <param name="constraints_topic" value="/map_constraints/current"/>

@@ -72,6 +72,21 @@ BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS=
 
 
 class RuntimeParameterWiringTest(unittest.TestCase):
+    def test_map_constraints_receives_commercial_robot_id(self):
+        launch_root = ET.parse(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/launch/mbf_nav.launch",
+            )
+        ).getroot()
+        map_constraints = launch_root.find("./node[@name='map_constraints']")
+        self.assertIsNotNone(map_constraints)
+        params = {
+            item.get("name"): item.get("value")
+            for item in map_constraints.findall("param")
+        }
+        self.assertEqual(params.get("robot_id"), "$(arg robot_id)")
+
     def test_odometry_vehicle_parameters_are_explicit_launch_arguments(self):
         source = read_repo_file("scripts/start_runtime.sh")
         block_start = source.index('if [[ "${START_WHEEL_ODOM}" == "true" ]]')

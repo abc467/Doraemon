@@ -15,7 +15,7 @@ from coverage_planner.map_asset_import import register_imported_map_asset
 from coverage_planner.map_asset_import import normalize_import_verification_mode
 from coverage_planner.map_io import write_occupancy_to_yaml_pgm
 from coverage_planner.map_path_security import MapPathSecurityError
-from coverage_planner.ops_store.store import OperationsStore
+from coverage_planner.ops_store.store import MissionCheckpointRecord, OperationsStore
 from coverage_planner.plan_store.store import PlanStore
 
 
@@ -46,9 +46,19 @@ def _load_import_map_assets_module():
     return module
 
 
+def _load_revision_db_health_module():
+    script_path = pathlib.Path(__file__).resolve().parents[1] / "tools" / "check_revision_db_health.py"
+    spec = importlib.util.spec_from_file_location("check_revision_db_health_test_mod", str(script_path))
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 MAP_ASSET_SERVICE_MODULE = _load_map_asset_service_module()
 MIGRATE_MAP_ASSETS_MODULE = _load_migrate_map_assets_module()
 IMPORT_MAP_ASSETS_MODULE = _load_import_map_assets_module()
+REVISION_DB_HEALTH_MODULE = _load_revision_db_health_module()
 
 
 def _make_occ():
@@ -1191,11 +1201,13 @@ class MapAssetImportFlowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             maps_root = os.path.join(tmpdir, "managed")
             store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
             asset = _register_gc_asset(store, maps_root, revision_id="rev_gc_dry_run", enabled=False)
             node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
             node.robot_id = "robot_a"
             node.maps_root = maps_root
             node.store = store
+            node.ops = ops
 
             resp = node._handle(
                 _make_map_gc_req(
@@ -1357,6 +1369,271 @@ class MapAssetImportFlowTest(unittest.TestCase):
             self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_cascade_token"))
             self.assertEqual(len(ops.list_jobs()), 1)
 
+    def test_map_asset_service_cascade_hard_delete_preserves_mission_audit_revision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            plan_db_path = os.path.join(tmpdir, "planning.db")
+            ops_db_path = os.path.join(tmpdir, "operations.db")
+            store = PlanStore(plan_db_path)
+            ops = OperationsStore(ops_db_path)
+            asset = _register_gc_asset(
+                store,
+                maps_root,
+                revision_id="rev_gc_audited",
+                enabled=False,
+                lifecycle_status="available",
+                verification_status="verified",
+            )
+            _attach_gc_business_refs(store, ops, revision_id="rev_gc_audited")
+            ops.create_run(
+                run_id="run_gc_audited",
+                job_id="301",
+                map_name="gc_demo",
+                map_revision_id="rev_gc_audited",
+                zone_id="zone_a",
+                plan_profile_name="cover_standard",
+                plan_id="plan_gc",
+                zone_version=1,
+                state="DONE",
+            )
+            ops.upsert_mission_checkpoint(
+                MissionCheckpointRecord(
+                    run_id="run_gc_audited",
+                    zone_id="zone_a",
+                    plan_id="plan_gc",
+                    zone_version=1,
+                    state="DONE",
+                    map_revision_id="rev_gc_audited",
+                )
+            )
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_audited",
+                    dry_run=False,
+                    cascade=True,
+                    confirm_token="CASCADE_DELETE:rev_gc_audited",
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            blocked_reasons = list(getattr(resp, "blocked_reasons", []))
+            self.assertTrue(
+                any(reason.endswith("audit-referenced by mission_runs: 1") for reason in blocked_reasons),
+                blocked_reasons,
+            )
+            self.assertTrue(
+                any(reason.endswith("audit-referenced by mission_checkpoints: 1") for reason in blocked_reasons),
+                blocked_reasons,
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_audited"))
+            self.assertTrue(os.path.exists(str(asset.get("pbstream_path") or "")))
+            self.assertIsNotNone(ops.get_run("run_gc_audited"))
+            self.assertIsNotNone(ops.get_mission_checkpoint("run_gc_audited"))
+            self.assertEqual(len(ops.list_jobs()), 1)
+            self.assertEqual(len(ops.list_schedules()), 1)
+
+            report = REVISION_DB_HEALTH_MODULE.build_report(
+                plan_db_path=plan_db_path,
+                ops_db_path=ops_db_path,
+                robot_id="robot_a",
+                strict=True,
+            )
+            self.assertTrue(bool((report.get("summary") or {}).get("ok")), report.get("findings"))
+
+    def test_map_asset_service_hard_delete_fails_closed_when_ops_scan_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_ops_unreadable", enabled=False)
+
+            class _UnreadableOperationsStore:
+                def _connect(self):
+                    raise RuntimeError("operations database unavailable")
+
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = _UnreadableOperationsStore()
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_ops_unreadable",
+                    dry_run=True,
+                    cascade=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertTrue(
+                any(
+                    reason.endswith("reference scan failed for operations_db_scan_errors")
+                    for reason in list(getattr(resp, "blocked_reasons", []))
+                ),
+                list(getattr(resp, "blocked_reasons", [])),
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_ops_unreadable"))
+
+    def test_map_asset_service_hard_delete_fails_closed_without_ops_store(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_ops_missing", enabled=False)
+
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_ops_missing",
+                    dry_run=True,
+                    cascade=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertTrue(
+                any(
+                    reason.endswith("reference scan failed for operations_db_scan_errors")
+                    for reason in list(getattr(resp, "blocked_reasons", []))
+                ),
+                list(getattr(resp, "blocked_reasons", [])),
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_ops_missing"))
+
+    def test_map_asset_service_hard_delete_fails_closed_on_incomplete_ops_schema(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_ops_schema", enabled=False)
+            conn = ops._connect()
+            try:
+                conn.execute("DROP TABLE mission_runs;")
+                conn.commit()
+            finally:
+                conn.close()
+
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_ops_schema",
+                    dry_run=True,
+                    cascade=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertTrue(
+                any(
+                    reason.endswith("reference scan failed for operations_db_scan_errors")
+                    for reason in list(getattr(resp, "blocked_reasons", []))
+                ),
+                list(getattr(resp, "blocked_reasons", [])),
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_ops_schema"))
+
+    def test_map_asset_service_hard_delete_fails_closed_on_incomplete_plan_schema(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_plan_schema", enabled=False)
+            store.conn.execute("DROP TABLE zones;")
+            store.conn.commit()
+
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_plan_schema",
+                    dry_run=True,
+                    cascade=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertTrue(
+                any(
+                    reason.endswith("reference scan failed for planning_db_scan_errors")
+                    for reason in list(getattr(resp, "blocked_reasons", []))
+                ),
+                list(getattr(resp, "blocked_reasons", [])),
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_plan_schema"))
+
+    def test_map_asset_service_hard_delete_rechecks_references_before_unlink(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            _register_gc_asset(store, maps_root, revision_id="rev_gc_race", enabled=False)
+
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+            original_delete = node._hard_delete_candidate
+
+            def _insert_run_then_delete(candidate):
+                ops.create_run(
+                    run_id="run_gc_race",
+                    job_id="",
+                    map_name="gc_demo",
+                    map_revision_id="rev_gc_race",
+                    zone_id="",
+                    plan_profile_name="",
+                    plan_id="",
+                    zone_version=0,
+                    state="DONE",
+                )
+                return original_delete(candidate)
+
+            node._hard_delete_candidate = _insert_run_then_delete
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_race",
+                    dry_run=False,
+                    confirm_token="rev_gc_race",
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertTrue(
+                any(
+                    "pre-delete reference check blocked" in reason
+                    and "mission_runs: 1" in reason
+                    for reason in list(getattr(resp, "blocked_reasons", []))
+                ),
+                list(getattr(resp, "blocked_reasons", [])),
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_race"))
+            self.assertIsNotNone(ops.get_run("run_gc_race"))
+
     def test_map_asset_service_cascade_hard_delete_removes_business_refs_and_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             maps_root = os.path.join(tmpdir, "managed")
@@ -1400,6 +1677,7 @@ class MapAssetImportFlowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             maps_root = os.path.join(tmpdir, "managed")
             store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
             asset = _register_gc_asset(store, maps_root, revision_id="rev_gc_delete", enabled=False)
             paths = [
                 str(asset.get("pbstream_path") or ""),
@@ -1410,6 +1688,7 @@ class MapAssetImportFlowTest(unittest.TestCase):
             node.robot_id = "robot_a"
             node.maps_root = maps_root
             node.store = store
+            node.ops = ops
 
             resp = node._handle(
                 _make_map_gc_req(
@@ -1429,11 +1708,13 @@ class MapAssetImportFlowTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             maps_root = os.path.join(tmpdir, "managed")
             store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
             _register_gc_asset(store, maps_root, revision_id="rev_gc_cleanup", enabled=False)
             node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
             node.robot_id = "robot_a"
             node.maps_root = maps_root
             node.store = store
+            node.ops = ops
 
             blocked = node._handle(
                 _make_map_gc_req(

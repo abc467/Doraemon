@@ -293,9 +293,11 @@
 - 回收站“永久删除地图 revision”应使用 `hardDelete + cascade=true`：dry-run 返回 `affected_zones_count / affected_plans_count / affected_tasks_count / affected_schedules_count / affected_zone_versions_count / reclaimable_bytes / confirm_token`
 - `cascade=true` 真正执行时，必须回传 dry-run 给出的 `confirm_token`，格式为 `CASCADE_DELETE:<map_revision_id>`
 - `cascade=true` 会删除该 revision 下属 `zones / zone_versions / plans / zone_active_plans / zone_editor_metadata` 以及绑定该 revision 的任务和调度，再删除地图文件；响应的 `deleted_business_refs` 是 JSON summary
+- `mission_runs / mission_checkpoints / robot_runtime_state` 和未完成的 `slam_jobs` 属于不可静默删除的运行审计引用；存在任一引用时，即使 `cascade=true` 也必须阻止物理删除并在 `blocked_reasons` 返回精确计数
+- 后端无法完整扫描 `planning.db` / `operations.db`、固定审计表或列缺失时，`hardDelete` 和 `cleanupDisabled` 必须 fail closed，不能把未知引用当作零引用；真正移除文件前还会重新复核全部引用
 - `cleanupDisabled` 默认也是 dry-run；真正批量执行时，`confirm_token=CLEANUP_DISABLED`
 - `cleanupDisabled` 可选 `min_age_days` 和 `max_reclaim_bytes` 控制清理范围；`map_name` 为空表示全局扫描已停用 revision
-- 后端始终阻止硬删除 active map、runtime map、pending switch map 以及不在 `maps_root` 下的路径；普通 `hardDelete` 还会阻止有业务引用的 revision，`cascade=true` 则会把业务引用纳入影响范围并在确认后删除
+- 后端始终阻止硬删除 active map、runtime map、pending switch map、带运行审计引用的 revision 以及不在 `maps_root` 下的路径；普通 `hardDelete` 还会阻止有业务引用的 revision，`cascade=true` 只会把可级联的业务定义纳入影响范围并在确认后删除
 - 运行/运维口径可参考：`docs/slam_runtime_architecture_v1.md`
 
 ### 2.2 任务管理

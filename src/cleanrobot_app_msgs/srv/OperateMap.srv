@@ -16,7 +16,7 @@ bool set_active
 int8 enabled_state # 0: 保持不变 1: 禁用 2: 启用
 bool dry_run # hardDelete / cleanupDisabled 默认应先 dry-run；真正删除需 dry_run=false
 bool force # 预留：当前仍不允许删除 active/runtime/pending/有引用 revision
-bool cascade # hardDelete: true 表示二次确认后级联删除该 revision 下属业务资产
+bool cascade # hardDelete: true 表示二次确认后级联删除该 revision 下属业务资产；任务运行/断点等历史审计引用不会级联删除并会阻止 hardDelete
 uint32 min_age_days # cleanupDisabled: 只清理停用后超过 N 天的 revision
 uint64 max_reclaim_bytes # cleanupDisabled: 0 表示不限
 string confirm_token # hardDelete: map_revision_id 或 DELETE:<map_revision_id>; cleanupDisabled: CLEANUP_DISABLED
