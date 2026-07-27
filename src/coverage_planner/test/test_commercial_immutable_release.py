@@ -17,7 +17,7 @@ COMMERCIAL_MANUAL = REPO_ROOT / "docs" / "x86_ubuntu20_commercial_deployment.md"
 RELEASE_NOTES = (
     REPO_ROOT
     / "docs"
-    / "release_notes_deployment-2026-07-24-x86-ubuntu20-v9.md"
+    / "release_notes_deployment-2026-07-27-x86-ubuntu20-v10.md"
 )
 
 
@@ -34,7 +34,7 @@ class CommercialImmutableReleaseTest(unittest.TestCase):
     def test_manifest_pins_backend_and_frontend_release_identities(self):
         text = MANIFEST.read_text(encoding="utf-8")
         identities = {
-            "DORAEMON_BACKEND_DEPLOYMENT_TAG": "deployment-2026-07-24-x86-ubuntu20-v9",
+            "DORAEMON_BACKEND_DEPLOYMENT_TAG": "deployment-2026-07-27-x86-ubuntu20-v10",
             "DORAEMON_FRONTEND_DEPLOYMENT_TAG": "deployment-2026-07-22-frontend-v3",
             "DORAEMON_FRONTEND_VERSION": "0.1.0-rc.11",
         }
@@ -61,6 +61,7 @@ class CommercialImmutableReleaseTest(unittest.TestCase):
                 self.assertIn(value, release_notes)
 
         for stale_identity in (
+            "deployment-2026-07-24-x86-ubuntu20-v9",
             "deployment-2026-07-22-x86-ubuntu20-v8",
             "deployment-2026-07-21-frontend-v2",
             "0.1.0-rc.10",
@@ -68,6 +69,9 @@ class CommercialImmutableReleaseTest(unittest.TestCase):
             with self.subTest(stale_identity=stale_identity):
                 self.assertNotIn(stale_identity, manual)
                 self.assertNotIn(stale_identity, release_notes)
+
+        self.assertIn("固定角色口令", manual)
+        self.assertIn("不得使用 `0.0.0.0`", manual)
 
     def test_escaping_and_dangling_symlinks_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="doraemon-release-symlink-") as tmp:

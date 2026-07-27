@@ -1,6 +1,6 @@
 # 清洁机器人 x86 Ubuntu 20.04 商业部署手册
 
-版本：2026-07-24 v9
+版本：2026-07-27 v10
 
 本文用于把 Doraemon 清洁机器人后端、清洁机器人前端和 Site Gateway
 部署到全新的 x86 主板。目标系统为 Ubuntu 20.04，部署操作用户为 `a`。
@@ -11,7 +11,7 @@
 
 | 工程 | GitHub | 部署标签 |
 | --- | --- | --- |
-| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-24-x86-ubuntu20-v9` |
+| 后端 | `https://github.com/abc467/Doraemon.git` | `deployment-2026-07-27-x86-ubuntu20-v10` |
 | 前端 | `https://github.com/yeqiangsheng/clean-robot-frontend.git` | `deployment-2026-07-22-frontend-v3` |
 
 不要用仓库默认分支或 `latest` 做批量生产。部署标签、依赖清单和验收记录
@@ -34,7 +34,8 @@
 5. 初次启动前保持急停有效、驱动轮离地，并让刷盘、水泵等清洁执行器处于不会伤人的状态。
 6. systemd 安装器默认只安装服务，不启动，也不开启开机自启动。完成现场验收后再显式启用。
 7. USB 串口必须在新主板上重新识别。不得复制旧主板的 `ID_PATH`。
-8. 每台新车必须使用独立 hostname、外部管理地址、前端账号口令和验收记录。
+8. 每台新车必须使用独立 hostname、外部管理地址和验收记录；前端账号口令执行公司批准
+   的固定角色口令策略。
 9. 充电桩标定属于车辆和充电桩配对数据，新车必须现场重新标定。
 
 每一阶段都必须以一条明确的阶段报告收尾，至少包含：车辆资产编号、hostname、
@@ -88,7 +89,7 @@ group/other 写权限。`current` 符号链接本身也必须为 `root:root`。
 | --- | --- |
 | 车辆资产编号 | `<公司资产系统中的唯一编号>` |
 | hostname | `clean-robot-<唯一序号>` |
-| 后端标签 | `deployment-2026-07-24-x86-ubuntu20-v9` |
+| 后端标签 | `deployment-2026-07-27-x86-ubuntu20-v10` |
 | 前端标签 | `deployment-2026-07-22-frontend-v3` |
 | 机器人内部网口 | 现场识别，例如 `eno1` |
 | A-box 地址 | `192.168.127.11/24` |
@@ -177,7 +178,7 @@ Ubuntu 维护方案和受控 APT/ROS 镜像，保存安装包与校验值，不�
 sudo install -d -o root -g root -m 0755 /opt/doraemon/releases
 sudo install -d -o root -g root -m 0755 /opt/doraemon/deps
 sudo install -d -o a -g a -m 0755 \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 ```
 
@@ -187,21 +188,21 @@ stat -c '%U:%G %a %n' /opt/doraemon/releases /opt/doraemon/deps
 git clone \
   --depth 1 \
   --single-branch \
-  --branch deployment-2026-07-24-x86-ubuntu20-v9 \
+  --branch deployment-2026-07-27-x86-ubuntu20-v10 \
   https://github.com/abc467/Doraemon.git \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 ```
 
 验证：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+cd /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
 git rev-parse HEAD
 git rev-parse --is-shallow-repository
 du -sh . .git
-release=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+release=/opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 find "${release}" -xdev \
   -path "${release}/.git" -prune -o \
   \( \
@@ -261,7 +262,7 @@ FLIRT 兼容源码已小体积纳入 `third_party/flirt`，来源和修改说明
 依赖编译可能较久。并发数应按主板内存调整；首次部署建议从 4 开始：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+cd /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 DORAEMON_BUILD_JOBS=4 ./scripts/install_x86_ubuntu20_dependencies.sh
 ```
 
@@ -292,7 +293,7 @@ reset/clean，也不得改成任意新版本来绕过错误。
 ### 6.3 依赖验收
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+cd /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 cat /etc/doraemon/deps.env
 source /etc/profile.d/doraemon-deps.sh
 /opt/doraemon/deps/cmake-3.20.6/bin/cmake --version
@@ -371,7 +372,7 @@ test -z "$(find /opt/doraemon/deps -xdev \
 ## 7. 阶段 D：编译后端工作空间
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+cd /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 DORAEMON_BUILD_JOBS=4 ./scripts/build_x86_ubuntu20_workspace.sh
 ```
 
@@ -396,7 +397,7 @@ catkin_test_results --all build/mcore_chassis_bridge/test_results
 检查：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+cd /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 source /opt/ros/noetic/setup.bash
 source /etc/profile.d/doraemon-deps.sh
 source devel/setup.bash
@@ -496,7 +497,7 @@ udevadm info --query=property --name=/dev/ttyUSB0
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9/deploy/udev/99-doraemon-a26022-serial.rules.example \
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10/deploy/udev/99-doraemon-a26022-serial.rules.example \
   /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 sudoedit /etc/udev/rules.d/99-doraemon-a26022-serial.rules
 ```
@@ -518,7 +519,7 @@ ls -l /dev/imu /dev/wheel_odom /dev/mcore
 
 ```bash
 sudo install -m 0644 \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules \
   /etc/udev/rules.d/99-obsensor-ros1-libusb.rules
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -548,7 +549,7 @@ systemctl is-enabled doraemon-runtime.service || true
 清理或替换 `build/`、`devel/`：
 
 ```bash
-release=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+release=/opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 cd "${release}"
 git describe --tags --exact-match
 git status --porcelain=v1 --untracked-files=all
@@ -571,37 +572,37 @@ test -z "$(find "${release}" -xdev \
       -iname export.log -o -iname '*.db' -o -iname '*.sqlite*' \) \
   \) -print -quit)"
 sudo chown -hR root:root \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 sudo chmod -R go-w \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 sudo chown root:root /opt/doraemon/releases
 sudo chmod 0755 /opt/doraemon/releases
 sudo ln -sfn \
-  /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
   /opt/doraemon/current
 sudo chown -h root:root /opt/doraemon/current
 
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
   -xdev \( -type f -o -type d -o -type l \) \
   \( ! -user root -o ! -group root \) -print -quit)"
-test -z "$(find /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+test -z "$(find /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
   -xdev \( -type f -o -type d \) -perm /022 -print -quit)"
 test "$(stat -c '%U:%G %a' /opt/doraemon/releases)" = 'root:root 755'
 test "$(stat -c '%U:%G' /opt/doraemon/current)" = 'root:root'
 test "$(readlink -f /opt/doraemon/current)" = \
-  '/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9'
+  '/opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10'
 test "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
-  -C /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
+  -C /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
   describe --tags --exact-match)" = \
-  'deployment-2026-07-24-x86-ubuntu20-v9'
+  'deployment-2026-07-27-x86-ubuntu20-v10'
 test -z "$(sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
-  -C /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
+  -C /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
   status --porcelain=v1 --untracked-files=all)"
 sudo git \
-  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
-  -C /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9 \
+  -c safe.directory=/opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
+  -C /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10 \
   rev-parse HEAD
 ```
 
@@ -623,7 +624,7 @@ allowlist 执行一次性 `sudo -n git` 只读检查；它们不得改用全局 
 只从这个已冻结的物理 release 安装，显式保持“不启用”：
 
 ```bash
-cd /opt/doraemon/releases/deployment-2026-07-24-x86-ubuntu20-v9
+cd /opt/doraemon/releases/deployment-2026-07-27-x86-ubuntu20-v10
 DORAEMON_ENABLE_SERVICE=0 ./scripts/install_doraemon_runtime_service.sh
 ```
 
@@ -924,14 +925,13 @@ sudo install -m 0640 -o root -g a \
   /etc/clean-robot-site/app-config.json
 ```
 
-为 `operator`、`service`、`engineer` 分别生成独立随机口令：
+为 `operator`、`service`、`engineer` 配置公司批准的固定角色口令。本批量部署基线明确
+允许口令与角色名一致，不要求随机、强口令或逐车不同。该策略由公司承担账号猜测和横向
+复用风险，因此必须同时把 Site Gateway 仅绑定到批准的现场管理地址，不得监听
+`0.0.0.0`、机器人内部设备网地址或公网地址。
 
-```bash
-openssl rand -base64 24
-```
-
-每次输出只进入公司批准的密码管理系统和当前车辆外置配置。不要把口令作为命令行
-参数。用 `sudoedit` 交互替换三个 `replace-with-site-secret-*`：
+口令不得作为命令行参数或写入部署记录。用 `sudoedit` 交互替换三个
+`replace-with-site-secret-*`：
 
 ```bash
 sudoedit /etc/clean-robot-site/site-config.json
@@ -954,27 +954,14 @@ sudo grep -R -n 'replace-with\\|change-me\\|bulibusan' /etc/clean-robot-site
 
 应无输出。
 
-`[停止条件]` 三个角色缺失、外置配置权限不符，或 `robotId`/`siteName`/ROS 地址不属于
-当前登记车辆时停止。历史公共默认口令不得进入正式商业运行；工厂试产临时口令只有满足
-下一段全部限时隔离条件时才可用于阶段 L，不能据此通过阶段 M。
+`[停止条件]` 三个角色缺失、角色与权限不符、外置配置权限不符，或
+`robotId`/`siteName`/ROS 地址不属于当前登记车辆时停止。固定角色口令不是阶段 L/M 的
+停止条件；但 4173 未精确绑定批准的现场管理地址、该地址不属于登记管理网、真实支持
+信息仍为占位值，均属于阶段 M 的 `[停止条件]`。
 
-三个角色未使用当前车辆各自独立的强口令，或支持名称、电话、邮箱仍为占位值，属于
-阶段 M 的 `[停止条件]` 和正式商业发布阻断。
-
-首次批量工程试验如确需暂用临时口令做阶段 L 工厂调试，只能由负责人逐车、限时批准，
-并同时满足以下隔离条件：
-
-- 在单车部署记录中登记车辆、负责人、偏差范围、到期时间和关闭入口，但不记录口令明文；
-- 真实支持信息已经补齐；
-- 重新安装 Gateway 时显式设置 `SITE_LISTEN_HOST=127.0.0.1`，实测 `4173` 只监听 loopback；
-- 只允许通过本机显示器或受控 NoMachine 会话操作，管理网和机器人内部网均不能直接访问
-  `4173`；现场动作仍执行阶段 L 的全部物理安全门；
-- 该例外只允许有负责人监护的工厂调试，不得记为商业验收通过，不得进入阶段 M 或交付客户。
-
-不满足上述全部隔离条件时，临时口令最多只能用于阶段 K 无动作验收，不得进入阶段 L。
-关闭偏差时必须分别轮换三角色强口令，重新执行安装器、三角色登录/权限、车辆身份和支持
-信息显示检查，并在阶段 M 前把 Gateway 恢复到经批准的管理网监听策略；记录保管位置和
-结果，不记录口令明文。
+安装或轮换账号后必须分别完成三角色登录和权限复验，并记录策略版本、复验结果和管理网
+边界，不记录口令明文。9090 和 11311 仍必须保持 loopback-only，固定角色口令策略不得
+用于放宽任何 ROS listener。
 
 ### 13.2 安装但不启动服务
 
@@ -992,14 +979,15 @@ fi
 cd /opt/clean-robot-site/current
 sudo SITE_SERVICE_USER=a \
   SITE_ROSBRIDGE_URL=ws://127.0.0.1:9090 \
+  SITE_LISTEN_HOST=<批准的机器人管理地址> \
   SITE_ENABLE_SERVICE=0 \
   SITE_START_SERVICE=0 \
   ./scripts/install-site-systemd.sh
 ```
 
-存在上一节已批准的阶段 L 临时口令偏差时，上述安装命令还必须增加
-`SITE_LISTEN_HOST=127.0.0.1`；安装后用 `ss` 实测 `4173` 仅监听 loopback。不得用 UFW
-代替进程绑定隔离。
+`SITE_LISTEN_HOST` 必须是本车登记的现场管理地址，例如管理 Wi-Fi 获得的固定/保留地址；
+不得使用 `0.0.0.0`、`::`、机器人内部设备网地址或公网地址。安装后用 `ss` 实测 4173
+只监听该精确地址。不得用 UFW 代替进程绑定隔离。
 
 安装器会验证外置配置、账号和生产依赖，并把 SQLite 放到
 `/var/lib/clean-robot-site/site-gateway.sqlite`。它不会从 root 账号运行
@@ -1244,14 +1232,11 @@ sudo journalctl -u clean-robot-site-gateway.service -n 100 --no-pager
 http://127.0.0.1:4173/
 ```
 
-不存在临时口令偏差、Gateway 已按批准策略监听管理网时，才可从受控管理网访问：
+Gateway 已按批准策略精确监听管理地址时，可从受控管理网访问：
 
 ```text
 http://<机器人管理地址>:4173/
 ```
-
-存在阶段 L 临时口令偏差时，`4173` 必须保持 loopback-only，只能在本机浏览器或受控
-NoMachine 桌面中打开 `http://127.0.0.1:4173/`。
 
 确认前端显示的 `robotId`、车辆编号、地图、模块和账号权限都属于当前车辆。
 
@@ -1561,8 +1546,10 @@ rosservice call /auto_charge_monitor/snapshot '{}'
 
 ## 16. 阶段 M：启用开机运行
 
-只有全部验收通过后执行。任一车辆的三个角色只要没有使用该车各自独立的强口令，或支持
-名称、电话、邮箱任一项仍为模板值，就属于最终商业验收阻断，不得执行本阶段、不得交付。
+只有全部验收通过后执行。三个固定角色账号、角色权限和登录复验必须全部通过；支持名称、
+电话、邮箱任一项仍为模板值，或 4173 未精确绑定登记的现场管理地址，均属于最终商业验收
+阻断，不得执行本阶段、不得交付。固定角色口令按公司批准策略执行，不要求强口令或逐车
+不同。
 
 阶段 K 的进程级网络门也必须再次通过：`9090` 和 `11311` 只能监听
 `127.0.0.1`/`::1`。任一端口监听 `0.0.0.0`、`[::]`、`*` 或任一本机管理/设备网 IP
@@ -1602,9 +1589,9 @@ sudo journalctl -b -u clean-robot-site-gateway.service --no-pager
 
 确认系统在没有活动地图时进入“服务可用但任务未就绪”，而不是误执行旧任务。
 
-`[停止条件]` 任一阶段 A–L 验收未关闭、独立强口令/真实支持信息未复验、ROS listener
-不是 loopback-only、`NRestarts` 不为 `0`、充电桩标定/动作验收未通过，或本车记录不完整
-时，不得 enable、reboot 或交付。
+`[停止条件]` 任一阶段 A–L 验收未关闭、三角色登录权限/真实支持信息未复验、4173 未
+精确绑定批准管理地址、ROS listener 不是 loopback-only、`NRestarts` 不为 `0`、充电桩
+标定/动作验收未通过，或本车记录不完整时，不得 enable、reboot 或交付。
 
 ## 17. 可选：触摸屏 kiosk
 
@@ -1658,7 +1645,8 @@ X-GNOME-Autostart-enabled=true
 1. rosbridge 默认只监听 `127.0.0.1:9090`，外部浏览器只访问 Site Gateway。
 2. `4173/tcp` 只对批准的管理网段开放，不向公网开放。
 3. SSH 采用公司批准的密钥认证；量产后关闭不需要的口令登录。
-4. 前端三类账号使用每车独立随机口令，客户交付前完成轮换。
+4. 前端三类账号使用公司批准的固定角色口令；通过精确管理地址绑定、现场网络隔离和
+   角色最小权限控制暴露范围。
 5. `/etc/doraemon` 和 `/etc/clean-robot-site` 仅 root 和服务组可读。
 6. 不在日志中打印令牌、口令和客户 Wi-Fi 信息。
 7. 对外发布前完成第三方许可证清单、源代码义务和安全评审。
@@ -1855,7 +1843,7 @@ sudo journalctl -u clean-robot-site-gateway.service -n 150 --no-pager
 
 ### 前端安装器提示 bootstrapUsers 为空或口令不安全
 
-编辑 `/etc/clean-robot-site/site-config.json`，为三种角色写入每车独立随机口令，
+编辑 `/etc/clean-robot-site/site-config.json`，为三种角色写入公司批准的固定角色口令，
 清除所有占位符后重新运行安装器。不要改校验代码绕过。
 
 ## 24. 最终验收清单
@@ -1875,7 +1863,7 @@ sudo journalctl -u clean-robot-site-gateway.service -n 150 --no-pager
 - [ ] Orbbec 深度相机和 LiDAR 数据稳定
 - [ ] `/etc/doraemon/runtime.env` 已按本车复核
 - [ ] `/data/config/slam/cartographer` 为空并使用 release 内置配置，或非空覆盖已完成审查、摘要及 `root:a 0750/0640` 安全复核
-- [ ] `operator`、`service`、`engineer` 已从临时共用弱口令轮换为本车三组独立强口令，且三角色登录和权限复验通过
+- [ ] `operator`、`service`、`engineer` 已按公司固定角色口令策略配置，三角色登录和权限复验通过，部署记录未出现口令明文
 - [ ] 支持名称、电话和邮箱已替换为真实批准值，前端显示复验通过
 - [ ] 前端 SQLite 位于 `/var/lib/clean-robot-site`
 - [ ] 地图和数据库位于 `/data`，没有复制其他新车数据
@@ -1893,7 +1881,8 @@ sudo journalctl -u clean-robot-site-gateway.service -n 150 --no-pager
 - [ ] 重启后系统、前端和日志检查通过
 - [ ] 代码、依赖、配置和制品 SHA256 已归档
 - [ ] 无测试 bag、历史发布包和无用大文件
-- [ ] 当前维护 Wi-Fi `shebei` 未被部署流程关闭；UFW 延后变更的链路、网段、回滚和批准已明确记录
+- [ ] 4173 仅绑定本车批准的 `shebei` 管理地址，9090/11311 仅绑定 loopback；当前维护
+  Wi-Fi `shebei` 未被部署流程关闭，UFW 延后变更的链路、网段、回滚和批准已明确记录
 - [ ] 阶段 A–M 均有结果报告，所有停止条件和暂缓项均已关闭
 - [ ] 第三方许可证、安全和 Ubuntu/ROS 生命周期风险已签字确认
 
