@@ -48,6 +48,7 @@
 #include <string>
 #include <map>
 #include <utility>
+#include <vector>
 
 #include <actionlib/server/action_server.h>
 #include <mbf_utility/robot_information.h>
@@ -107,20 +108,43 @@ public:
 
   virtual ~AbstractActionBase()
   {
-    // cleanup threads used on executions
-    // note: cannot call cancelAll, since our mutex is not recursive
-    boost::lock_guard<boost::mutex> guard(slot_map_mtx_);
+    // No execution may outlive the derived action object.  In particular, do
+    // not hold slot_map_mtx_ while joining: run() takes that same mutex for its
+    // final in_use transition.  start_mtx_ prevents a concurrent replacement
+    // from racing this shutdown sequence.
+    boost::lock_guard<boost::mutex> start_guard(start_mtx_);
+    std::vector<boost::thread *> threads_to_join;
+    {
+      boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
+      typename ConcurrencyMap::iterator slot_it = concurrency_slots_.begin();
+      for (; slot_it != concurrency_slots_.end(); ++slot_it)
+      {
+        if (slot_it->second.execution)
+          slot_it->second.execution->cancel();
+        if (slot_it->second.thread_ptr)
+          threads_to_join.push_back(slot_it->second.thread_ptr);
+      }
+    }
+
+    for (boost::thread *thread : threads_to_join)
+    {
+      if (thread->joinable())
+        thread->join();
+    }
+
+    boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
     typename ConcurrencyMap::iterator slot_it = concurrency_slots_.begin();
     for (; slot_it != concurrency_slots_.end(); ++slot_it)
     {
-      // cancel and join all spawned threads.
-      slot_it->second.execution->cancel();
-      if(slot_it->second.thread_ptr->joinable())
-        slot_it->second.thread_ptr->join();
-
-      // unregister and delete
-      threads_.remove_thread(slot_it->second.thread_ptr);
-      delete slot_it->second.thread_ptr;
+      if (slot_it->second.thread_ptr)
+      {
+        // Every pointer is joined above.  A joinable thread object is never
+        // deleted, including the narrow interval after run() clears in_use.
+        threads_.remove_thread(slot_it->second.thread_ptr);
+        delete slot_it->second.thread_ptr;
+        slot_it->second.thread_ptr = NULL;
+      }
+      slot_it->second.in_use = false;
     }
   }
 
@@ -137,24 +161,52 @@ public:
     }
     else
     {
-      boost::lock_guard<boost::mutex> guard(slot_map_mtx_);
-      typename ConcurrencyMap::iterator slot_it = concurrency_slots_.find(slot);
-      if (slot_it != concurrency_slots_.end() && slot_it->second.in_use) {
-        // if there is already a plugin running on the same slot, cancel it
-        slot_it->second.execution->cancel();
-
-        if (slot_it->second.thread_ptr->joinable()) {
-          slot_it->second.thread_ptr->join();
+      // Serialize slot replacement, but release slot_map_mtx_ while joining so
+      // the retiring run() thread can publish its final in_use=false state.
+      boost::lock_guard<boost::mutex> start_guard(start_mtx_);
+      boost::thread *old_thread = NULL;
+      {
+        boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
+        typename ConcurrencyMap::iterator slot_it = concurrency_slots_.find(slot);
+        if (slot_it != concurrency_slots_.end())
+        {
+          if (slot_it->second.in_use && slot_it->second.execution)
+            slot_it->second.execution->cancel();
+          old_thread = slot_it->second.thread_ptr;
         }
       }
 
+      if (old_thread && old_thread->joinable())
+        old_thread->join();
+
+      boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
+      typename ConcurrencyMap::iterator slot_it = concurrency_slots_.find(slot);
       if(slot_it != concurrency_slots_.end())
       {
         // cleanup previous execution; otherwise we will leak threads
-        threads_.remove_thread(concurrency_slots_[slot].thread_ptr);
-        delete concurrency_slots_[slot].thread_ptr;
+        if (slot_it->second.thread_ptr)
+        {
+          // old_thread was joined above. start_mtx_ guarantees that no other
+          // replacement can swap this pointer between the join and deletion.
+          threads_.remove_thread(slot_it->second.thread_ptr);
+          delete slot_it->second.thread_ptr;
+          slot_it->second.thread_ptr = NULL;
+        }
       }
-      else
+
+      // Joining a non-cancelable plugin can take time.  The incoming action
+      // goal may have entered RECALLING while we waited; never accept it after
+      // that cancellation.  The retired slot is already joined and cleaned.
+      if (goal_handle.getGoalStatus().status ==
+          actionlib_msgs::GoalStatus::RECALLING)
+      {
+        if (slot_it != concurrency_slots_.end())
+          slot_it->second.in_use = false;
+        goal_handle.setCanceled();
+        return;
+      }
+
+      if(slot_it == concurrency_slots_.end())
       {
         // create a new map object in order to avoid costly lookups
         // note: currently unchecked
@@ -177,9 +229,19 @@ public:
 
     boost::lock_guard<boost::mutex> guard(slot_map_mtx_);
     typename ConcurrencyMap::iterator slot_it = concurrency_slots_.find(slot);
-    if (slot_it != concurrency_slots_.end())
+    if (slot_it != concurrency_slots_.end() &&
+        slot_it->second.in_use &&
+        slot_it->second.goal_handle == goal_handle)
     {
-      concurrency_slots_[slot].execution->cancel();
+      slot_it->second.execution->cancel();
+    }
+    else
+    {
+      // A delayed cancel callback for a superseded goal must never stop the
+      // newer execution which happens to reuse the same concurrency slot.
+      ROS_DEBUG_STREAM_NAMED(
+          name_, "Ignoring cancel for non-current goal in concurrency slot "
+          << static_cast<unsigned int>(slot));
     }
   }
 
@@ -194,6 +256,10 @@ public:
     ROS_DEBUG_STREAM_NAMED(name_, "Execution completed with goal status "
                            << (int)slot.goal_handle.getGoalStatus().status << ": "<< slot.goal_handle.getGoalStatus().text);
     slot.execution->postRun();
+    // All reads and writes of in_use/thread_ptr are synchronized by the same
+    // map mutex.  The thread object is deleted only after start()/destructor
+    // has joined this function completely.
+    boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
     slot.in_use = false;
   }
 
@@ -212,13 +278,25 @@ public:
   virtual void cancelAll()
   {
     ROS_INFO_STREAM_NAMED(name_, "Cancel all goals for \"" << name_ << "\".");
-    boost::lock_guard<boost::mutex> guard(slot_map_mtx_);
-    typename ConcurrencyMap::iterator iter;
-    for(iter = concurrency_slots_.begin(); iter != concurrency_slots_.end(); ++iter)
+    boost::lock_guard<boost::mutex> start_guard(start_mtx_);
+    std::vector<boost::thread *> threads_to_join;
     {
-      iter->second.execution->cancel();
+      boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
+      typename ConcurrencyMap::iterator iter;
+      for(iter = concurrency_slots_.begin(); iter != concurrency_slots_.end(); ++iter)
+      {
+        if (iter->second.execution)
+          iter->second.execution->cancel();
+        if (iter->second.thread_ptr)
+          threads_to_join.push_back(iter->second.thread_ptr);
+      }
     }
-    threads_.join_all();
+    // Never join with slot_map_mtx_ held; run() needs it to finish.
+    for (boost::thread *thread : threads_to_join)
+    {
+      if (thread->joinable())
+        thread->join();
+    }
   }
 
 protected:
@@ -228,6 +306,10 @@ protected:
   boost::thread_group threads_;
   ConcurrencyMap concurrency_slots_;
 
+  //! Serializes replacement/cleanup while slot_map_mtx_ is released for join.
+  boost::mutex start_mtx_;
+
+  //! Sole mutex protecting ConcurrencySlot::in_use and thread_ptr.
   boost::mutex slot_map_mtx_;
 
 };

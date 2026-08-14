@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 
+#include <base_local_planner/costmap_model.h>
 #include "costmap_2d/footprint.h"
 #include "costmap_2d/inflation_layer.h"
 
@@ -68,6 +69,7 @@ protected:
   float findCircumscribedCost(std::shared_ptr<costmap_2d::Costmap2DROS> costmap);
 
 protected:
+  std::unique_ptr<base_local_planner::CostmapModel> collision_checker_;
   bool consider_footprint_{true};
   float collision_cost_{0};
   float inflation_scale_factor_{0}, inflation_radius_{0};
@@ -83,4 +85,3 @@ protected:
 };
 
 }  // namespace mppi::critics
-

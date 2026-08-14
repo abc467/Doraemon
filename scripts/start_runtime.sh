@@ -161,9 +161,11 @@ RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}"
 RUNTIME_ORBBEC_CAMERA1_USB_PORT="${RUNTIME_ORBBEC_CAMERA1_USB_PORT:-}"
 RUNTIME_ORBBEC_CAMERA2_USB_PORT="${RUNTIME_ORBBEC_CAMERA2_USB_PORT:-}"
 RUNTIME_ORBBEC_CAMERA3_USB_PORT="${RUNTIME_ORBBEC_CAMERA3_USB_PORT:-}"
-RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}"
-DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}"
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-false}"
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-false}"
 RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING="${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING:-${DEFAULT_RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING}}"
+RUNTIME_ENABLE_DEPTH_LEFT_CAM="${RUNTIME_ENABLE_DEPTH_LEFT_CAM:-true}"
+RUNTIME_ENABLE_DEPTH_RIGHT_CAM="${RUNTIME_ENABLE_DEPTH_RIGHT_CAM:-true}"
 RUNTIME_ENABLE_DEPTH_UP_CAM="${RUNTIME_ENABLE_DEPTH_UP_CAM:-false}"
 RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK="${RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK:-${DEFAULT_RUNTIME_PUBLISH_BASE_FOOTPRINT_TO_BASE_LINK}}"
 RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z="${RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z:-${DEFAULT_RUNTIME_BASE_FOOTPRINT_TO_BASE_LINK_Z}}"
@@ -265,9 +267,11 @@ SKIP_PRECISE_DOCKING_IF_STATION_IN_PLACE="${SKIP_PRECISE_DOCKING_IF_STATION_IN_P
 DIRECT_CHARGE_AFTER_PRECISE_DOCKING="${DIRECT_CHARGE_AFTER_PRECISE_DOCKING:-true}"
 CHARGE_VOLTAGE_CONFIRM_ENABLE="${CHARGE_VOLTAGE_CONFIRM_ENABLE:-false}"
 DOCK_SUPPLY_ENABLE_DRAIN="${DOCK_SUPPLY_ENABLE_DRAIN:-true}"
-DOCK_SUPPLY_ENABLE_REFILL="${DOCK_SUPPLY_ENABLE_REFILL:-false}"
+DOCK_SUPPLY_ENABLE_REFILL="${DOCK_SUPPLY_ENABLE_REFILL:-true}"
 DOCK_SUPPLY_DRAIN_TIMEOUT_S="${DOCK_SUPPLY_DRAIN_TIMEOUT_S:-600.0}"
-DOCK_SUPPLY_DRAIN_SETTLE_S="${DOCK_SUPPLY_DRAIN_SETTLE_S:-30.0}"
+DOCK_SUPPLY_TARGET_CLEAN_LEVEL="${DOCK_SUPPLY_TARGET_CLEAN_LEVEL:-74}"
+DOCK_SUPPLY_REFILL_TIMEOUT_S="${DOCK_SUPPLY_REFILL_TIMEOUT_S:-600.0}"
+DOCK_SUPPLY_REFILL_SETTLE_S="${DOCK_SUPPLY_REFILL_SETTLE_S:-20.0}"
 DOCK_SUPPLY_COMBINED_STATUS_WAIT_S="${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S:-5.0}"
 DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S="${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S:-3.0}"
 AUTO_CHARGE_TARGET_SOC="${AUTO_CHARGE_TARGET_SOC:-${TARGET_SOC:-0.95}}"
@@ -348,9 +352,11 @@ Environment highlights:
   DOCK_POSE_SCORE_THRESH=0.00012
   DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
   DOCK_SUPPLY_ENABLE_DRAIN=true
-  DOCK_SUPPLY_ENABLE_REFILL=false
+  DOCK_SUPPLY_ENABLE_REFILL=true
   DOCK_SUPPLY_DRAIN_TIMEOUT_S=600.0
-  DOCK_SUPPLY_DRAIN_SETTLE_S=30.0
+  DOCK_SUPPLY_TARGET_CLEAN_LEVEL=74
+  DOCK_SUPPLY_REFILL_TIMEOUT_S=600.0
+  DOCK_SUPPLY_REFILL_SETTLE_S=20.0
   AUTO_CHARGE_TARGET_SOC=0.95
   AUTO_CHARGE_LOW_SOC=0.15
   AUTO_CHARGE_RESUME_SOC=0.95
@@ -483,6 +489,10 @@ validate_commercial_vehicle_identity() {
   normalize_boolean_variable RUNTIME_START_DEPTH_CAMERAS
   normalize_boolean_variable RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS
   normalize_boolean_variable DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES
+  normalize_boolean_variable RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING
+  normalize_boolean_variable RUNTIME_ENABLE_DEPTH_LEFT_CAM
+  normalize_boolean_variable RUNTIME_ENABLE_DEPTH_RIGHT_CAM
+  normalize_boolean_variable RUNTIME_ENABLE_DEPTH_UP_CAM
   normalize_boolean_variable DORAEMON_NO_ACTION_ACCEPTANCE
   normalize_boolean_variable DORAEMON_ACTION_TEST_APPROVED
   normalize_boolean_variable ENABLE_MANUAL_DRIVE_SERVICE
@@ -557,25 +567,18 @@ validate_commercial_vehicle_identity() {
     fi
   fi
 
-  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "true" ]]; then
-    echo "[ERROR] commercial runtime requires RUNTIME_START_DEPTH_CAMERAS=true" >&2
-    return 1
-  fi
-  if [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" != "true" || \
-        "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" != "true" ]]; then
-    echo "[ERROR] enabled depth cameras require both topic and identity commercial gates" >&2
-    return 1
-  fi
-
-  if ! commercial_validate_required_orbbec_identities \
-    "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" \
-    "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" \
-    "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" \
-    "${RUNTIME_ORBBEC_CAMERA1_USB_PORT}" \
-    "${RUNTIME_ORBBEC_CAMERA2_USB_PORT}" \
-    "${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"; then
-    echo "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique" >&2
-    return 1
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" == "true" && \
+        "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == "true" ]]; then
+    if ! commercial_validate_required_orbbec_identities \
+      "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" \
+      "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" \
+      "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" \
+      "${RUNTIME_ORBBEC_CAMERA1_USB_PORT}" \
+      "${RUNTIME_ORBBEC_CAMERA2_USB_PORT}" \
+      "${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"; then
+      echo "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique" >&2
+      return 1
+    fi
   fi
 
   local extra_args=()
@@ -871,10 +874,10 @@ log_effective_runtime_parameters() {
 
   runtime_log_status "station bridge: ${STATION_SERVER_IP}:${STATION_SERVER_PORT}"
   runtime_log_status "no-action acceptance: ${DORAEMON_NO_ACTION_ACCEPTANCE} action_test_approved=${DORAEMON_ACTION_TEST_APPROVED} manual_drive=${ENABLE_MANUAL_DRIVE_SERVICE} mcore_sender=${START_MCORE_VELOCITY_SENDER} cmd_vel=${MCORE_ENABLE_CMD_VEL} station_bridge=${START_STATION_BRIDGE} dock_supply=${START_DOCK_SUPPLY_MANAGER} docking_stack=${START_DOCKING_STACK} task_auto_charge=${TASK_AUTO_CHARGE_ENABLE} monitor=${AUTO_CHARGE_MONITOR_ENABLE} gateway_auto_start=${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE}"
-  runtime_log_status "Orbbec identities: left=${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA1_USB_PORT} right=${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA2_USB_PORT} front=${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA3_USB_PORT} require_topics=${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}"
+  runtime_log_status "Orbbec: start=${RUNTIME_START_DEPTH_CAMERAS} require_topics=${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS} require_identities=${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES} obstacle_tracking=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} obstacle_sources(left=${RUNTIME_ENABLE_DEPTH_LEFT_CAM} right=${RUNTIME_ENABLE_DEPTH_RIGHT_CAM} front=${RUNTIME_ENABLE_DEPTH_UP_CAM}) left=${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA1_USB_PORT} right=${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA2_USB_PORT} front=${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"
   runtime_log_status "dock tuning: target=${DOCK_TARGET_DIST} xy_tolerance=${DOCK_XY_TOLERANCE} yaw_tolerance=${DOCK_YAW_TOLERANCE} threshold=${dock_threshold} score_thresh=${DOCK_POSE_SCORE_THRESH}"
   runtime_log_status "auto charge: task=${TASK_AUTO_CHARGE_ENABLE} executor=${EXECUTOR_AUTO_CHARGE_ENABLE} low=${AUTO_CHARGE_LOW_SOC} resume=${AUTO_CHARGE_RESUME_SOC} rearm=${AUTO_CHARGE_REARM_SOC} target=${AUTO_CHARGE_TARGET_SOC}"
-  runtime_log_status "dock supply: post_charge_drain=${DOCK_SUPPLY_ENABLE_DRAIN} refill=${DOCK_SUPPLY_ENABLE_REFILL} drain_timeout_s=${DOCK_SUPPLY_DRAIN_TIMEOUT_S} drain_settle_s=${DOCK_SUPPLY_DRAIN_SETTLE_S} combined_status_wait_s=${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S} combined_status_stale_s=${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
+  runtime_log_status "dock supply: post_charge_drain=${DOCK_SUPPLY_ENABLE_DRAIN} refill=${DOCK_SUPPLY_ENABLE_REFILL} drain_timeout_s=${DOCK_SUPPLY_DRAIN_TIMEOUT_S} clean_stop_above=${DOCK_SUPPLY_TARGET_CLEAN_LEVEL}% refill_timeout_s=${DOCK_SUPPLY_REFILL_TIMEOUT_S} refill_settle_s=${DOCK_SUPPLY_REFILL_SETTLE_S} combined_status_wait_s=${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S} combined_status_stale_s=${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
   if [[ "${AUTO_CHARGE_MONITOR_RECOVERY_STRATEGY}" == "redock" ]]; then
     runtime_log_status "charge recovery monitor: enable=${AUTO_CHARGE_MONITOR_ENABLE} recovery=${AUTO_CHARGE_MONITOR_RECOVERY_ENABLE} strategy=redock timeout_s=${AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S} retreat=/dock_supply/recovery_retreat attempts=${AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS}"
   else
@@ -1106,7 +1109,9 @@ start_runtime_session() {
       dock_supply_enable_drain:="${DOCK_SUPPLY_ENABLE_DRAIN}"
       dock_supply_enable_refill:="${DOCK_SUPPLY_ENABLE_REFILL}"
       dock_supply_drain_timeout_s:="${DOCK_SUPPLY_DRAIN_TIMEOUT_S}"
-      dock_supply_drain_settle_s:="${DOCK_SUPPLY_DRAIN_SETTLE_S}"
+      dock_supply_target_clean_level:="${DOCK_SUPPLY_TARGET_CLEAN_LEVEL}"
+      dock_supply_refill_timeout_s:="${DOCK_SUPPLY_REFILL_TIMEOUT_S}"
+      dock_supply_refill_settle_s:="${DOCK_SUPPLY_REFILL_SETTLE_S}"
       dock_supply_combined_status_wait_s:="${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S}"
       dock_supply_combined_status_stale_timeout_s:="${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
       target_soc:="${AUTO_CHARGE_TARGET_SOC}"
@@ -1131,7 +1136,7 @@ start_runtime_session() {
   else
     runtime_log_status "[INFO] skip legacy hardware bridges: all hardware bridge switches are false"
   fi
-  runtime_tmux_window "${TMUX_SESSION}" nav "exec roslaunch cleanrobot mbf_nav.launch start_map_asset_service:=false enable_depth_obstacle_tracking:=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} enable_depth_up_cam:=${RUNTIME_ENABLE_DEPTH_UP_CAM} plan_db_path:=${PLAN_DB_PATH} ops_db_path:=${OPS_DB_PATH} maps_root:=${MAPS_ROOT} external_maps_root:=${EXTERNAL_MAPS_ROOT} robot_id:=${ROBOT_ID}"
+  runtime_tmux_window "${TMUX_SESSION}" nav "exec roslaunch cleanrobot mbf_nav.launch start_map_asset_service:=false enable_depth_obstacle_tracking:=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} enable_depth_left_cam:=${RUNTIME_ENABLE_DEPTH_LEFT_CAM} enable_depth_right_cam:=${RUNTIME_ENABLE_DEPTH_RIGHT_CAM} enable_depth_up_cam:=${RUNTIME_ENABLE_DEPTH_UP_CAM} plan_db_path:=${PLAN_DB_PATH} ops_db_path:=${OPS_DB_PATH} maps_root:=${MAPS_ROOT} external_maps_root:=${EXTERNAL_MAPS_ROOT} robot_id:=${ROBOT_ID}"
   local task_cmd_words=(
     exec
     roslaunch
@@ -1373,18 +1378,16 @@ main() {
       runtime_wait_for_topic /gemini_cf/depth/points 30 5
       runtime_wait_for_topic /gemini_nj/depth/points 30 5
       runtime_wait_for_topic /gemini_front/depth/points 30 5
-      runtime_require_orbbec_serial gemini_cf "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}"
-      runtime_require_orbbec_serial gemini_nj "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}"
-      runtime_require_orbbec_serial gemini_front "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}"
+      if [[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == "true" ]]; then
+        runtime_require_orbbec_serial gemini_cf "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}"
+        runtime_require_orbbec_serial gemini_nj "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}"
+        runtime_require_orbbec_serial gemini_front "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}"
+      else
+        runtime_log_status "[SKIP] 深度相机身份复核已关闭"
+      fi
       runtime_log_status "[OK] 三台深度相机图像与点云均就绪"
     else
-      runtime_log_status "检查三台奥比中光深度相机（仅提示，不阻塞启动）"
-      runtime_warn_if_optional_topic_missing /gemini_cf/depth/image_raw "左奥比中光深度图像" 8 3
-      runtime_warn_if_optional_topic_missing /gemini_nj/depth/image_raw "右奥比中光深度图像" 8 3
-      runtime_warn_if_optional_topic_missing /gemini_front/depth/image_raw "前低障奥比中光深度图像" 8 3
-      runtime_warn_if_optional_topic_missing /gemini_cf/depth/points "左奥比中光点云" 8 3
-      runtime_warn_if_optional_topic_missing /gemini_nj/depth/points "右奥比中光点云" 8 3
-      runtime_warn_if_optional_topic_missing /gemini_front/depth/points "前低障奥比中光点云" 8 3
+      runtime_log_status "[WARN] 跳过深度相机话题就绪检查；相机缺失或异常不阻塞整机启动"
     fi
   else
     runtime_log_status "[INFO] skip depth camera checks: RUNTIME_START_DEPTH_CAMERAS=${RUNTIME_START_DEPTH_CAMERAS}"
@@ -1438,10 +1441,18 @@ main() {
 
   if [[ "${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING}" == "true" ]]; then
     runtime_log_status "检查深度避障链（仅提示，不阻塞启动）"
-    runtime_warn_if_optional_node_missing /left/gs_node "左侧深度避障节点" 8
-    runtime_warn_if_optional_node_missing /right/gs_node "右侧深度避障节点" 8
-    runtime_warn_if_optional_topic_missing /left/obstacle_2d "左侧深度障碍输出" 8 3
-    runtime_warn_if_optional_topic_missing /right/obstacle_2d "右侧深度障碍输出" 8 3
+    if [[ "${RUNTIME_ENABLE_DEPTH_LEFT_CAM}" == "true" ]]; then
+      runtime_warn_if_optional_node_missing /left/gs_node "左侧深度避障节点" 8
+      runtime_warn_if_optional_topic_missing /left/obstacle_2d "左侧深度障碍输出" 8 3
+    fi
+    if [[ "${RUNTIME_ENABLE_DEPTH_RIGHT_CAM}" == "true" ]]; then
+      runtime_warn_if_optional_node_missing /right/gs_node "右侧深度避障节点" 8
+      runtime_warn_if_optional_topic_missing /right/obstacle_2d "右侧深度障碍输出" 8 3
+    fi
+    if [[ "${RUNTIME_ENABLE_DEPTH_UP_CAM}" == "true" ]]; then
+      runtime_warn_if_optional_node_missing /up/gs_node "前向深度避障节点" 8
+      runtime_warn_if_optional_topic_missing /up/obstacle_2d "前向深度障碍输出" 8 3
+    fi
     runtime_log_status "[INFO] 若深度避障链未就绪，系统仍可启动；是否启用深度避障请以后续现场状态为准"
   else
     runtime_log_status "[INFO] skip depth obstacle checks: RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING}"

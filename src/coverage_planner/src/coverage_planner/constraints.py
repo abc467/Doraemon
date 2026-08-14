@@ -526,6 +526,51 @@ def compile_map_constraints(
     )
 
 
+def compile_navigation_map_constraints(
+    *,
+    map_id: str,
+    map_md5: str,
+    constraint_version: str,
+    no_go_areas: Sequence[Dict[str, Any]],
+    virtual_walls: Sequence[Dict[str, Any]],
+    default_virtual_wall_buffer_m: float = DEFAULT_VIRTUAL_WALL_BUFFER_M,
+    prec: int = 3,
+) -> CompiledMapConstraints:
+    """Compile the hard navigation view of persistent map constraints.
+
+    No-go polygons retain their stored/raw geometry. Coverage-planning buffer
+    metadata is intentionally removed so it can never be promoted to a lethal
+    costmap boundary by this API. Virtual walls still require their configured
+    width because their stored representation is a center polyline.
+    """
+
+    raw_no_go_areas: List[Dict[str, Any]] = []
+    planning_buffer_fields = (
+        "buffer_m",
+        "buffer",
+        "long_edge_normal_buffer_m",
+        "short_edge_normal_buffer_m",
+    )
+    for area in no_go_areas or []:
+        raw_area = dict(area)
+        for field in planning_buffer_fields:
+            raw_area.pop(field, None)
+        raw_no_go_areas.append(raw_area)
+
+    return compile_map_constraints(
+        map_id=map_id,
+        map_md5=map_md5,
+        constraint_version=constraint_version,
+        no_go_areas=raw_no_go_areas,
+        virtual_walls=virtual_walls,
+        default_buffer_m=float(default_virtual_wall_buffer_m),
+        default_no_go_buffer_m=0.0,
+        default_no_go_long_edge_normal_buffer_m=None,
+        default_no_go_short_edge_normal_buffer_m=None,
+        prec=prec,
+    )
+
+
 def compile_zone_constraints(
     *,
     zone_outer: Sequence[Sequence[float]],

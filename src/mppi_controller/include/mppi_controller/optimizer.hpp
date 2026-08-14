@@ -5,11 +5,13 @@
 #include <cstddef>
 #include <string>
 #include <memory>
+#include <tuple>
 
 #include "costmap_2d/costmap_2d_ros.h"
 #include "geometry_msgs/PoseStamped.h"
 #include "geometry_msgs/TwistStamped.h"
 #include "nav_msgs/Path.h"
+#include "pluginlib/class_loader.hpp"
 
 #include "mppi_controller/models/optimizer_settings.hpp"
 #include "mppi_controller/motion_models.hpp"
@@ -19,6 +21,7 @@
 #include "mppi_controller/models/path.hpp"
 #include "mppi_controller/tools/noise_generator.hpp"
 #include "mppi_controller/tools/utils.hpp"
+#include "mppi_controller/optimal_trajectory_validator.hpp"
 
 namespace mppi
 {
@@ -58,7 +61,7 @@ public:
    * @param goal Given Goal pose to reach.
    * @return TwistStamped of the MPPI control
    */
-  geometry_msgs::TwistStamped evalControl(
+  std::tuple<geometry_msgs::TwistStamped, Eigen::ArrayXXf> evalControl(
     const geometry_msgs::PoseStamped & robot_pose,
     const geometry_msgs::Twist & robot_speed, const nav_msgs::Path & plan,
     const geometry_msgs::Pose & goal);
@@ -76,7 +79,7 @@ public:
   Eigen::ArrayXXf getOptimizedTrajectory();
 
   /**
-   * @brief (ROS1中不使用) Set the maximum speed based on the speed limits callback
+   * @brief Set the maximum speed from the ROS1 adapter's runtime limit topic
    * @param speed_limit Limit of the speed for use
    * @param percentage Whether the speed limit is absolute or relative
    */
@@ -84,8 +87,16 @@ public:
 
   /**
    * @brief Reset the optimization problem to initial conditions
+   * @param reset_dynamic_speed_limits Restore configured base limits. Fallback
+   *        retries pass false so an active runtime safety limit is preserved.
    */
-  void reset();
+  void reset(bool reset_dynamic_speed_limits = true);
+
+  /** Whether runtime constraints differ from the configured base limits. */
+  bool isSpeedLimitActive() const;
+
+  /** Read-only settings snapshot used to validate transactional reloads. */
+  const models::OptimizerSettings & getSettings() const {return settings_;}
 
 protected:
   /**
@@ -126,10 +137,21 @@ protected:
    */
   void generateNoisedTrajectories();
 
+  /** Keep the sampling distribution dynamically reachable between cycles. */
+  void applyControlSequenceInterIterationConstraints();
+
   /**
    * @brief 对控制序列应用硬车辆约束
    */
   void applyControlSequenceConstraints();
+
+  /**
+   * @brief Continuously validate the selected, post-filter trajectory with the
+   *        filled robot footprint. This is the ROS1 equivalent of Nav2's
+   *        OptimalTrajectoryValidator safety gate.
+   */
+  ValidationResult validateOptimizedTrajectory(
+    const Eigen::ArrayXXf & trajectory, bool emit_logs = true) const;
 
   /**
    * @brief 根据当前速度以及控制速度序列，更新state中的速度状态
@@ -202,6 +224,9 @@ protected:
    */
   bool fallback(bool fail);
 
+  /** Reset all per-attempt critic state before a fallback optimization. */
+  void resetCriticStateForRetry();
+
 protected:
   ros::NodeHandle nh_;
   std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros_;
@@ -212,6 +237,9 @@ protected:
 
   CriticManager critic_manager_;
   NoiseGenerator noise_generator_;
+  std::unique_ptr<pluginlib::ClassLoader<OptimalTrajectoryValidator>> validator_loader_;
+  OptimalTrajectoryValidator::Ptr trajectory_validator_;
+  bool trajectory_validation_enabled_{true};
 
   models::OptimizerSettings settings_;
 
@@ -221,6 +249,7 @@ protected:
   models::Trajectories generated_trajectories_;
   models::Path path_;
   geometry_msgs::Pose goal_;
+  geometry_msgs::Twist last_command_vel_;
   Eigen::ArrayXf costs_;
 
   bool timing_diagnostics_{false};
@@ -228,6 +257,7 @@ protected:
   double rollout_time_total_ms_{0.0};
   double critics_time_total_ms_{0.0};
   double update_time_total_ms_{0.0};
+  size_t fallback_counter_{0u};
 
   CriticData critics_data_ = {
     state_, generated_trajectories_, path_, goal_,

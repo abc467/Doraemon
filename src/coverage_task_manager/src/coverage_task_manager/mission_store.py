@@ -125,6 +125,9 @@ class MissionStore:
     def update_state(self, run_id: str, state: str, *, reason: str = "", set_end: bool = False):
         self._ops.update_run_state(str(run_id or ""), str(state or ""), reason=str(reason or ""), set_end=bool(set_end))
 
+    def get_latest_error_event(self, run_id: str):
+        return self._ops.get_latest_run_error_event(str(run_id or ""))
+
     def finish(self, run_id: str, state: str, *, reason: str = ""):
         self._ops.finish_run(str(run_id or ""), str(state or ""), reason=str(reason or ""))
 

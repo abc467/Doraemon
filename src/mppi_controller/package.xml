@@ -2,36 +2,58 @@
 <package format="2">
   <name>mppi_controller</name>
   <version>0.0.0</version>
-  <description>MPPI local planner and critic plugin package for the cleanrobot navigation stack.</description>
+  <description>ROS1/MBF adapter of the Nav2 MPPI controller algorithms for the cleanrobot navigation stack.</description>
   <maintainer email="sunnybaer@todo.todo">sunnybaer</maintainer>
-  <license>TODO</license>
+  <license>Apache-2.0</license>
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>base_local_planner</build_depend>
+  <build_depend>angles</build_depend>
   <build_depend>costmap_2d</build_depend>
-  <build_depend>dynamic_reconfigure</build_depend>
+  <build_depend>diagnostic_msgs</build_depend>
   <build_depend>geometry_msgs</build_depend>
+  <build_depend>mbf_abstract_core</build_depend>
   <build_depend>nav_core</build_depend>
   <build_depend>nav_msgs</build_depend>
+  <build_depend>pluginlib</build_depend>
   <build_depend>roscpp</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>std_srvs</build_depend>
   <build_depend>tf</build_depend>
+  <build_depend>tf2</build_depend>
+  <build_depend>tf2_geometry_msgs</build_depend>
   <build_export_depend>base_local_planner</build_export_depend>
+  <build_export_depend>angles</build_export_depend>
   <build_export_depend>costmap_2d</build_export_depend>
-  <build_export_depend>dynamic_reconfigure</build_export_depend>
+  <build_export_depend>diagnostic_msgs</build_export_depend>
   <build_export_depend>geometry_msgs</build_export_depend>
+  <build_export_depend>mbf_abstract_core</build_export_depend>
   <build_export_depend>nav_core</build_export_depend>
   <build_export_depend>nav_msgs</build_export_depend>
+  <build_export_depend>pluginlib</build_export_depend>
   <build_export_depend>roscpp</build_export_depend>
+  <build_export_depend>std_msgs</build_export_depend>
+  <build_export_depend>std_srvs</build_export_depend>
   <build_export_depend>tf</build_export_depend>
+  <build_export_depend>tf2</build_export_depend>
+  <build_export_depend>tf2_geometry_msgs</build_export_depend>
   <exec_depend>base_local_planner</exec_depend>
+  <exec_depend>angles</exec_depend>
   <exec_depend>costmap_2d</exec_depend>
-  <exec_depend>dynamic_reconfigure</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>mbf_abstract_core</exec_depend>
   <exec_depend>nav_core</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>pluginlib</exec_depend>
   <exec_depend>roscpp</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
   <exec_depend>tf</exec_depend>
+  <exec_depend>tf2</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
   <export>
     <nav_core plugin="${prefix}/lp_plugin.xml" />
     <mppi_controller plugin="${prefix}/critics.xml" />
+    <mppi_controller plugin="${prefix}/validators.xml" />
   </export>
 </package>

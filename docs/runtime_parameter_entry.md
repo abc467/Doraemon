@@ -61,17 +61,21 @@ saved/active/runtime 的 `map_name`、`map_id`、`map_md5` 全量一致，并完
 任务层自动开关关闭时，任务完成回桩和充满后的重复循环同样不会自动执行。
 
 `DOCK_SUPPLY_ENABLE_DRAIN=true`
-`DOCK_SUPPLY_ENABLE_REFILL=false`
+`DOCK_SUPPLY_ENABLE_REFILL=true`
 `DOCK_SUPPLY_DRAIN_TIMEOUT_S=600.0`
-`DOCK_SUPPLY_DRAIN_SETTLE_S=30.0`
+`DOCK_SUPPLY_TARGET_CLEAN_LEVEL=74`
+`DOCK_SUPPLY_REFILL_TIMEOUT_S=600.0`
+`DOCK_SUPPLY_REFILL_SETTLE_S=20.0`
 `DOCK_SUPPLY_COMBINED_STATUS_WAIT_S=5.0`
 `DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S=3.0`
 
 精对接补给流程当前为：充电达到目标 SOC、关闭车体和桩侧充电、排污，收到新鲜的
-`/combined_status.sewage_level == 0` 后立即关闭桩侧排污和车体污水阀，原地静止
-30 秒，随后结束补给并按 `2.2m / 0.10m/s` 进入离桩流程。加清水功能关闭。
+`/combined_status.sewage_level == 0` 后立即关闭桩侧排污和车体污水阀，然后开始加清水。
+收到新鲜的 `/combined_status.clean_level > 74` 后立即关闭桩侧加水和车体清水阀，
+原地静止 20 秒，随后结束补给并按 `2.2m / 0.10m/s` 进入离桩流程。
 污水数据缺失、失联或 600 秒内未降到 0 时，流程关闭排污输出并以明确故障结束，
-不会把未知污水值当作排空成功。
+不会把未知污水值当作排空成功。清水数据缺失、失联或 600 秒内未超过 74 时，
+流程关闭加水输出并以明确故障结束。
 
 `AUTO_CHARGE_MONITOR_RECOVERY_TIMEOUT_S=180.0`
 `AUTO_CHARGE_MONITOR_RECOVERY_MAX_ATTEMPTS=2`

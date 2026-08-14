@@ -67,6 +67,17 @@ def main():
     pause_hold_hz = rospy.get_param("~pause_hold_hz", 10.0)
     hard_stop_s = rospy.get_param("~hard_stop_s", 0.6)
     connect_skip_dist = rospy.get_param("~connect_skip_dist", 0.35)
+    connect_skip_yaw_rad = rospy.get_param("~connect_skip_yaw_rad", 0.25)
+    connect_handoff_dist_m = rospy.get_param("~connect_handoff_dist_m", 0.40)
+    connect_handoff_yaw_rad = rospy.get_param("~connect_handoff_yaw_rad", 0.40)
+    connect_timeout_base_s = rospy.get_param("~connect_timeout_base_s", 240.0)
+    connect_timeout_per_meter_s = rospy.get_param("~connect_timeout_per_meter_s", 20.0)
+    connect_no_progress_timeout_s = rospy.get_param("~connect_no_progress_timeout_s", 210.0)
+    follow_timeout_base_s = rospy.get_param("~follow_timeout_base_s", 60.0)
+    follow_timeout_per_meter_s = rospy.get_param("~follow_timeout_per_meter_s", 20.0)
+    follow_no_progress_timeout_s = rospy.get_param("~follow_no_progress_timeout_s", 45.0)
+    navigation_progress_dist_m = rospy.get_param("~navigation_progress_dist_m", 0.03)
+    navigation_progress_yaw_rad = rospy.get_param("~navigation_progress_yaw_rad", 0.08)
 
     # retry / recovery params
     connect_retry_max = rospy.get_param("~connect_retry_max", 2)
@@ -201,6 +212,17 @@ def main():
         pause_hold_hz=pause_hold_hz,
         hard_stop_s=hard_stop_s,
         connect_skip_dist=connect_skip_dist,
+        connect_skip_yaw_rad=float(connect_skip_yaw_rad),
+        connect_handoff_dist_m=float(connect_handoff_dist_m),
+        connect_handoff_yaw_rad=float(connect_handoff_yaw_rad),
+        connect_timeout_base_s=float(connect_timeout_base_s),
+        connect_timeout_per_meter_s=float(connect_timeout_per_meter_s),
+        connect_no_progress_timeout_s=float(connect_no_progress_timeout_s),
+        follow_timeout_base_s=float(follow_timeout_base_s),
+        follow_timeout_per_meter_s=float(follow_timeout_per_meter_s),
+        follow_no_progress_timeout_s=float(follow_no_progress_timeout_s),
+        navigation_progress_dist_m=float(navigation_progress_dist_m),
+        navigation_progress_yaw_rad=float(navigation_progress_yaw_rad),
         resume_backtrack_m=resume_backtrack_m,
         resume_accept_dist=resume_accept_dist,
         resume_finish_thresh_m=resume_finish_thresh_m,

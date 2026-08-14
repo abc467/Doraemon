@@ -43,11 +43,98 @@
 namespace mbf_abstract_nav
 {
 
+namespace
+{
+
+mbf_abstract_core::PlanExecutionContext planContext(
+    const mbf_msgs::ExePathGoal &goal)
+{
+  mbf_abstract_core::PlanExecutionContext context;
+  context.execution_epoch = goal.execution_epoch;
+  context.update_mode =
+      goal.plan_update_mode == mbf_msgs::ExePathGoal::CONTINUOUS_UPDATE ?
+      mbf_abstract_core::PlanExecutionContext::UpdateMode::ContinuousUpdate :
+      mbf_abstract_core::PlanExecutionContext::UpdateMode::FreshExecution;
+  context.has_requested_target = goal.has_requested_target;
+  context.requested_target = goal.requested_target;
+  return context;
+}
+
+}  // namespace
+
 ControllerAction::ControllerAction(
     const std::string &action_name,
     const mbf_utility::RobotInformation &robot_info)
     : AbstractActionBase(action_name, robot_info)
 {
+}
+
+ControllerAction::~ControllerAction()
+{
+  // Join executions before goal_mtx_/goal_pose_ are destroyed. The base
+  // destructor performs pointer cleanup after this derived state is safe.
+  cancelAll();
+}
+
+bool ControllerAction::tryUpdateContinuousPlan(
+    const mbf_msgs::ExePathGoal &goal,
+    std::string &reason)
+{
+  reason.clear();
+  if (goal.plan_update_mode != mbf_msgs::ExePathGoal::CONTINUOUS_UPDATE)
+  {
+    reason = "plan is not marked as a continuous update";
+    return false;
+  }
+  if (goal.path.poses.empty())
+  {
+    reason = "continuous plan is empty";
+    return false;
+  }
+
+  const uint8_t slot = goal.concurrency_slot;
+  boost::lock_guard<boost::mutex> slot_guard(slot_map_mtx_);
+  typename ConcurrencyMap::iterator slot_it = concurrency_slots_.find(slot);
+  if (slot_it == concurrency_slots_.end() || !slot_it->second.in_use ||
+      !slot_it->second.execution)
+  {
+    reason = "controller execution is no longer active";
+    return false;
+  }
+
+  boost::lock_guard<boost::mutex> goal_guard(goal_mtx_);
+  const bool same_controller =
+      slot_it->second.execution->getName() == goal.controller ||
+      goal.controller.empty();
+  if (!same_controller)
+  {
+    reason = "continuous plan targets a different controller";
+    return false;
+  }
+  if (slot_it->second.execution->getPlanExecutionEpoch() !=
+      goal.execution_epoch)
+  {
+    reason = "continuous plan belongs to a stale execution epoch";
+    return false;
+  }
+
+  if (!slot_it->second.execution->trySetNewPlanWhileActive(
+          goal.path.poses,
+          goal.tolerance_from_action,
+          goal.dist_tolerance,
+          goal.angle_tolerance,
+          planContext(goal)))
+  {
+    // The state admission and plan handoff are atomic inside the execution.
+    // Keep the existing action handle untouched: it will publish the real
+    // success/failure which raced this refresh.
+    reason = "controller reached a terminal state during refresh admission";
+    return false;
+  }
+
+  goal_pose_ = goal.path.poses.back();
+  reason = "continuous plan installed without replacing the action goal";
+  return true;
 }
 
 void ControllerAction::start(
@@ -64,33 +151,88 @@ void ControllerAction::start(
   uint8_t slot = goal_handle.getGoal()->concurrency_slot;
 
   bool update_plan = false;
+  bool reject_stale_continuous_update = false;
+  bool reject_empty_continuous_update = false;
   slot_map_mtx_.lock();
   std::map<uint8_t, ConcurrencySlot>::iterator slot_it = concurrency_slots_.find(slot);
   if(slot_it != concurrency_slots_.end() && slot_it->second.in_use)
   {
     boost::lock_guard<boost::mutex> goal_guard(goal_mtx_);
-    if(slot_it->second.execution->getName() == goal_handle.getGoal()->controller ||
-       goal_handle.getGoal()->controller.empty())
+    const auto &incoming_goal = *goal_handle.getGoal();
+    const bool same_controller =
+        slot_it->second.execution->getName() == incoming_goal.controller ||
+        incoming_goal.controller.empty();
+    const bool continuous_update =
+        incoming_goal.plan_update_mode ==
+        mbf_msgs::ExePathGoal::CONTINUOUS_UPDATE;
+    const bool same_epoch =
+        slot_it->second.execution->getPlanExecutionEpoch() ==
+        incoming_goal.execution_epoch;
+    if (continuous_update && incoming_goal.path.poses.empty())
     {
-      update_plan = true;
+      reject_empty_continuous_update = true;
+    }
+    else if(same_controller && continuous_update && same_epoch)
+    {
       // Goal requests to run the same controller on the same concurrency slot already in use:
       // we update the goal handle and pass the new plan and tolerances from the action to the
       // execution without stopping it
       execution_ptr = slot_it->second.execution;
-      execution_ptr->setNewPlan(goal_handle.getGoal()->path.poses,
-                                goal_handle.getGoal()->tolerance_from_action,
-                                goal_handle.getGoal()->dist_tolerance,
-                                goal_handle.getGoal()->angle_tolerance);
-      // Update also goal pose, so the feedback remains consistent
-      goal_pose_ = goal_handle.getGoal()->path.poses.back();
-      mbf_msgs::ExePathResult result;
-      fillExePathResult(mbf_msgs::ExePathResult::CANCELED, "Goal preempted by a new plan", result);
-      concurrency_slots_[slot].goal_handle.setCanceled(result, result.message);
-      concurrency_slots_[slot].goal_handle = goal_handle;
-      concurrency_slots_[slot].goal_handle.setAccepted();
+      update_plan = execution_ptr->trySetNewPlanWhileActive(
+          incoming_goal.path.poses,
+          incoming_goal.tolerance_from_action,
+          incoming_goal.dist_tolerance,
+          incoming_goal.angle_tolerance,
+          planContext(incoming_goal));
+      if (update_plan)
+      {
+        // Update also goal pose, so the feedback remains consistent
+        goal_pose_ = incoming_goal.path.poses.back();
+        mbf_msgs::ExePathResult result;
+        fillExePathResult(mbf_msgs::ExePathResult::CANCELED, "Goal preempted by a new plan", result);
+        concurrency_slots_[slot].goal_handle.setCanceled(result, result.message);
+        concurrency_slots_[slot].goal_handle = goal_handle;
+        concurrency_slots_[slot].goal_handle.setAccepted();
+      }
+      else
+      {
+        // in_use remains true until the action thread exits.  Do not attach a
+        // new action goal to an execution which has already entered a terminal
+        // state during that window.
+        reject_stale_continuous_update = true;
+      }
+    }
+    else if (continuous_update)
+    {
+      // Never let a delayed periodic callback preempt a newer controller
+      // execution. Fresh plans intentionally fall through to the parent,
+      // which cancels and joins the old execution before starting the new one.
+      reject_stale_continuous_update = true;
     }
   }
   slot_map_mtx_.unlock();
+  if(reject_empty_continuous_update)
+  {
+    mbf_msgs::ExePathResult result;
+    fillExePathResult(
+        mbf_msgs::ExePathResult::INVALID_PATH,
+        "Empty continuous plan update rejected", result);
+    goal_handle.setAborted(result, result.message);
+    ROS_ERROR_STREAM_NAMED(name_, result.message);
+    return;
+  }
+  if(reject_stale_continuous_update)
+  {
+    mbf_msgs::ExePathResult result;
+    fillExePathResult(
+        mbf_msgs::ExePathResult::CANCELED,
+        "Stale continuous plan update ignored", result);
+    goal_handle.setCanceled(result, result.message);
+    ROS_WARN_STREAM_NAMED(
+        name_, "Ignored stale continuous plan update for epoch "
+        << goal_handle.getGoal()->execution_epoch);
+    return;
+  }
   if(!update_plan)
   {
     // Otherwise run parent version of this method
@@ -185,7 +327,9 @@ void ControllerAction::runImpl(GoalHandle &goal_handle, AbstractControllerExecut
     switch (state_moving_input)
     {
       case AbstractControllerExecution::INITIALIZED:
-        execution.setNewPlan(plan, goal.tolerance_from_action, goal.dist_tolerance, goal.angle_tolerance);
+        execution.setNewPlan(
+            plan, goal.tolerance_from_action, goal.dist_tolerance,
+            goal.angle_tolerance, planContext(goal));
         execution.start();
         break;
 
@@ -212,10 +356,15 @@ void ControllerAction::runImpl(GoalHandle &goal_handle, AbstractControllerExecut
         if (execution.isPatienceExceeded())
         {
           ROS_INFO_STREAM("Try to cancel the plugin \"" << name_ << "\" after the patience time has been exceeded!");
-          if (execution.cancel())
-          {
-            ROS_INFO_STREAM("Successfully canceled the plugin \"" << name_ << "\" after the patience time has been exceeded!");
-          }
+          execution.cancel();
+          controller_active = false;
+          fillExePathResult(
+              mbf_msgs::ExePathResult::PAT_EXCEEDED,
+              "Controller patience exceeded", result);
+          // A self-timeout is a controller failure, not a client cancel.  An
+          // ABORTED child result lets MoveBase enter recovery instead of
+          // waiting forever for a result it deliberately ignores as preempted.
+          goal_handle.setAborted(result, result.message);
         }
         break;
 
@@ -301,10 +450,26 @@ void ControllerAction::runImpl(GoalHandle &goal_handle, AbstractControllerExecut
         goal_handle.setSucceeded(result, result.message);
         break;
 
-      case AbstractControllerExecution::INTERNAL_ERROR:
-        ROS_FATAL_STREAM_NAMED(name_, "Internal error: Unknown error thrown by the plugin: " << execution.getMessage());
+      case AbstractControllerExecution::MAP_ERROR:
+        ROS_ERROR_STREAM_NAMED(
+            name_, "Controller safety input remained unavailable: "
+            << execution.getMessage());
         controller_active = false;
-        fillExePathResult(mbf_msgs::ExePathResult::INTERNAL_ERROR, "Internal error: Unknown error thrown by the plugin!", result);
+        fillExePathResult(
+            mbf_msgs::ExePathResult::MAP_ERROR,
+            execution.getMessage(), result);
+        goal_handle.setAborted(result, result.message);
+        break;
+
+      case AbstractControllerExecution::INTERNAL_ERROR:
+        ROS_ERROR_STREAM_NAMED(name_, "Controller execution failed: " << execution.getMessage());
+        controller_active = false;
+        fillExePathResult(
+            execution.getOutcome() >= mbf_msgs::ExePathResult::FAILURE ?
+                execution.getOutcome() : mbf_msgs::ExePathResult::INTERNAL_ERROR,
+            execution.getMessage().empty() ?
+                "Internal controller execution error" : execution.getMessage(),
+            result);
         goal_handle.setAborted(result, result.message);
         break;
 

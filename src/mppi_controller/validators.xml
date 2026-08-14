@@ -1,0 +1,9 @@
+<class_libraries>
+  <library path="lib/libmppi_controller_lib">
+    <class
+      type="mppi::DefaultOptimalTrajectoryValidator"
+      base_class_type="mppi::OptimalTrajectoryValidator">
+      <description>Continuous filled-footprint final trajectory validator</description>
+    </class>
+  </library>
+</class_libraries>

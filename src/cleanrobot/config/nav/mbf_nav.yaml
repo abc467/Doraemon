@@ -2,19 +2,19 @@
 # Move Base Flex (MBF) 插件注册
 # =========================
 planners:
+  - name: SmacLatticePlanner
+    type: "smac_lattice_planner_mbf/SmacLatticePlanner"
+  # 保留旧 Theta* 插件便于回退和对照，但正式 CONNECT 不再选择它。
   - name: ThetaStarPlanner
     type: "mbf_global_planner/ThetaStarPlanner"
   # - name: AStarPlanner
   #   type: "a_star_planner/AStarMBFPlanner"
 
 controllers:
-  - name: MPPI_Connect_Controller
+  # 生产只保留两套独立 MPPI：State 用于点对点，Standard 用于覆盖跟踪。
+  - name: MPPI_State_Lattice_Controller
     type: "local_planner/MPPIController"
   - name: MPPI_Standard_Controller
-    type: "local_planner/MPPIController"
-  - name: MPPI_Heavy_Controller
-    type: "local_planner/MPPIController"
-  - name: MPPI_Eco_Controller
     type: "local_planner/MPPIController"
   - name: MyPlanner
     type: "my_planner/MyPlanner"
@@ -30,6 +30,150 @@ recovery_behaviors:
 # 由正式的 move_base_flex 运行时统一加载。
 recovery_enabled: true
 
+# Legacy planners keep MBF's whole-call costmap mutex. State Lattice owns an
+# immutable snapshot and therefore takes the live mutex only for two short map
+# copies (search input and final validation input).
+planner_lock_costmap: true
+planner_lock_costmap_overrides:
+  SmacLatticePlanner: false
+
+# Recovery is reactive/local only. Rebuild immediately after clearing so a
+# retry cannot start against the transient reset state.
+clear_costmap:
+  affected_maps: local
+  layer_names: [obstacle_layer]
+  reset_distance: 3.0
+  invert_area_to_clear: false
+  force_updating: true
+
+
+# =========================
+# 正式全局规划器（Nav2 Smac State Lattice 的 ROS1/MBF 移植）
+# =========================
+SmacLatticePlanner:
+  # 由 Nav2 官方生成器生成的差速底盘最小控制集：5 cm、32 航向，
+  # 0.40 m 是移动弧线的优选曲率尺度；原地旋转原语仍然保留。
+  lattice_filepath: "package://smac_lattice_planner_mbf/config/diff_5cm_0p40m_32bins.json"
+  # The production map is complete and block endpoints are required to lie in
+  # mapped free space. Keep global search, MPPI and the final filled-footprint
+  # proof on the same fail-closed unknown-space policy.
+  allow_unknown: false
+  max_iterations: 2000000
+  max_on_approach_iterations: 1000
+  # Long searches must still react promptly to cancel and the wall-clock
+  # deadline.  Checking every 100 expansions avoids multi-second cancel lag.
+  terminal_checking_interval: 100
+  # 复杂连接不再因四档后缀每20秒重启而耗尽搜索账本。
+  # 总期限180秒覆盖Theta、后缀候选、FULL回退和双快照校验；
+  # cancel 仍每次 expansion 检查，不会因此失去立即取消能力。
+  max_planning_time: 180.0
+  tolerance: 0.10
+  lookup_table_size: 20.0
+  goal_heading_mode: DEFAULT
+  coarse_search_resolution: 1
+  # 同一物理起点同时尝试最近航向格及其左右相邻格；只有从实时精确
+  # 姿态原地扫掠到该格完整 footprint 安全时才加入搜索。
+  start_heading_seed_span: 1
+
+  # 复合生产模式：沿用现场已验证的 Theta* 长距离清障路径，只把
+  # 最后 100 个 5 cm 参考姿态交给官方 State Lattice，生成满足终点
+  # 位置与最近航向格约束的连续后缀。100 是姿态数（约 4.95 m），
+  # 不是欧氏直线距离；最终小量化误差由 MPPI/MBF 分层容差共同吸收。
+  theta_prefix_lattice_suffix_enabled: true
+  # Nav2 Smac State Lattice 官方 smoother 的 ROS1 适配。已通过同图全连接
+  # A/B并启用；只平滑State生成的后缀/FULL
+  # 路径，不改Theta前缀。原始State路径始终保留，候选只有在曲率、
+  # 中心软代价、Forward/Rotation语义和连续矩形footprint全部通过时替换。
+  state_lattice_smoothing_enabled: true
+  state_lattice_smoother_max_iterations: 1000
+  state_lattice_smoother_w_data: 0.2
+  state_lattice_smoother_w_smooth: 0.3
+  state_lattice_smoother_tolerance: 1.0e-10
+  state_lattice_smoother_do_refinement: true
+  state_lattice_smoother_refinement_num: 2
+  state_lattice_smoother_max_time: 1.0
+  # 下面是本项目额外的原子接受门槛，不改变官方迭代公式。
+  state_lattice_smoother_max_path_length_ratio: 1.05
+  state_lattice_smoother_max_center_cost_increase: 0.0
+  state_lattice_smoother_max_mean_center_cost_increase: 0.5
+  state_lattice_smoother_max_curvature_regression_ratio: 1.05
+  state_lattice_smoother_minimum_curvature_improvement: 0.001
+  # 第一轮清障 A/B：降低中心线可进入的最高膨胀代价，把硬净距由
+  # 约 0.45 m 提高到约 0.54 m；同时提高软代价偏好，并允许为净空
+  # 接受适度绕行。完整矩形 footprint 与双快照校验仍是最终安全门槛。
+  theta_max_allowed_cost: 10
+  theta_w_traversal_cost: 32.0
+  theta_w_euc_cost: 1.5
+  theta_w_heuristic_cost: 1.0
+  theta_reference_spacing: 0.05
+  theta_reference_smoothing_enabled: true
+  # 整条Theta参考若不超过100点，State从实时起点一次接管完整短连接，
+  # 使用剩余总预算且失败后不重复FULL。较长路线的100点末段无解时，
+  # 才自动扩大到160/240/400点；各档共享同一总期限。
+  # 首选100点后缀允许连续搜索最多60秒，避免在系统负载较高时
+  # 反复丢弃已展开状态；后续候选仍共享同一180秒绝对期限。
+  theta_suffix_candidate_max_planning_time: 60.0
+  # 若保留的Theta前缀在某条边首次发生矩形车身连续碰撞，State不再
+  # 从整条路线起点重搜；接管点沿Theta向起点方向提前30个参考姿态，
+  # 并由State从该处一直规划到最终目标。
+  theta_unsafe_segment_lookback_points: 30
+  # 旧的“State 在整条 Theta 走廊中搜索全程”保留代码用于离线对照，
+  # 生产关闭，避免复合后缀失败时先重复消耗四档走廊预算。
+  theta_corridor_search_enabled: false
+  coarse_route_max_planning_time: 5.0
+  corridor_level_max_planning_time: 10.0
+  # 早期走廊即使全部失败，也给无限制域 FULL 搜索和最新地图复核
+  # 保留独立预算，避免“有回退代码、实际却没有回退时间”。
+  corridor_full_search_min_time: 12.0
+  final_validation_reserve_time: 5.0
+  # 在受限走廊内，用 Theta 粗路线的剩余弧长修正官方直线启发式被
+  # U 形障碍误导的问题；它只改变候选排序，FULL 回退会完全关闭。
+  corridor_route_progress_weight: 1.0
+
+  # 搜索代价沿用 Nav2 官方 State Lattice 参数语义。
+  # 生产运动约束明确禁止倒车：保留前进圆弧和原地旋转，不展开
+  # reverse primitives。这也避免 Reeds-Shepp 启发式未表达 reverse_penalty
+  # 时用大量倒车分支干扰固定终点姿态的前进进场搜索。
+  reverse_penalty: 4.0
+  # 现场复测发现 State 后缀会连续选择“右弯-直线-左弯-直线”，
+  # 虽然 MPPI 能准确跟踪，但会形成可见的左右摆动。该参数只提高
+  # 左右转向原语互相切换的代价，不增加持续同向圆弧的代价。
+  change_penalty: 0.45
+  # 降低移动圆弧相对直线的附加代价，让终点角差较大时更愿意
+  # 提前走连续圆弧，而不是把主要转向留到最后的小范围内。
+  non_straight_penalty: 1.05
+  # 增强全局搜索对软膨胀代价的敏感度，使路径在空间允许时
+  # 主动远离墙体和禁行区；完整 footprint 仍负责硬碰撞边界。
+  cost_penalty: 5.0
+  retrospective_penalty: 0.015
+  # 差速底盘可原地转向。该代价仍高于普通移动步，但不再高到迫使
+  # 搜索用一段倒车代替合理的姿态调整。
+  # 优先用连续前进圆弧完成姿态切入；只在通道几何确实
+  # 需要时使用原地旋转原语。倒车扩展仍完全关闭。
+  rotation_penalty: 10.0
+  allow_reverse_expansion: false
+  # 终点解析连接与启发式统一使用 Dubins 前进模型；若捷径碰撞，
+  # 则继续搜索前进圆弧/原地旋转原语，不会退化成 Reeds-Shepp 倒车。
+  prefer_forward_analytic_expansion: true
+  cache_obstacle_heuristic: false
+  downsample_obstacle_heuristic: true
+  use_quadratic_cost_penalty: false
+  analytic_expansion_ratio: 3.5
+  # 允许从更远处尝试连续前进 Dubins 终点连接，提前完成姿态调整。
+  analytic_expansion_max_length: 4.0
+  analytic_expansion_max_cost: 200.0
+  analytic_expansion_max_cost_override: false
+
+  # 不使用中心点近似：每个采样姿态检查完整矩形 footprint；官方运动
+  # 原语/解析扩展的相邻状态按各矩形顶点实际位移自适应细分到 1 cm。
+  collision_checker_angle_bins: 72
+  collision_check_resolution: 0.01
+  # Never search a reset/not-yet-updated master. One live-map invalidation may
+  # be replanned inside the same configured overall deadline.
+  costmap_current_timeout: 3.0
+  live_validation_retries: 1
+  live_validation_retry_min_time: 0.25
+
 
 # =========================
 # 全局规划器参数（theta_star_planner_mbf / Theta*）
@@ -39,16 +183,53 @@ ThetaStarPlanner:
   allow_unknown: true
   terminal_checking_interval: 1024
   # Prefer paths through low-cost cells and reject cells too close to inflated
-  # keepouts/obstacles. This keeps CONNECT centerlines away from no-go edges
-  # before MPPI receives the path.
-  w_traversal_cost: 6.0
+  # keepouts/obstacles. With the shared 10.0/1.0 inflation, cost 26 places the
+  # continuous centre-line threshold at about 0.442 m; on the 5 cm grid the
+  # nearest straight band is about 0.45 m. For the 0.65 m body this gives about
+  # 0.12 m side clearance, while traversal cost still adds clearance when space allows.
+  w_traversal_cost: 8.0
   w_euc_cost: 2.0
   w_heuristic_cost: 1.0
-  max_allowed_cost: 140
+  max_allowed_cost: 26
+  # Theta* 先保证 XY 拓扑连通；然后对不安全局部路段做 SE(2)
+  # 修复，每条候选边都连续扫掠完整矩形车身。不再因某个初始
+  # footprint 冲突就立即否定整条已连通路径。
   use_footprint_path_check: true
   goal_tolerance: 0.05
+  # 缓存复用同时比较终点朝向，避免相同 XY 但新的清扫进入方向
+  # 错误复用上一条路径。
+  goal_orientation_tolerance: 0.05
   path_check_interval: 0.05
   path_max_age: 60.0
+  # 先保证目标 XY 可达，再在已成功路径的末段做朝向连续几何整形。
+  # 整形失败不会否定已经连通的 block，Connect MPPI 仍可使用原始 XY 路径。
+  terminal_approach_enabled: true
+  # 优先保留 0.40 m 同目标朝向直线尾段；空间受限时按 0.10 m
+  # 逐步缩短到 0 m，但 Bezier 终点切线仍与目标朝向一致。
+  terminal_straight_length: 0.40
+  terminal_min_straight_length: 0.00
+  terminal_straight_length_step: 0.10
+  # 差速底盘可原地转向，0 表示不施加 Dubins/汽车型最小转弯半径硬约束。
+  terminal_min_turn_radius: 0.00
+  terminal_sample_step: 0.05
+  # 允许在目标前约 1.8 m 内选择末段替换点，给提前对向留出空间。
+  terminal_max_prefix_splice_distance: 1.80
+  # 旧 Theta* 插件保留原有局部修复能力；本次“State 后缀不倒车”
+  # 只约束 SmacLatticePlanner，不扩展成其他规划器的全局策略。
+  se2_refinement_enabled: true
+  se2_allow_reverse: true
+  # 与 Theta* 的 allow_unknown 保持一致，允许完整车身扫掠经过未知栅格；
+  # 致命障碍和地图边界仍按硬碰撞拒绝。
+  se2_allow_unknown: true
+  se2_yaw_bins: 32
+  se2_max_expansions: 300000
+  se2_max_repairs: 8
+  se2_motion_step: 0.10
+  se2_collision_check_step: 0.025
+  se2_goal_position_tolerance: 0.12
+  se2_goal_yaw_tolerance: 0.20
+  se2_repair_window_lengths: [1.8, 3.0, 4.5, 6.0]
+  se2_corridor_widths: [0.75, 1.25, 2.0]
 
 
 # =========================
@@ -67,35 +248,51 @@ MyPlanner:
 # MPPI 局部控制器（实例 1：全覆盖清扫）
 # =========================
 
-MPPI_Standard_Controller: &mppi_standard_controller
+MPPI_Standard_Controller:
   odom_topic: /odom
   # FOLLOW 到达判定：距离 <= 0.6 m 且朝向误差 <= 0.4 rad。
   goal_tolerance: 0.6
   angle_tolerance: 0.4
-  rotate_to_goal_enabled: false
-  rotate_to_goal_kp: 0.8
-  rotate_to_goal_min_angular_speed: 0.12
-  rotate_to_goal_max_angular_speed: 0.4
-  rotate_to_goal_collision_horizon: 0.5
-  rotate_to_goal_collision_step: 0.05
-
+  trans_stopped_velocity: 0.02
+  rot_stopped_velocity: 0.03
+  goal_stopped_time: 0.30
   # 模型参数
-  time_steps: 30           # 预测时域步数
-  model_dt: 0.10           # 与 10 Hz 控制周期对齐，预测时域共 3 秒
+  # 50 x 0.10 = 5.0 s；最远路径点已按每条候选轨迹的实际弧长约束，
+  # 紧凑发夹弯中不会再把几何相邻的回程段误认为当前候选可达路径。
+  time_steps: 50
+  model_dt: 0.10           # 与 10 Hz 控制周期对齐，保持完整 footprint 扫掠离散精度
   controller_frequency: 10.0
-  batch_size: 2000         # 保留完整候选轨迹数量，依据分阶段耗时再定向优化
+  batch_size: 2000         # 每周期 2000 x 50 = 100000 个预测姿态，略低于State当前108000个基准
   timing_diagnostics: false # 调试时开启，每 50 周期输出一次分阶段平均耗时
+  # 仅在诊断话题存在订阅者时统计并每10周期发布；不改变任何Critic代价。
+  publish_critic_stats: true
+  critic_stats_publish_period: 10
+  # Official MPPI only checks each reference path point's center cell when
+  # deciding whether PathAlign should yield to a dynamic obstacle. This large
+  # rectangular robot instead uses the filled body at each path SE(2) pose;
+  # lethal/unknown/out-of-map cells block the path while soft inflation remains
+  # a CostCritic preference rather than a second hard footprint inflation.
+  path_occupancy_uses_footprint: true
+  # 官方 MPPI 能力在 ROS1 适配层显式保持：默认闭环、复用噪声、无执行器延迟补偿。
+  open_loop: false
+  regenerate_noises: false
+  clamp_raw_controls: false
+  model_delay_vx: 0.0
+  model_delay_vy: 0.0
+  model_delay_wz: 0.0
+  sgf_order: 2
+  speed_limit_topic: "/coverage_executor/speed_limit_scale"
 
   # 控制输入噪声（标准差）
-  vx_std: 0.1              # 线速度x的噪声标准差
+  vx_std: 0.15             # 配合0.38m/s上限扩大纵向候选速度分布
   vy_std: 0.0              # 线速度y的噪声标准差（差速驱动应为0）
   wz_std: 0.3              # 角速度z的噪声标准差
 
   # 控制输入限制
-  vx_max: 0.3             # 最大线速度x（正方向）
-  vx_min: 0.0             # 最小线速度x（负方向，倒车）
+  vx_max: 0.38             # 5秒理论最大空间前视1.90m；Critics仍会在弯道和障碍附近自动降速
+  vx_min: 0.0             # Standard 当前配置不采样倒车速度
   vy_max: 0.0              # 最大线速度y（差速驱动应为0）
-  wz_max: 0.6              # 最大角速度z
+  wz_max: 0.60             # 最大角速度保持不变；转弯和障碍附近仍由 MPPI 自动降低线速度
   # 当前轮速里程计异常时可能持续反馈 0 m/s；允许首个控制周期恢复
   # 到正常巡航速度，但仍按保守减速度预测停车距离。
   ax_max: 3.0
@@ -104,9 +301,11 @@ MPPI_Standard_Controller: &mppi_standard_controller
 
   # 优化参数
   iteration_count: 1       # 每次控制周期的优化迭代次数
-  prune_distance: 1.8      # 轨迹修剪距离（超过此距离的轨迹点被忽略）
+  prune_distance: 2.50     # 覆盖1.90m理论前视并保留0.60m参考尾段，仍位于6m滚动窗口内
+  # 最近点搜索范围维持显式配置，不随局部代价地图尺寸隐式改变。
+  max_robot_pose_search_dist: 2.50
   transform_tolerance: 0.25 # 为定位抖动保留裕量，拒绝超过 250 ms 的陈旧位姿
-  temperature: 0.3         # 软最大值温度参数（控制随机性）
+  temperature: 0.25        # 降低softmax温度，使控制结果更集中于低代价候选轨迹
   gamma: 0.015             # 折扣因子（未来代价的权重衰减）
 
   # 运动模型
@@ -117,6 +316,12 @@ MPPI_Standard_Controller: &mppi_standard_controller
 
   # 可视化
   visualize: true          # 是否启用轨迹可视化
+  TrajectoryValidator:
+     # Standard先恢复v9行为：候选轨迹仍由CostCritic逐点执行完整矩形车体检查，
+     # softmax加权结果直接发布，不再做额外连续扫掠或候选切换。
+     enabled: false
+     plugin: "mppi::DefaultOptimalTrajectoryValidator"
+     maximum_corner_motion: 0.025
   TrajectoryVisualizer:
      trajectory_step: 5    # 可视化轨迹的步长
      time_step: 3          # 可视化时间步长
@@ -137,21 +342,27 @@ MPPI_Standard_Controller: &mppi_standard_controller
   # 代价地图评估（路径代价）
   CostCritic:
      enabled: true
+     allow_unknown: false
      cost_power: 1
-     cost_weight: 12.0     # Increase local costmap repulsion for depth obstacles.
+     # 现场同路径 A/B 表明 4.0 会让车辆更晚横向避让，
+     # 接近障碍后候选轨迹碰撞代价饱和并短暂停车。
+     # 恢复 8.0 作为已验证更早避让的生产基线；致命代价、
+     # 完整 footprint 碰撞和最终连续轨迹验证仍保持硬约束。
+     cost_weight: 8.0
      critical_cost: 300.0  # 临界代价阈值
      consider_footprint: true  # 使用完整矩形车体做硬碰撞检查
      collision_cost: 1000000.0 # 碰撞代价
      near_goal_distance: 0.35  # Keep obstacle repulsion active until close to the goal.
      trajectory_point_step: 1  # 每个预测点都检查，避免跨过近距离障碍
-     parallel_threads: 1       # 当前场景并行无墙钟收益，避免额外 CPU 调度开销
+     # 18 线程平台上并行评估候选轨迹；每个线程只读同一份、已由 MBF 锁定的代价地图。
+     parallel_threads: 10
 
   # 目标角度评估（朝向目标角度）
   GoalAngleCritic:
      enabled: true
      cost_power: 1
      cost_weight: 3.2
-     threshold_to_consider: 0.6 # 仅当距离目标<0.4米时激活
+     threshold_to_consider: 0.6 # 仅当距离目标<0.6米时激活
 
   # 目标位置评估（到达目标）
   GoalCritic:
@@ -164,29 +375,31 @@ MPPI_Standard_Controller: &mppi_standard_controller
   PathAlignCritic:
      enabled: true
      cost_power: 1
-     cost_weight: 8    # 高权重确保严格对齐  10.0
+     # 保留覆盖路径朝向，但恢复已验证的对齐强度和介入距离，
+     # 避免低速/转弯入口处过早形成强对齐局部极小值。
+     cost_weight: 8.0
      max_path_occupancy_ratio: 0.03 # More readily yield path alignment to dynamic obstacles.
-     offset_from_furthest: 20       # 从最远点开始的偏移量
+     offset_from_furthest: 20
      trajectory_point_step: 4       # 轨迹点采样步长
      threshold_to_consider: 0.4     # 激活阈值
-     use_path_orientations: true    # 是否使用路径朝向信息
+     use_path_orientations: true
 
   # 路径角度评估（轨迹角度与路径一致）
   PathAngleCritic:
      enabled: true
-     vx_min: -0.35         # 激活的最小速度
+     vx_min: 0.0           # 与 Standard 当前速度范围保持一致
      offset_from_furthest: 4
      cost_power: 1
      cost_weight: 2.2
      threshold_to_consider: 0.4
-     max_angle_to_furthest: 0.8     # 与最远点的最大角度差
+     max_angle_to_furthest: 0.8
      mode: 2               # 计算模式
 
   # 路径跟随评估（靠近全局路径）
   PathFollowCritic:
      enabled: true
      threshold_to_consider: 0.4
-     offset_from_furthest: 6.2
+     offset_from_furthest: 6
      cost_power: 1
      cost_weight: 5.0
 
@@ -200,27 +413,182 @@ MPPI_Standard_Controller: &mppi_standard_controller
   # 旋转评估（避免原地旋转）
   TwirlingCritic:
      enabled: true
-     threshold_to_consider: 0.3
      cost_power: 1
      cost_weight: 2      # 较低权重，仅轻微惩罚旋转
 
-MPPI_Connect_Controller:
-  <<: *mppi_standard_controller
-  # 用于清扫 CONNECT：连接路径终点是当前待执行区块的起始点。
-  # 距离区块起点 <= 0.6 m 且朝向误差 > 0.4 rad 时停车原地对向。
-  rotate_to_goal_enabled: true
+# =========================
+# MPPI 局部控制器（实例 2：State Lattice 点对点）
+# =========================
 
-MPPI_Heavy_Controller:
-  <<: *mppi_standard_controller
-  vx_max: 0.35
-  wz_max: 0.22
+MPPI_State_Lattice_Controller:
+  # 独立完整配置：禁止从 Standard 继承，避免清扫调参改变点对点控制。
+  odom_topic: /odom
+  timing_diagnostics: false
+  open_loop: false
+  regenerate_noises: false
+  clamp_raw_controls: false
+  model_delay_vx: 0.0
+  model_delay_vy: 0.0
+  model_delay_wz: 0.0
+  sgf_order: 2
+  speed_limit_topic: "/coverage_executor/speed_limit_scale"
+  # State Lattice 已输出连续可行的 SE(2) 路径；ROS1 适配器仅提供
+  # 当前位姿、局部路径和目标，全部运动由官方式 MPPI 优化器统一处理。
+  # 现场任务优先保证稳定、安全到达，不要求厘米级停车。离散 lattice
+  # 末点相对原请求最多约有 7.1 cm 位置量化误差；控制器允许在路径
+  # 末点 0.36 m 内完成，给现场停车误差留出余量；当前复合规划的
+  # 终点位置残差为微米级，仍由 MBF 的 0.40 m 外层门槛最终验收。
+  goal_tolerance: 0.36
+  # 32航向格相对原请求最多约0.10rad；控制器允许0.30rad跟踪误差，
+  # 两层合计不超过MBF针对原请求的0.40rad验收上限。
+  angle_tolerance: 0.30
+  trans_stopped_velocity: 0.02
+  rot_stopped_velocity: 0.03
+  goal_stopped_time: 0.30
+  # 需要的少量转向也保留在路径内，由运动模型与 Critics共同优化，
+  # 不再有独立 terminal/phase/reposition 控制旁路。
+
+  # State A/B共同实验基准。这些是当前调试值，不是不可修改的车辆物理
+  # 上限；后续应一次只改变一组变量并用相同路线复测。
+  motion_model: "DiffDrive"
+  # State实例改用10 Hz闭环，与当前25 Hz里程计及15 Hz局部代价地图
+  # 保持充足的新鲜数据裕量；Standard及其他控制器仍保持原有配置。
+  controller_frequency: 10.0
+  # 60 x 0.10 = 6.0 s；model_dt与10 Hz控制周期严格相等。
+  # 0.38 m/s下理论最大空间前视约2.28 m；现场A/B表明7秒时域
+  # 未显著提前动态绕障，恢复6秒基线以增加实时余量。
+  time_steps: 60
+  model_dt: 0.10
+  # 每周期108k预测姿态，保留1800条候选的采样多样性；
+  # 完整footprint CostCritic继续逐候选、逐预测点评价；约束和滤波后的
+  # softmax加权结果直接发布，不再叠加独立最终连续验证。
+  batch_size: 1800
+  iteration_count: 1
+  prune_distance: 2.5
+  # Standard 锚点恢复旧搜索范围时，State 显式保留当前 6 x 6 m
+  # 局部代价地图对应的 3.0 m 搜索范围，保证本轮只改变 Standard。
+  max_robot_pose_search_dist: 3.0
+  transform_tolerance: 0.25
+  # 现场A/B表明0.25未减少避障时的安全拒绝，恢复0.30基线。
+  temperature: 0.30
+  gamma: 0.015
+  retry_attempt_limit: 2
+  TrajectoryValidator:
+    # 与 Standard 一致：保留 CostCritic 的完整矩形车体评价，直接使用
+    # 标准 MPPI softmax 加权控制结果，不再额外拒绝或替换最终轨迹。
+    enabled: false
+    plugin: "mppi::DefaultOptimalTrajectoryValidator"
+    maximum_corner_motion: 0.025
+  # State 控制实例按前进路径采样；是否允许其他控制实例倒车由它们
+  # 各自的配置和业务流程决定。
   vx_std: 0.15
-  wz_std: 0.15
-  prune_distance: 1.5
-  temperature: 0.25
+  vy_std: 0.0
+  # 恢复较平顺的角速度采样基线；0.45未改善侧向绕行。最终输出仍受
+  # 0.80 rad/s上限、加速度约束、完整footprint与CostCritic约束。
+  wz_std: 0.35
+  vx_min: 0.0
+  vx_max: 0.38
+  vy_max: 0.0
+  wz_max: 0.80
+  ax_max: 3.0
+  ax_min: -0.6
+  az_max: 1.0
 
-MPPI_Eco_Controller:
-  <<: *mppi_standard_controller
+  # 生产默认关闭候选轨迹 Marker 构造/发布，避免挤占 100 ms 控制周期。
+  # 需要调试时仍可通过该 ROS 参数显式改为 true 并重启导航插件。
+  visualize: false
+  TrajectoryVisualizer:
+     trajectory_step: 5
+     time_step: 3
+  # 轻量 Critic 统计仅在该话题存在订阅者时复制代价向量并累计；
+  # 平时没有订阅者时不会进入统计热路径。以 10 个控制周期聚合发布，
+  # 供后续平顺性、路径跟踪和避障权重 A/B 使用。
+  publish_critic_stats: true
+  critic_stats_publish_period: 10
+
+  # State 路径本身已由规划器保证无反向段，不再叠加 PreferForward 软惩罚。
+  # Twirling 仍不加，避免额外惩罚全局路径中偶尔必要的低速转向。
+  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic",
+            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic"]
+
+  ConstraintCritic:
+     enabled: true
+     cost_power: 1
+     cost_weight: 5.0
+  CostCritic:
+     enabled: true
+     allow_unknown: false
+     cost_power: 1
+     # State 将软膨胀代价权重提高到10.0，让softmax加权结果更倾向
+     # 远离高代价区域；致命碰撞仍是百万代价，并且每个预测点都检查
+     # 完整矩形 footprint。
+     cost_weight: 10.0
+     critical_cost: 300.0
+     consider_footprint: true
+     collision_cost: 1000000.0
+     # State Lattice 末段仍保持硬碰撞/软膨胀评价，直到局部参考剩余
+     # 约 10 cm；这只是 Critic 激活距离，不是额外终端状态或到达门槛。
+     near_goal_distance: 0.10
+     trajectory_point_step: 1
+     parallel_threads: 10
+  GoalAngleCritic:
+     enabled: true
+     cost_power: 1
+     # 本轮两次均先进入 10 cm 位置范围、但仍带 0.75--0.85 rad
+     # 航向误差并以约 0.15 m/s 越过目标。将目标航向在最后 0.80 m
+     # 逐渐加入优化，并提高权重，使减速/转向由 MPPI 自身轨迹评分
+     # 产生，而不是切换到独立 terminal 状态模式。
+     cost_weight: 8.0
+     threshold_to_consider: 0.80
+  GoalCritic:
+     enabled: true
+     cost_power: 1
+     # 位置吸引仍保留，但低于航向与路径对齐权重；避免已经接近目标
+     # 时只追求穿过目标坐标、忽略末段进场姿态。
+     cost_weight: 4.0
+     threshold_to_consider: 0.60
+  PathAlignCritic:
+     enabled: true
+     cost_power: 1
+     # State Lattice 已对完整矩形 footprint 做连续扫掠，点对点 MPPI
+     # 应优先贴合这条 SE(2) 可行路径；比 Standard 更强，但仍允许
+     # PathAlign 在局部路径被动态障碍占用时按下方比例主动让位。
+     # 保持对整条 SE(2) 弧线的位置约束，减少空旷直线上的横向摆动；
+     # 动态避障仍由 CostCritic 优先让安全候选轨迹获得更低总代价。
+     cost_weight: 10.0
+     max_path_occupancy_ratio: 0.03
+     offset_from_furthest: 6
+     # 与现场避障表现稳定的 Standard 保持一致：每 4 个预测点
+     # 评估一次路径对齐，降低动态障碍附近过密的回路拉力。
+     trajectory_point_step: 4
+     # 即使任务到达容差较宽，路径对齐仍保持到最后 2.5 cm 的路径
+     # 距离区间，避免在进入任务容差前过早撤掉弧线约束。
+     threshold_to_consider: 0.025
+     # 保留强位置对齐，但不在 PathAlign 中重复惩罚每点离散朝向。
+     # 动态绕障时允许暂时偏航；大方向偏差仍由 PathAngleCritic
+     # 约束，终点朝向由 GoalAngleCritic 收敛。
+     use_path_orientations: false
+  PathAngleCritic:
+     enabled: true
+     vx_min: 0.0
+     cost_power: 1
+     # 参考现场避障表现稳定的Standard实例：降低方向惩罚，并只在
+     # 相对参考路径方向偏差超过约37.2度时介入。这样允许动态障碍前
+     # 形成侧向前进圆弧，同时继续使用State路径的SE(2)朝向语义。
+     # 完整footprint CostCritic安全评价保持不变。
+     cost_weight: 2.5
+     offset_from_furthest: 8
+     threshold_to_consider: 0.025
+     max_angle_to_furthest: 0.65
+     mode: 2
+  PathFollowCritic:
+     enabled: true
+     cost_power: 1
+     # 与 Standard 保持同样的 8 点前视，减少动态障碍遮挡路径时
+     # “第一个有效路径点”的空间跳变幅度。权重仍保持 5.0。
+     cost_weight: 5.0
+     offset_from_furthest: 8
+     threshold_to_consider: 0.025
 
 # MPPI_Clean_Controller:
 #   visualize: true
@@ -324,7 +692,7 @@ MPPI_Eco_Controller:
 
 #   PathAngleCritic:
 #     enabled: true
-#     vx_min: -0.35
+#     vx_min: 0.0
 #     offset_from_furthest: 4
 #     cost_power: 1
 #     cost_weight: 2.2
@@ -445,7 +813,7 @@ MPPI_Eco_Controller:
 
 #   PathAngleCritic:
 #     enabled: true
-#     vx_min: -0.35
+#     vx_min: 0.0
 #     offset_from_furthest: 4
 #     cost_power: 1
 #     cost_weight: 2.2

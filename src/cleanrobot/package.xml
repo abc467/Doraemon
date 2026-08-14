@@ -29,6 +29,7 @@
   <exec_depend>my_planner</exec_depend>
   <exec_depend>mppi_controller</exec_depend>
   <exec_depend>theta_star_planner_mbf</exec_depend>
+  <exec_depend>smac_lattice_planner_mbf</exec_depend>
   <exec_depend>mbf_costmap_nav</exec_depend>
   <export/>
 </package>

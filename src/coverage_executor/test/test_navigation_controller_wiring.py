@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Cross-package contracts for navigation controller wiring.
+
+These tests deliberately lock the ROS1 port to upstream Nav2 MPPI semantics.
+They prevent the removed terminal/phase/reposition state machines from being
+silently reintroduced around the optimizer.
+"""
+
+import os
+import unittest
+import xml.etree.ElementTree as ET
+
+import yaml
+
+
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+EXECUTOR_DIR = os.path.dirname(THIS_DIR)
+SOURCE_DIR = os.path.dirname(EXECUTOR_DIR)
+
+
+def _read(relative_path):
+    with open(os.path.join(SOURCE_DIR, relative_path), "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _nav_config():
+    with open(
+        os.path.join(SOURCE_DIR, "cleanrobot", "config", "nav", "mbf_nav.yaml"),
+        "r",
+        encoding="utf-8",
+    ) as handle:
+        return yaml.safe_load(handle)
+
+
+def _node_param(launch_path, node_name, param_name):
+    root = ET.parse(launch_path).getroot()
+    node = root.find(".//node[@name='%s']" % node_name)
+    if node is None:
+        raise AssertionError("missing launch node %s" % node_name)
+    param = node.find("./param[@name='%s']" % param_name)
+    if param is None:
+        raise AssertionError("missing parameter %s/%s" % (node_name, param_name))
+    return param.get("value")
+
+
+class NavigationControllerWiringTest(unittest.TestCase):
+    def test_standard_uses_five_second_coverage_horizon_and_orientation_alignment(self):
+        config = _nav_config()
+        standard = config["MPPI_Standard_Controller"]
+
+        self.assertEqual(int(standard["time_steps"]), 50)
+        self.assertAlmostEqual(float(standard["model_dt"]), 0.10)
+        self.assertAlmostEqual(float(standard["controller_frequency"]), 10.0)
+        self.assertEqual(int(standard["batch_size"]), 2000)
+        self.assertTrue(standard["publish_critic_stats"])
+        self.assertEqual(int(standard["critic_stats_publish_period"]), 10)
+        self.assertTrue(standard["path_occupancy_uses_footprint"])
+        self.assertAlmostEqual(float(standard["vx_std"]), 0.15)
+        self.assertAlmostEqual(float(standard["vx_max"]), 0.38)
+        self.assertAlmostEqual(float(standard["prune_distance"]), 2.50)
+        self.assertAlmostEqual(
+            float(standard["max_robot_pose_search_dist"]), 2.50
+        )
+        self.assertAlmostEqual(
+            float(standard["time_steps"]) * float(standard["model_dt"]),
+            5.0,
+        )
+        self.assertAlmostEqual(
+            float(standard["vx_max"])
+            * float(standard["time_steps"])
+            * float(standard["model_dt"]),
+            1.90,
+        )
+        predicted_pose_count = int(standard["time_steps"]) * int(
+            standard["batch_size"]
+        )
+        self.assertEqual(predicted_pose_count, 100000)
+        self.assertLessEqual(predicted_pose_count, 108000)
+        maximum_travel = (
+            float(standard["vx_max"])
+            * float(standard["time_steps"])
+            * float(standard["model_dt"])
+        )
+        self.assertGreaterEqual(float(standard["prune_distance"]), maximum_travel + 0.5)
+
+        with open(
+            os.path.join(SOURCE_DIR, "cleanrobot", "config", "nav", "local_costmap.yaml"),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            local_costmap = yaml.safe_load(handle)["local_costmap"]
+        with open(
+            os.path.join(SOURCE_DIR, "cleanrobot", "config", "nav", "costmap_common.yaml"),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            footprint = yaml.safe_load(handle)["footprint"]
+        footprint_radius = max((x * x + y * y) ** 0.5 for x, y in footprint)
+        local_half_width = min(
+            float(local_costmap["width"]), float(local_costmap["height"])
+        ) / 2.0
+        self.assertLess(maximum_travel + footprint_radius, local_half_width)
+        self.assertAlmostEqual(float(standard["temperature"]), 0.25)
+        path_align = standard["PathAlignCritic"]
+        self.assertAlmostEqual(float(path_align["cost_weight"]), 8.0)
+        self.assertEqual(int(path_align["offset_from_furthest"]), 20)
+        self.assertAlmostEqual(
+            float(path_align["max_path_occupancy_ratio"]), 0.03
+        )
+        self.assertEqual(int(path_align["trajectory_point_step"]), 4)
+        self.assertTrue(path_align["use_path_orientations"])
+        self.assertAlmostEqual(
+            float(standard["CostCritic"]["cost_weight"]), 8.0
+        )
+        self.assertTrue(standard["CostCritic"]["consider_footprint"])
+        self.assertEqual(
+            int(standard["CostCritic"]["trajectory_point_step"]), 1
+        )
+        path_angle = standard["PathAngleCritic"]
+        self.assertEqual(int(path_angle["offset_from_furthest"]), 4)
+        self.assertAlmostEqual(float(path_angle["cost_weight"]), 2.2)
+        self.assertAlmostEqual(float(path_angle["max_angle_to_furthest"]), 0.8)
+        self.assertEqual(
+            int(standard["PathFollowCritic"]["offset_from_furthest"]), 6
+        )
+
+        state = config["MPPI_State_Lattice_Controller"]
+        self.assertFalse(state.get("path_occupancy_uses_footprint", False))
+        self.assertEqual(int(state["time_steps"]), 60)
+        self.assertEqual(int(state["batch_size"]), 1800)
+        self.assertAlmostEqual(float(state["max_robot_pose_search_dist"]), 3.0)
+
+    def test_only_standard_and_state_mppi_are_registered_without_yaml_inheritance(self):
+        config = _nav_config()
+        registered = {
+            item["name"]
+            for item in config["controllers"]
+            if item["type"] == "local_planner/MPPIController"
+        }
+        self.assertEqual(
+            registered,
+            {"MPPI_Standard_Controller", "MPPI_State_Lattice_Controller"},
+        )
+
+        yaml_source = _read("cleanrobot/config/nav/mbf_nav.yaml")
+        self.assertNotIn("<<:", yaml_source)
+        self.assertNotIn("&mppi_", yaml_source)
+
+        launch_source = _read("cleanrobot/launch/mbf_nav.launch")
+        self.assertNotIn("enable_mppi_ab_controllers", launch_source)
+        self.assertNotIn("mppi_ab_controllers_yaml", launch_source)
+
+    def test_all_coverage_modes_select_the_single_standard_controller(self):
+        profiles_path = os.path.join(
+            SOURCE_DIR, "coverage_task_manager", "config", "mode_profiles.yaml"
+        )
+        with open(profiles_path, "r", encoding="utf-8") as handle:
+            profiles = yaml.safe_load(handle)["mode_profiles"]
+        self.assertEqual(set(profiles), {"standard", "heavy", "eco"})
+        for name, profile in profiles.items():
+            self.assertEqual(
+                profile["mbf_controller_name"],
+                "MPPI_Standard_Controller",
+                msg=name,
+            )
+
+        catalog_source = _read(
+            "coverage_executor/src/coverage_executor/sys_profile_catalog.py"
+        )
+        self.assertIn('mbf_controller_name="MPPI_Standard_Controller"', catalog_source)
+        self.assertNotIn('f"MPPI_{key.capitalize()}_Controller"', catalog_source)
+
+    def test_critic_statistics_are_subscriber_gated_and_default_off(self):
+        header = _read("mppi_controller/include/mppi_controller/critic_manager.hpp")
+        source = _read("mppi_controller/src/critic_manager.cpp")
+        self.assertIn('param("publish_critic_stats", publish_critic_stats_, false)', source)
+        self.assertIn("getNumSubscribers() > 0u", source)
+        self.assertIn('"critic_stats"', source)
+        self.assertIn("cost_mean", source)
+        self.assertIn("changed_ratio", source)
+        self.assertIn("score_time_mean_ms", source)
+        self.assertIn("publish_critic_stats_{false}", header)
+
+    def test_local_costmap_is_stable_and_fail_closed(self):
+        nav_dir = os.path.join(SOURCE_DIR, "cleanrobot", "config", "nav")
+        with open(os.path.join(nav_dir, "local_costmap.yaml"), "r", encoding="utf-8") as handle:
+            local = yaml.safe_load(handle)["local_costmap"]
+        self.assertEqual(local["global_frame"], "odom")
+        self.assertTrue(local["rolling_window"])
+        self.assertTrue(local["track_unknown_space"])
+        self.assertAlmostEqual(float(local["update_frequency"]), 15.0)
+        self.assertAlmostEqual(float(local["publish_frequency"]), 15.0)
+        self.assertAlmostEqual(float(local["width"]), 6.0)
+        self.assertAlmostEqual(float(local["height"]), 6.0)
+        self.assertAlmostEqual(float(local["resolution"]), 0.05)
+        plugin_names = [item["name"] for item in local["plugins"]]
+        self.assertIn("obstacle_layer", plugin_names)
+        self.assertNotIn("camera_obstacle_layer", plugin_names)
+        sources = set(local["obstacle_layer"]["observation_sources"].split())
+        self.assertEqual(
+            sources,
+            {
+                "laser_scan_sensor",
+                "left_cam_source",
+                "right_cam_source",
+                "up_cam_source",
+            },
+        )
+
+    def test_point_to_point_uses_smac_and_state_mppi(self):
+        executor_launch = os.path.join(EXECUTOR_DIR, "launch", "executor.launch")
+        task_launch = os.path.join(
+            SOURCE_DIR, "coverage_task_manager", "launch", "task_manager.launch"
+        )
+        self.assertEqual(
+            _node_param(executor_launch, "coverage_executor", "mbf_planner"),
+            "SmacLatticePlanner",
+        )
+        self.assertEqual(
+            _node_param(executor_launch, "coverage_executor", "mbf_connect_controller"),
+            "MPPI_State_Lattice_Controller",
+        )
+        self.assertEqual(
+            _node_param(task_launch, "coverage_task_manager", "mbf_planner"),
+            "SmacLatticePlanner",
+        )
+
+    def test_connect_handoff_uses_the_production_mbf_tolerance(self):
+        executor_launch = os.path.join(EXECUTOR_DIR, "launch", "executor.launch")
+        self.assertAlmostEqual(
+            float(
+                _node_param(
+                    executor_launch, "coverage_executor", "connect_handoff_dist_m"
+                )
+            ),
+            0.40,
+        )
+        self.assertAlmostEqual(
+            float(
+                _node_param(
+                    executor_launch, "coverage_executor", "connect_handoff_yaw_rad"
+                )
+            ),
+            0.40,
+        )
+
+        node_source = _read("coverage_executor/scripts/executor_node.py")
+        fsm_source = _read("coverage_executor/src/coverage_executor/fsm.py")
+        self.assertIn(
+            'get_param("~connect_handoff_dist_m", 0.40)', node_source
+        )
+        self.assertIn(
+            'get_param("~connect_handoff_yaw_rad", 0.40)', node_source
+        )
+        self.assertIn("connect_handoff_dist_m: float = 0.40", fsm_source)
+        self.assertIn("connect_handoff_yaw_rad: float = 0.40", fsm_source)
+
+    def test_state_planner_and_controller_policy(self):
+        config = _nav_config()
+        smac = config["SmacLatticePlanner"]
+        self.assertFalse(smac["allow_reverse_expansion"])
+        self.assertTrue(smac["theta_prefix_lattice_suffix_enabled"])
+        self.assertFalse(smac["theta_corridor_search_enabled"])
+        self.assertAlmostEqual(float(smac["max_planning_time"]), 180.0)
+
+        controller = config["MPPI_State_Lattice_Controller"]
+        self.assertEqual(controller["motion_model"], "DiffDrive")
+        self.assertEqual(int(controller["batch_size"]), 1800)
+        self.assertEqual(int(controller["time_steps"]), 60)
+        self.assertAlmostEqual(float(controller["model_dt"]), 0.10)
+        self.assertAlmostEqual(float(controller["controller_frequency"]), 10.0)
+        self.assertAlmostEqual(
+            float(controller["model_dt"]),
+            1.0 / float(controller["controller_frequency"]),
+        )
+        self.assertAlmostEqual(float(controller["vx_min"]), 0.0)
+        self.assertAlmostEqual(float(controller["vx_max"]), 0.38)
+        self.assertAlmostEqual(float(controller["vy_std"]), 0.0)
+        self.assertAlmostEqual(float(controller["vy_max"]), 0.0)
+        self.assertAlmostEqual(float(controller["wz_max"]), 0.80)
+        self.assertAlmostEqual(float(controller["ax_max"]), 3.0)
+        self.assertAlmostEqual(float(controller["ax_min"]), -0.6)
+        self.assertAlmostEqual(float(controller["az_max"]), 1.0)
+        self.assertFalse(controller["open_loop"])
+        self.assertFalse(controller["regenerate_noises"])
+        self.assertFalse(controller["clamp_raw_controls"])
+        self.assertEqual(int(controller["sgf_order"]), 2)
+        self.assertTrue(controller["CostCritic"]["consider_footprint"])
+        self.assertFalse(controller["CostCritic"]["allow_unknown"])
+        self.assertAlmostEqual(float(controller["CostCritic"]["cost_weight"]), 10.0)
+        self.assertEqual(int(controller["CostCritic"]["trajectory_point_step"]), 1)
+        self.assertEqual(int(controller["PathFollowCritic"]["offset_from_furthest"]), 8)
+        self.assertAlmostEqual(
+            float(controller["PathAngleCritic"]["cost_weight"]), 2.5
+        )
+
+    def test_removed_non_upstream_parameters_are_not_loaded(self):
+        config = _nav_config()
+        forbidden = {
+            "terminal_path_retention_distance",
+            "terminal_reapproach_enabled",
+            "straight_reposition_enabled",
+            "connect_no_progress_timeout",
+            "safe_candidate_fallback_count",
+            "fixed_center_goal_rotation_enabled",
+            "tracking_vx_min",
+            "tracking_vx_max",
+            "tracking_wz_max",
+            "max_evaluation_time",
+            "use_path_distance",
+            "consider_path_footprint",
+            "rotate_to_goal_enabled",
+        }
+        for controller_name in (
+            "MPPI_Standard_Controller",
+            "MPPI_State_Lattice_Controller",
+        ):
+            controller = config[controller_name]
+            self.assertEqual(
+                controller["TrajectoryValidator"]["plugin"],
+                "mppi::DefaultOptimalTrajectoryValidator",
+            )
+            self.assertAlmostEqual(
+                float(controller["TrajectoryValidator"]["maximum_corner_motion"]),
+                0.025,
+            )
+            self.assertFalse(controller["TrajectoryValidator"]["enabled"])
+            self.assertEqual(
+                controller["speed_limit_topic"],
+                "/coverage_executor/speed_limit_scale",
+            )
+            self.assertTrue(forbidden.isdisjoint(controller.keys()))
+            for critic_name in controller.get("critics", []):
+                critic = controller.get(critic_name, {})
+                self.assertTrue(forbidden.isdisjoint(critic.keys()))
+
+    def test_controller_is_a_thin_nav_core_adapter(self):
+        header = _read("mppi_controller/include/mppi_controller/mppi_controller.hpp")
+        source = _read("mppi_controller/src/mppi_controller.cpp")
+        self.assertIn("public nav_core::BaseLocalPlanner", header)
+        self.assertIn("optimizer_->evalControl(", source)
+        self.assertIn("ControllerGoalToleranceAware", header)
+        self.assertIn("goal_reached_evaluator_", header)
+        self.assertIn("setZeroCommand(command);", source)
+        self.assertIn("speedLimitScaleCallback", header + source)
+        self.assertIn("optimizer_->setSpeedLimit(scale * 100.0, true)", source)
+        self.assertIn("reload_parameters", source)
+        self.assertIn("optimizer_.swap(replacement)", source)
+        self.assertIn("path_handler_.reloadParameters()", source)
+        self.assertIn("path_handler_.transformPath(robot_pose)", source)
+        self.assertIn("path_handler_.getTransformedGoal().pose", source)
+        self.assertNotIn("PathMotionPhase", header + source)
+        self.assertNotIn("PlanExecutionContextAware", header + source)
+        self.assertNotIn("terminalReapproach", header + source)
+        self.assertNotIn("Reposition", header + source)
+        self.assertNotIn("connectTracking", header + source)
+        self.assertNotIn("rotate_to_goal", (header + source).lower())
+
+    def test_mbf_goal_tolerance_cannot_bypass_controller_stopped_gate(self):
+        abstract_controller = _read(
+            "external_navigation/move_base_flex/mbf_abstract_core/"
+            "include/mbf_abstract_core/abstract_controller.h"
+        )
+        wrapper_header = _read(
+            "external_navigation/move_base_flex/mbf_costmap_nav/"
+            "include/nav_core_wrapper/wrapper_local_planner.h"
+        )
+        wrapper = _read(
+            "external_navigation/move_base_flex/mbf_costmap_nav/"
+            "src/nav_core_wrapper/wrapper_local_planner.cpp"
+        )
+        execution = _read(
+            "external_navigation/move_base_flex/mbf_abstract_nav/"
+            "src/abstract_controller_execution.cpp"
+        )
+        self.assertIn("usesInternalGoalReachedPolicy", abstract_controller)
+        self.assertIn("usesInternalGoalReachedPolicy", wrapper_header + wrapper)
+        self.assertIn("ControllerGoalToleranceAware", wrapper)
+        self.assertIn(
+            "mbf_tolerance_check_ && !controller_->usesInternalGoalReachedPolicy()",
+            execution,
+        )
+
+    def test_path_handler_matches_upstream_nearest_prune_contract(self):
+        header = _read("mppi_controller/include/mppi_controller/tools/path_handler.hpp")
+        source = _read("mppi_controller/src/path_handler.cpp")
+        self.assertIn("findClosestPathPose", header + source)
+        self.assertIn("closest == std::prev(end)", source)
+        self.assertIn("closest = std::prev(closest)", source)
+        self.assertIn("prunePlan(remaining_global_plan_, window.second)", source)
+        self.assertNotIn("terminal_path_retention", header + source)
+        self.assertNotIn("motion_phase", (header + source).lower())
+
+    def test_optimizer_preserves_upstream_update_order_and_warm_start(self):
+        controller = _read("mppi_controller/src/mppi_controller.cpp")
+        optimizer = _read("mppi_controller/src/optimizer.cpp")
+        set_plan = controller.split("bool MPPIController::setPlan", 1)[1].split(
+            "bool MPPIController::computeVelocityCommands", 1
+        )[0]
+        self.assertNotIn("optimizer_.reset", set_plan)
+
+        update = optimizer.split("void Optimizer::updateControlSequence", 1)[1].split(
+            "bool Optimizer::validateOptimizedTrajectory", 1
+        )[0]
+        self.assertLess(update.index("savitskyGolayFilter"), update.index("applyControlSequenceConstraints"))
+        self.assertIn("applyControlSequenceInterIterationConstraints();", optimizer)
+        self.assertIn("state_.local_path_length", optimizer)
+        self.assertIn("model_delay_vx", optimizer)
+        self.assertIn("pushCommandHistory", optimizer)
+        self.assertIn("regenerate_noises", optimizer)
+        self.assertIn("throw std::runtime_error", optimizer)
+
+    def test_goal_and_path_critics_use_local_path_length(self):
+        for filename in (
+            "goal_critic.cpp",
+            "goal_angle_critic.cpp",
+            "path_align_critic.cpp",
+            "path_angle_critic.cpp",
+            "path_follow_critic.cpp",
+        ):
+            source = _read("mppi_controller/src/critics/" + filename)
+            self.assertIn("data.state.local_path_length", source)
+            self.assertNotIn("use_path_distance", source)
+
+        prefer_forward = _read(
+            "mppi_controller/src/critics/prefer_forward_critic.cpp"
+        )
+        self.assertIn("data.state.local_path_length", prefer_forward)
+        self.assertNotIn("withinPositionGoalTolerance", prefer_forward)
+
+    def test_constraint_critic_uses_upstream_axis_wise_limits(self):
+        header = _read(
+            "mppi_controller/include/mppi_controller/critics/constraint_critic.hpp"
+        )
+        source = _read("mppi_controller/src/critics/constraint_critic.cpp")
+        for member in ("vx_max_", "vx_min_", "vy_max_"):
+            self.assertIn(member, header + source)
+        self.assertIn("(vy.abs() - vy_max_).max(0.0f)", source)
+        self.assertNotIn("vel_total", source)
+
+    def test_selected_trajectory_has_independent_continuous_safety_gate(self):
+        optimizer = _read("mppi_controller/src/optimizer.cpp")
+        validator = _read("mppi_controller/src/optimal_trajectory_validator.cpp")
+        validator_header = _read(
+            "mppi_controller/include/mppi_controller/optimal_trajectory_validator.hpp"
+        )
+        footprint_gate = _read(
+            "mppi_controller/include/mppi_controller/tools/footprint_collision.hpp"
+        )
+        self.assertIn("optimal_trajectory = getOptimizedTrajectory()", optimizer)
+        self.assertIn("validateOptimizedTrajectory(optimal_trajectory)", optimizer)
+        self.assertIn("std::make_tuple(control, std::move(optimal_trajectory))", optimizer)
+        self.assertIn("std::get<1>(result)", _read("mppi_controller/src/mppi_controller.cpp"))
+        self.assertIn("getFootprintCells", footprint_gate)
+        self.assertIn("isFootprintPoseHardCollisionFree", validator)
+        self.assertIn("DefaultOptimalTrajectoryValidator", validator_header + validator)
+        self.assertIn("validator_loader_->createUnmanagedInstance", optimizer)
+        self.assertIn("true);", footprint_gate)  # filled footprint
+        self.assertIn("NO_INFORMATION", footprint_gate)
+        self.assertIn("corner_motion", validator)
+
+    def test_mppi_profiles_publish_softmax_without_candidate_substitution(self):
+        config = _nav_config()
+        standard = config["MPPI_Standard_Controller"]
+        self.assertFalse(standard["TrajectoryValidator"]["enabled"])
+        state = config["MPPI_State_Lattice_Controller"]
+        self.assertFalse(state["TrajectoryValidator"]["enabled"])
+        for controller_name in (
+            "MPPI_Standard_Controller",
+            "MPPI_State_Lattice_Controller",
+        ):
+            self.assertNotIn("SafeCandidateRescue", config[controller_name])
+
+        optimizer = _read("mppi_controller/src/optimizer.cpp")
+        optimizer_header = _read("mppi_controller/include/mppi_controller/optimizer.hpp")
+        self.assertNotIn("SafeCandidateRescue", optimizer + optimizer_header)
+        self.assertNotIn("safe_candidate_rescue", optimizer + optimizer_header)
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(
+                    SOURCE_DIR,
+                    "mppi_controller",
+                    "src",
+                    "safe_candidate_rescue.cpp",
+                )
+            )
+        )
+        self.assertIn("fallback(needs_fallback)", optimizer)
+        self.assertIn(
+            '"TrajectoryValidator/enabled", trajectory_validation_enabled_',
+            optimizer,
+        )
+        self.assertIn("if (!trajectory_validation_enabled_)", optimizer)
+
+    def test_ros1_port_exposes_current_upstream_optimizer_capabilities(self):
+        settings = _read(
+            "mppi_controller/include/mppi_controller/models/optimizer_settings.hpp"
+        )
+        motion_model = _read("mppi_controller/include/mppi_controller/motion_models.hpp")
+        critic_root = ET.fromstring(_read("mppi_controller/critics.xml"))
+        critic_types = {node.get("type") for node in critic_root.findall(".//class")}
+
+        for capability in (
+            "open_loop",
+            "regenerate_noises",
+            "clamp_raw_controls",
+            "model_delay_vx",
+            "model_delay_vy",
+            "model_delay_wz",
+            "sgf_order",
+        ):
+            self.assertIn(capability, settings)
+        self.assertIn("pushCommandHistory", motion_model)
+        self.assertIn("applyDelayShift", motion_model)
+        self.assertIn("mppi::critics::ObstaclesCritic", critic_types)
+        self.assertIn("mppi::critics::VelocityDeadbandCritic", critic_types)
+
+
+if __name__ == "__main__":
+    unittest.main()

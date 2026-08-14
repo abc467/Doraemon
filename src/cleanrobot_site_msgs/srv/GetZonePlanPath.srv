@@ -15,6 +15,7 @@ string display_frame
 string storage_frame
 PolygonRing display_path
 PolygonRing map_path
+int32[] block_ids # paired by index with display_paths/map_paths in execution order
 PolygonRing[] display_paths
 PolygonRing[] map_paths
 geometry_msgs/Pose2D display_entry_pose

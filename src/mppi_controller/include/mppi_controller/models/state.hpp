@@ -25,6 +25,10 @@ struct State
 
   geometry_msgs::PoseStamped pose;  // 当前位姿
   geometry_msgs::Twist speed; // 当前速度
+  // Length of the transformed local reference beginning at the current
+  // nearest progress point. Upstream Nav2 uses this to hand authority from
+  // path critics to goal critics without inventing a terminal state mode.
+  float local_path_length{0.0f};
 
   /**
     * @brief Reset state data
@@ -41,4 +45,3 @@ struct State
   }
 };
 }  // namespace mppi::models
-

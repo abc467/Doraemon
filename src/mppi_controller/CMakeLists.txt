@@ -4,25 +4,30 @@ project(mppi_controller)
 set(CMAKE_CXX_STANDARD 17)
 
 find_package(catkin REQUIRED COMPONENTS
+  angles
   base_local_planner
   costmap_2d
-  dynamic_reconfigure
+  diagnostic_msgs
   geometry_msgs
+  mbf_abstract_core
   nav_core
   nav_msgs
+  pluginlib
   roscpp
-  roscpp
+  std_msgs
+  std_srvs
   tf
+  tf2
+  tf2_geometry_msgs
 )
 find_package(Eigen3 REQUIRED)
 find_package(OpenMP REQUIRED)
-find_package(pluginlib REQUIRED)
-
 catkin_package(
-   INCLUDE_DIRS include
-  #  LIBRARIES mppi_controller
-  #  CATKIN_DEPENDS base_local_planner costmap_2d dynamic_reconfigure geometry_msgs nav_core nav_msgs roscpp tf pluginlib 
-  #  DEPENDS system_lib
+  INCLUDE_DIRS include
+  LIBRARIES mppi_controller_lib mppi_critics_lib
+  CATKIN_DEPENDS
+    angles base_local_planner costmap_2d diagnostic_msgs geometry_msgs mbf_abstract_core nav_core nav_msgs
+    pluginlib roscpp std_msgs std_srvs tf tf2 tf2_geometry_msgs
 )
 
 include_directories(
@@ -41,6 +46,7 @@ add_library(mppi_controller_lib SHARED
   src/mppi_controller.cpp
   src/critic_manager.cpp
   src/noise_generator.cpp
+  src/optimal_trajectory_validator.cpp
   src/optimizer.cpp
   src/path_handler.cpp
   src/trajectory_visualizer.cpp)
@@ -56,6 +62,7 @@ target_link_libraries(mppi_controller_lib
 add_library(mppi_critics_lib SHARED
   src/critics/constraint_critic.cpp
   src/critics/cost_critic.cpp
+  src/critics/obstacles_critic.cpp
   src/critics/goal_critic.cpp
   src/critics/goal_angle_critic.cpp
   src/critics/path_align_critic.cpp
@@ -65,14 +72,28 @@ add_library(mppi_critics_lib SHARED
   src/critics/twirling_critic.cpp
   src/critics/velocity_deadband_critic.cpp
 )
-target_compile_options(mppi_critics_lib PUBLIC -fconcepts -O3)
+target_compile_options(mppi_critics_lib PUBLIC -O3)
 target_include_directories(mppi_critics_lib  PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:include/${PROJECT_NAME}>")
 
 target_link_libraries(mppi_critics_lib
+  mppi_controller_lib
   ${catkin_LIBRARIES}
   OpenMP::OpenMP_CXX)
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_official_mppi_core
+    test/test_official_mppi_core.cpp)
+  if(TARGET test_official_mppi_core)
+    target_link_libraries(test_official_mppi_core
+      mppi_controller_lib
+      mppi_critics_lib
+      ${catkin_LIBRARIES}
+    )
+    add_dependencies(test_official_mppi_core ${catkin_EXPORTED_TARGETS})
+  endif()
+endif()
 
 
 install(TARGETS mppi_controller_lib mppi_critics_lib
@@ -83,6 +104,14 @@ install(TARGETS mppi_controller_lib mppi_critics_lib
 
 install(DIRECTORY include/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+)
+
+install(FILES lp_plugin.xml critics.xml validators.xml UPSTREAM.md
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )
 
 

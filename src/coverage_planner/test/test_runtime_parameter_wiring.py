@@ -2,12 +2,20 @@
 
 import os
 import subprocess
+import sys
 import unittest
 import xml.etree.ElementTree as ET
+
+import yaml
 
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(THIS_DIR)))
+PKG_SRC = os.path.join(REPO_ROOT, "src", "coverage_planner", "src")
+if PKG_SRC not in sys.path:
+    sys.path.insert(0, PKG_SRC)
+
+from coverage_planner.coverage_planner_core.types import PlannerParams
 
 
 def read_repo_file(relative_path):
@@ -72,6 +80,98 @@ BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS=
 
 
 class RuntimeParameterWiringTest(unittest.TestCase):
+    def test_all_transient_sensor_obstacles_are_local_costmap_only(self):
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/config/nav/costmap_common.yaml",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            common = yaml.safe_load(handle)
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/config/nav/global_costmap.yaml",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            global_costmap = yaml.safe_load(handle)["global_costmap"]
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/config/nav/local_costmap.yaml",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            local_costmap = yaml.safe_load(handle)["local_costmap"]
+
+        camera_sources = {
+            "left_cam_source",
+            "right_cam_source",
+            "up_cam_source",
+        }
+        self.assertEqual(
+            common["obstacle_layer"]["observation_sources"].split(),
+            ["laser_scan_sensor"],
+        )
+        self.assertTrue(
+            camera_sources.isdisjoint(common["obstacle_layer"].keys())
+        )
+        self.assertNotIn("obstacle_layer", global_costmap)
+        global_plugins = {
+            plugin["name"] for plugin in global_costmap["plugins"]
+        }
+        self.assertNotIn("obstacle_layer", global_plugins)
+        self.assertEqual(
+            global_plugins,
+            {"static_layer", "keepout_constraint_layer", "inflation_layer"},
+        )
+
+        self.assertEqual(
+            local_costmap["obstacle_layer"]["observation_sources"].split(),
+            [
+                "laser_scan_sensor",
+                "left_cam_source",
+                "right_cam_source",
+                "up_cam_source",
+            ],
+        )
+        self.assertNotIn("camera_obstacle_layer", local_costmap)
+        for source in camera_sources:
+            with self.subTest(source=source):
+                source_config = local_costmap["obstacle_layer"][source]
+                self.assertEqual(source_config["data_type"], "PointCloud2")
+                self.assertTrue(source_config["marking"])
+                self.assertFalse(source_config["clearing"])
+                self.assertNotIn("observation_ttl", source_config)
+
+        launch_root = ET.parse(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/launch/mbf_nav.launch",
+            )
+        ).getroot()
+        mbf_node = launch_root.find("./node[@name='move_base_flex']")
+        self.assertIsNotNone(mbf_node)
+        launch_params = {
+            param.get("name") for param in mbf_node.findall("param")
+        }
+        for source in camera_sources:
+            with self.subTest(launch_source=source):
+                suffix = "%s/topic" % source
+                self.assertIn(
+                    "local_costmap/obstacle_layer/" + suffix,
+                    launch_params,
+                )
+                self.assertNotIn(
+                    "global_costmap/obstacle_layer/" + suffix,
+                    launch_params,
+                )
+
     def test_map_constraints_receives_commercial_robot_id(self):
         launch_root = ET.parse(
             os.path.join(
@@ -86,6 +186,190 @@ class RuntimeParameterWiringTest(unittest.TestCase):
             for item in map_constraints.findall("param")
         }
         self.assertEqual(params.get("robot_id"), "$(arg robot_id)")
+        self.assertEqual(params.get("constraints_topic"), "/map_constraints/current")
+        self.assertEqual(
+            params.get("effective_constraints_topic"),
+            "/map_constraints/effective",
+        )
+        self.assertNotEqual(
+            params.get("constraints_topic"),
+            params.get("effective_constraints_topic"),
+        )
+        launch_args = {
+            item.get("name"): item.get("default")
+            for item in launch_root.findall("arg")
+        }
+        self.assertEqual(
+            launch_args.get("planner_defaults_yaml"),
+            "$(find coverage_planner)/config/planner_server_defaults.yaml",
+        )
+        shared_defaults = map_constraints.find(
+            "./rosparam[@command='load'][@file='$(arg planner_defaults_yaml)']"
+        )
+        self.assertIsNotNone(shared_defaults)
+
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/config/nav/costmap_common.yaml",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            costmap = yaml.safe_load(handle)
+        self.assertEqual(
+            costmap["keepout_constraint_layer"]["constraints_topic"],
+            "/map_constraints/current",
+        )
+
+    def test_all_constraint_compilers_load_shared_defaults(self):
+        launch_root = ET.parse(
+            os.path.join(
+                REPO_ROOT,
+                "src/coverage_planner/launch/planner_server.launch",
+            )
+        ).getroot()
+        for node_name in (
+            "coverage_planner_server",
+            "rect_zone_planner",
+            "site_editor_service",
+        ):
+            with self.subTest(node_name=node_name):
+                node = launch_root.find(".//node[@name='%s']" % node_name)
+                self.assertIsNotNone(node)
+                shared_defaults = node.find(
+                    "./rosparam[@command='load'][@file='$(arg planner_defaults_yaml)']"
+                )
+                self.assertIsNotNone(shared_defaults)
+
+    def test_edge_stitch_reference_windows_match_core_defaults(self):
+        defaults_path = os.path.join(
+            REPO_ROOT,
+            "src/coverage_planner/config/planner_server_defaults.yaml",
+        )
+        with open(defaults_path, "r", encoding="utf-8") as handle:
+            planner = yaml.safe_load(handle)["planner"]
+
+        expected = {
+            "pre_proj_min": 0.90,
+            "pre_proj_max": 1.00,
+            "pre_prefix_max": 1.40,
+            "e_pre_min": 0.90,
+            "e_pre_max": 1.00,
+        }
+        core_defaults = PlannerParams()
+        for name, value in expected.items():
+            with self.subTest(name=name):
+                self.assertAlmostEqual(float(planner[name]), value, places=9)
+                self.assertAlmostEqual(
+                    float(getattr(core_defaults, name)),
+                    value,
+                    places=9,
+                )
+
+        self.assertLessEqual(planner["pre_proj_min"], planner["pre_proj_max"])
+        self.assertGreaterEqual(
+            planner["pre_prefix_max"],
+            planner["pre_proj_max"],
+        )
+        self.assertLessEqual(planner["e_pre_min"], planner["e_pre_max"])
+
+    def test_verified_coverage_clearance_defaults_are_consistent(self):
+        defaults_path = os.path.join(
+            REPO_ROOT,
+            "src/coverage_planner/config/planner_server_defaults.yaml",
+        )
+        with open(defaults_path, "r", encoding="utf-8") as handle:
+            defaults = yaml.safe_load(handle)
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/config/nav/costmap_common.yaml",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            costmap = yaml.safe_load(handle)
+
+        planner = defaults["planner"]
+        expected = {
+            "wall_margin_m": 0.38,
+            "edge_corner_radius_m": 0.40,
+            "edge_corner_pull": 0.10,
+        }
+        core_defaults = PlannerParams()
+        for name, value in expected.items():
+            with self.subTest(name=name):
+                self.assertAlmostEqual(float(planner[name]), value, places=9)
+                self.assertAlmostEqual(
+                    float(getattr(core_defaults, name)),
+                    value,
+                    places=9,
+                )
+
+        self.assertAlmostEqual(
+            float(defaults["default_no_go_long_edge_normal_buffer_m"]),
+            0.115,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            float(defaults["default_no_go_short_edge_normal_buffer_m"]),
+            0.40,
+            places=9,
+        )
+        self.assertAlmostEqual(float(costmap["footprint_padding"]), 0.0, places=9)
+        self.assertAlmostEqual(float(defaults["robot"]["cov_width"]), 0.59, places=9)
+        self.assertAlmostEqual(
+            float(costmap["inflation_layer"]["cost_scaling_factor"]),
+            10.0,
+            places=9,
+        )
+        self.assertAlmostEqual(
+            float(costmap["inflation_layer"]["inflation_radius"]),
+            1.0,
+            places=9,
+        )
+
+    def test_theta_star_keeps_connect_paths_outside_near_keepout_costs(self):
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "src/cleanrobot/config/nav/mbf_nav.yaml",
+            ),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            theta_star = yaml.safe_load(handle)["ThetaStarPlanner"]
+
+        self.assertEqual(int(theta_star["max_allowed_cost"]), 26)
+        self.assertAlmostEqual(
+            float(theta_star["w_traversal_cost"]),
+            8.0,
+            places=9,
+        )
+        self.assertTrue(bool(theta_star["use_footprint_path_check"]))
+        self.assertTrue(bool(theta_star["se2_refinement_enabled"]))
+        self.assertTrue(bool(theta_star["terminal_approach_enabled"]))
+        self.assertAlmostEqual(
+            float(theta_star["terminal_straight_length"]), 0.40, places=9
+        )
+        self.assertAlmostEqual(
+            float(theta_star["terminal_min_straight_length"]), 0.0, places=9
+        )
+        self.assertAlmostEqual(
+            float(theta_star["terminal_straight_length_step"]), 0.10, places=9
+        )
+        self.assertAlmostEqual(
+            float(theta_star["terminal_min_turn_radius"]), 0.0, places=9
+        )
+        self.assertAlmostEqual(
+            float(theta_star["terminal_sample_step"]), 0.05, places=9
+        )
+        self.assertAlmostEqual(
+            float(theta_star["terminal_max_prefix_splice_distance"]),
+            1.80,
+            places=9,
+        )
 
     def test_odometry_vehicle_parameters_are_explicit_launch_arguments(self):
         source = read_repo_file("scripts/start_runtime.sh")

@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "base_local_planner/costmap_model.h"
+#include "base_local_planner/footprint_helper.h"
 #include "costmap_2d/inflation_layer.h"
 #include <costmap_2d/footprint.h>
 
@@ -41,7 +41,8 @@ protected:
     */
   bool inCollision(
     float cost, float x, float y, float theta,
-    base_local_planner::CostmapModel & collision_checker,
+    const costmap_2d::Costmap2D & costmap,
+    base_local_planner::FootprintHelper & footprint_helper,
     const std::vector<geometry_msgs::Point> & footprint);
 
   /**
@@ -88,11 +89,12 @@ protected:
   float possible_collision_cost_;
 
   bool consider_footprint_{false};
-  bool is_tracking_unknown_{true};
+  bool allow_unknown_{false};
   float circumscribed_radius_{0.0f};
   float circumscribed_cost_{0.0f};
   float collision_cost_{0.0f};
   float critical_cost_{0.0f};
+  int near_collision_cost_{253};
   float weight_{0};
   int trajectory_point_step_;
 

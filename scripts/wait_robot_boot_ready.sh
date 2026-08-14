@@ -61,8 +61,8 @@ REQUIRE_LIDAR_PING="${DORAEMON_REQUIRE_LIDAR_PING:-true}"
 START_DEPTH_CAMERAS="${RUNTIME_START_DEPTH_CAMERAS:-false}"
 NO_ACTION_ACCEPTANCE="${DORAEMON_NO_ACTION_ACCEPTANCE:-true}"
 ACTION_TEST_APPROVED="${DORAEMON_ACTION_TEST_APPROVED:-false}"
-REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}"
-REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}"
+REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-false}"
+REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-false}"
 ORBBEC_CAMERA1_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER:-}"
 ORBBEC_CAMERA2_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER:-}"
 ORBBEC_CAMERA3_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}"
@@ -238,28 +238,37 @@ validate_orbbec_commercial_baseline() {
 }
 
 validate_installed_commercial_udev_rules() {
+  local require_orbbec_rule="${1:-true}"
   local serial_rule="/etc/udev/rules.d/99-doraemon-a26022-serial.rules"
   local orbbec_rule="/etc/udev/rules.d/99-obsensor-ros1-libusb.rules"
   local expected_orbbec_rule="${REPO_ROOT}/src/orbbec-ros-sdk/scripts/99-obsensor-ros1-libusb.rules"
-  local rule=""
 
-  for rule in "${serial_rule}" "${orbbec_rule}"; do
-    if [[ ! -f "${rule}" || -L "${rule}" || \
-          "$(stat -c '%U:%G %a' "${rule}" 2>/dev/null || true)" != "root:root 644" ]]; then
-      log "[ERROR] installed udev rule must be a root:root 0644 regular file: ${rule}"
-      return 1
-    fi
-  done
+  if [[ ! -f "${serial_rule}" || -L "${serial_rule}" || \
+        "$(stat -c '%U:%G %a' "${serial_rule}" 2>/dev/null || true)" != "root:root 644" ]]; then
+    log "[ERROR] installed udev rule must be a root:root 0644 regular file: ${serial_rule}"
+    return 1
+  fi
   if grep -q 'REPLACE_' "${serial_rule}"; then
     log "[ERROR] serial udev rule still contains a placeholder"
     return 1
   fi
-  if [[ ! -f "${expected_orbbec_rule}" || -L "${expected_orbbec_rule}" ]] || \
-      ! cmp -s "${expected_orbbec_rule}" "${orbbec_rule}"; then
-    log "[ERROR] installed Orbbec udev rule does not match this release"
-    return 1
+
+  if truthy "${require_orbbec_rule}"; then
+    if [[ ! -f "${orbbec_rule}" || -L "${orbbec_rule}" || \
+          "$(stat -c '%U:%G %a' "${orbbec_rule}" 2>/dev/null || true)" != "root:root 644" ]]; then
+      log "[ERROR] installed udev rule must be a root:root 0644 regular file: ${orbbec_rule}"
+      return 1
+    fi
+    if [[ ! -f "${expected_orbbec_rule}" || -L "${expected_orbbec_rule}" ]] || \
+        ! cmp -s "${expected_orbbec_rule}" "${orbbec_rule}"; then
+      log "[ERROR] installed Orbbec udev rule does not match this release"
+      return 1
+    fi
+    log "[OK] installed serial and Orbbec udev rules are root-managed"
+  else
+    log "[OK] installed serial udev rule is root-managed"
+    log "[SKIP] Orbbec udev rule audit disabled by non-blocking camera mode"
   fi
-  log "[OK] installed serial and Orbbec udev rules are root-managed"
 }
 
 validate_serial_alias_permissions() {
@@ -350,7 +359,6 @@ if [[ "${ROSBRIDGE_ADDRESS}" != "127.0.0.1" ]]; then
   log "[ERROR] commercial rosbridge must bind only to 127.0.0.1"
   exit 1
 fi
-validate_orbbec_commercial_baseline
 for boolean_name in START_DEPTH_CAMERAS REQUIRE_DEPTH_CAMERA_TOPICS REQUIRE_DEPTH_CAMERA_IDENTITIES NO_ACTION_ACCEPTANCE ACTION_TEST_APPROVED; do
   if ! valid_boolean "${!boolean_name}"; then
     log "[ERROR] ${boolean_name} must be an explicit boolean"
@@ -370,21 +378,18 @@ else
   fi
   log "[WARN] explicitly approved action-test mode is enabled"
 fi
-if ! truthy "${START_DEPTH_CAMERAS}"; then
-  log "[ERROR] commercial preflight requires RUNTIME_START_DEPTH_CAMERAS=true"
-  exit 1
-fi
-if ! truthy "${REQUIRE_DEPTH_CAMERA_TOPICS}" || ! truthy "${REQUIRE_DEPTH_CAMERA_IDENTITIES}"; then
-  log "[ERROR] enabled depth cameras require both topic and identity commercial gates"
-  exit 1
-fi
-
 udevadm settle --timeout=10 || true
 
-validate_installed_commercial_udev_rules
+if truthy "${START_DEPTH_CAMERAS}" && truthy "${REQUIRE_DEPTH_CAMERA_IDENTITIES}"; then
+  validate_orbbec_commercial_baseline
+  validate_installed_commercial_udev_rules true
+  validate_orbbec_usb_node_permissions
+else
+  validate_installed_commercial_udev_rules false
+  log "[WARN] Orbbec device, USB3 topology, permissions, and SDK checks are disabled; camera faults will not block robot startup"
+fi
 validate_serial_alias_permissions "${IMU_DEVICE}" imu
 validate_serial_alias_permissions "${ODOM_DEVICE}" wheel_odom
-validate_orbbec_usb_node_permissions
 
 wait_for "workspace setup" has_workspace_setup
 if truthy "${REQUIRE_IMU_DEVICE}"; then
@@ -413,44 +418,48 @@ if truthy "${REQUIRE_LIDAR_PING}"; then
 else
   log "[SKIP] LiDAR ping check disabled"
 fi
-if ! validate_unique_camera_identities; then
-  log "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique"
-  exit 1
-fi
-wait_for "Orbbec left serial ${ORBBEC_CAMERA1_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA1_SERIAL_NUMBER}"
-wait_for "Orbbec right serial ${ORBBEC_CAMERA2_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA2_SERIAL_NUMBER}"
-wait_for "Orbbec front serial ${ORBBEC_CAMERA3_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA3_SERIAL_NUMBER}"
-wait_for "Orbbec left USB3 topology ${ORBBEC_CAMERA1_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA1_USB_PORT}"
-wait_for "Orbbec right USB3 topology ${ORBBEC_CAMERA2_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA2_USB_PORT}"
-wait_for "Orbbec front USB3 topology ${ORBBEC_CAMERA3_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA3_USB_PORT}"
+if truthy "${START_DEPTH_CAMERAS}" && truthy "${REQUIRE_DEPTH_CAMERA_IDENTITIES}"; then
+  if ! validate_unique_camera_identities; then
+    log "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique"
+    exit 1
+  fi
+  wait_for "Orbbec left serial ${ORBBEC_CAMERA1_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA1_SERIAL_NUMBER}"
+  wait_for "Orbbec right serial ${ORBBEC_CAMERA2_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA2_SERIAL_NUMBER}"
+  wait_for "Orbbec front serial ${ORBBEC_CAMERA3_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA3_SERIAL_NUMBER}"
+  wait_for "Orbbec left USB3 topology ${ORBBEC_CAMERA1_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA1_USB_PORT}"
+  wait_for "Orbbec right USB3 topology ${ORBBEC_CAMERA2_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA2_USB_PORT}"
+  wait_for "Orbbec front USB3 topology ${ORBBEC_CAMERA3_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA3_USB_PORT}"
 
-orbbec_binary="$(orbbec_list_devices_binary)" || {
-  log "[ERROR] fixed Orbbec SDK enumerator is unavailable in this release"
-  exit 1
-}
-workspace_setup="$(orbbec_workspace_setup)" || {
-  log "[ERROR] workspace setup disappeared before Orbbec SDK enumeration"
-  exit 1
-}
-set +u
-# shellcheck disable=SC1091
-source /opt/ros/noetic/setup.bash
-# shellcheck disable=SC1090
-source "${workspace_setup}"
-set -u
-orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))
-if (( orbbec_remaining_sec <= 0 )); then
-  log "[ERROR] global boot wait budget was exhausted before Orbbec SDK enumeration"
-  exit 1
-fi
-if ! python3 "${SCRIPT_DIR}/verify_orbbec_sdk_pairs.py" \
-    --binary "${orbbec_binary}" \
-    --timeout-seconds "${orbbec_remaining_sec}" \
-    --expected "${ORBBEC_CAMERA1_SERIAL_NUMBER}|${ORBBEC_CAMERA1_USB_PORT}" \
-    --expected "${ORBBEC_CAMERA2_SERIAL_NUMBER}|${ORBBEC_CAMERA2_USB_PORT}" \
-    --expected "${ORBBEC_CAMERA3_SERIAL_NUMBER}|${ORBBEC_CAMERA3_USB_PORT}"; then
-  log "[ERROR] Orbbec SDK serial/topology stability gate failed"
-  exit 1
+  orbbec_binary="$(orbbec_list_devices_binary)" || {
+    log "[ERROR] fixed Orbbec SDK enumerator is unavailable in this release"
+    exit 1
+  }
+  workspace_setup="$(orbbec_workspace_setup)" || {
+    log "[ERROR] workspace setup disappeared before Orbbec SDK enumeration"
+    exit 1
+  }
+  set +u
+  # shellcheck disable=SC1091
+  source /opt/ros/noetic/setup.bash
+  # shellcheck disable=SC1090
+  source "${workspace_setup}"
+  set -u
+  orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))
+  if (( orbbec_remaining_sec <= 0 )); then
+    log "[ERROR] global boot wait budget was exhausted before Orbbec SDK enumeration"
+    exit 1
+  fi
+  if ! python3 "${SCRIPT_DIR}/verify_orbbec_sdk_pairs.py" \
+      --binary "${orbbec_binary}" \
+      --timeout-seconds "${orbbec_remaining_sec}" \
+      --expected "${ORBBEC_CAMERA1_SERIAL_NUMBER}|${ORBBEC_CAMERA1_USB_PORT}" \
+      --expected "${ORBBEC_CAMERA2_SERIAL_NUMBER}|${ORBBEC_CAMERA2_USB_PORT}" \
+      --expected "${ORBBEC_CAMERA3_SERIAL_NUMBER}|${ORBBEC_CAMERA3_USB_PORT}"; then
+    log "[ERROR] Orbbec SDK serial/topology stability gate failed"
+    exit 1
+  fi
+else
+  log "[SKIP] Orbbec serial/topology/SDK readiness gate disabled; continuing without camera startup dependency"
 fi
 
 log "[OK] Doraemon robot boot dependencies are ready"

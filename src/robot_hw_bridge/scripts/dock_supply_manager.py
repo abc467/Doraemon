@@ -10,8 +10,9 @@ This node encapsulates the real-robot workflow:
   3) Optional mechanical connect (legacy cylinder/rod flow)
   4) Enable charge (robot relay + station charger)
   5) Wait until target SOC and disable charge
-  6) Drain sewage until a fresh sewage level reports zero, then settle in place
-  7) Optional refill (disabled in the production configuration)
+  6) Drain sewage until a fresh sewage level reports zero
+  7) Refill clean water until a fresh clean-water level reports above 74%,
+     close the refill outputs, then hold in place for 20 seconds
   8) Optional mechanical disconnect (legacy cylinder/rod flow)
 
 Temporary fallback:
@@ -27,7 +28,7 @@ Interfaces:
   - Service  : /dock_supply/recovery_retreat (std_srvs/Trigger) -> back out without completing the charge workflow
   - Topic    : /dock_supply/state          (std_msgs/String)   -> IDLE/LOCK_DOCK_POSE/SEARCH_DOCK_POSE/PRECISE_DOCKING/WAIT_STATION_IN_PLACE/
                                                            SEARCH_STATION_IN_PLACE/
-                                                           DRAINING/DRAIN_SETTLING/REFILLING/CHARGE_CMD_SENT/CHARGE_CONFIRMED/READY_TO_EXIT/EXIT_BACKING/
+                                                           DRAINING/REFILLING/REFILL_SETTLING/CHARGE_CMD_SENT/CHARGE_CONFIRMED/READY_TO_EXIT/EXIT_BACKING/
                                                            RECOVERY_BACKING/RECOVERY_BACK_DONE/DONE/FAILED/CANCELED
 
 Dependencies:
@@ -107,9 +108,12 @@ class DockSupplyManager:
     def __init__(self):
         # thresholds
         self.target_soc = float(rospy.get_param('~target_soc', 0.95))
-        self.target_clean_level = int(rospy.get_param('~target_clean_level', 35))
+        # Refill stops only after clean_level is strictly greater than this
+        # threshold. With the production threshold at 74%, a reading of 74
+        # keeps the refill path open and 75 closes it.
+        self.target_clean_level = int(rospy.get_param('~target_clean_level', 74))
         self.enable_drain = bool(rospy.get_param('~enable_drain', True))
-        self.enable_refill = bool(rospy.get_param('~enable_refill', False))
+        self.enable_refill = bool(rospy.get_param('~enable_refill', True))
         self.test_continue_on_charge_timeout = bool(rospy.get_param('~test_continue_on_charge_timeout', False))
 
         # docking
@@ -163,8 +167,8 @@ class DockSupplyManager:
         # timeouts
         self.rod_timeout_s = float(rospy.get_param('~rod_timeout_s', 25.0))
         self.drain_timeout_s = max(1.0, float(rospy.get_param('~drain_timeout_s', 600.0)))
-        self.drain_settle_s = max(0.0, float(rospy.get_param('~drain_settle_s', 30.0)))
         self.refill_timeout_s = max(1.0, float(rospy.get_param('~refill_timeout_s', 600.0)))
+        self.refill_settle_s = max(0.0, float(rospy.get_param('~refill_settle_s', 20.0)))
         self.combined_status_wait_s = max(0.1, float(rospy.get_param('~combined_status_wait_s', 5.0)))
         self.combined_status_stale_timeout_s = max(
             0.1, float(rospy.get_param('~combined_status_stale_timeout_s', 3.0))
@@ -233,16 +237,17 @@ class DockSupplyManager:
 
         self._dock_client = actionlib.SimpleActionClient(self.docking_action_name, AutoDockingAction)
         rospy.loginfo(
-            '[SUPPLY] config: mechanical_connect_enable=%s skip_precise_docking_if_station_in_place=%s direct_charge_after_precise_docking=%s enable_drain=%s enable_refill=%s drain_timeout=%.1fs drain_settle=%.1fs combined_status_stale=%.1fs refill_timeout=%.1fs charge_timeout=%.1fs continue_on_charge_timeout=%s',
+            '[SUPPLY] config: mechanical_connect_enable=%s skip_precise_docking_if_station_in_place=%s direct_charge_after_precise_docking=%s enable_drain=%s enable_refill=%s drain_timeout=%.1fs clean_stop_above=%d%% refill_timeout=%.1fs refill_settle=%.1fs combined_status_stale=%.1fs charge_timeout=%.1fs continue_on_charge_timeout=%s',
             str(self.mechanical_connect_enable),
             str(self.skip_precise_docking_if_station_in_place),
             str(self.direct_charge_after_precise_docking),
             str(self.enable_drain),
             str(self.enable_refill),
             self.drain_timeout_s,
-            self.drain_settle_s,
-            self.combined_status_stale_timeout_s,
+            self.target_clean_level,
             self.refill_timeout_s,
+            self.refill_settle_s,
+            self.combined_status_stale_timeout_s,
             self.charge_timeout_s,
             str(self.test_continue_on_charge_timeout),
         )
@@ -814,7 +819,6 @@ class DockSupplyManager:
                     rospy.loginfo('[SUPPLY] post-charge drain complete: sewage_level=0')
                     self._close_drain_outputs()
                     drain_outputs_active = False
-                    self._run_drain_settle_phase()
                     return
                 rospy.sleep(0.5)
             raise DockSupplyError(
@@ -829,42 +833,28 @@ class DockSupplyManager:
         self._station_cmd(3, False)
         self._tap_cmd(3, 0)
 
-    def _run_drain_settle_phase(self) -> None:
-        if self.drain_settle_s <= 1e-6:
-            return
-        self._set_state('DRAIN_SETTLING')
-        self._stop_move()
-        rospy.loginfo(
-            '[SUPPLY] drain outputs closed; keep robot stopped for %.1fs before exiting',
-            self.drain_settle_s,
-        )
-        deadline = time.monotonic() + self.drain_settle_s
-        while not rospy.is_shutdown():
-            if self._is_canceled():
-                raise DockSupplyError('CANCELED', 'canceled')
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0.0:
-                break
-            rospy.sleep(min(0.2, remaining_s))
-        self._stop_move()
-        rospy.loginfo('[SUPPLY] residual sewage settling complete')
-
     def _run_refill_phase(self) -> None:
         if not self.enable_refill:
             rospy.loginfo('[SUPPLY] skip clean-water refill (enable_refill=false)')
             return
 
         clean = self._wait_for_fresh_combined_level('clean_level', 'FAILED_CLEAN_STATUS_STALE')
-        if clean >= self.target_clean_level:
+        if clean > self.target_clean_level:
             rospy.loginfo(
-                '[SUPPLY] clean-water refill already complete: clean_level=%d target=%d',
+                '[SUPPLY] clean-water level already above stop threshold: clean_level=%d threshold=%d',
                 clean,
                 self.target_clean_level,
             )
+            self._run_refill_settle_phase()
             return
 
         self._set_state('REFILLING')
-        rospy.loginfo('[SUPPLY] refill clean water level=%d -> target=%d', clean, self.target_clean_level)
+        rospy.loginfo(
+            '[SUPPLY] refill clean water: clean_level=%d; stop when above %d',
+            clean,
+            self.target_clean_level,
+        )
+        refill_complete = False
         try:
             self._tap_cmd(2, 1)
             rospy.sleep(0.5)
@@ -881,17 +871,41 @@ class DockSupplyManager:
                         'FAILED_CLEAN_STATUS_STALE',
                         'clean_level became missing, invalid, or stale during refill',
                     )
-                if clean >= self.target_clean_level:
+                if clean > self.target_clean_level:
                     rospy.loginfo('[SUPPLY] clean-water refill complete: clean_level=%d', clean)
-                    return
+                    refill_complete = True
+                    break
                 rospy.sleep(0.5)
-            raise DockSupplyError(
-                'FAILED_REFILL_TIMEOUT',
-                'clean_level did not reach %d within %.1fs' % (self.target_clean_level, self.refill_timeout_s),
-            )
+            if not refill_complete:
+                raise DockSupplyError(
+                    'FAILED_REFILL_TIMEOUT',
+                    'clean_level did not rise above %d within %.1fs'
+                    % (self.target_clean_level, self.refill_timeout_s),
+                )
         finally:
             self._station_cmd(11, False)
             self._tap_cmd(2, 0)
+        self._run_refill_settle_phase()
+
+    def _run_refill_settle_phase(self) -> None:
+        if self.refill_settle_s <= 1e-6:
+            return
+        self._set_state('REFILL_SETTLING')
+        self._stop_move()
+        rospy.loginfo(
+            '[SUPPLY] refill outputs closed; keep robot stopped for %.1fs before finishing supply',
+            self.refill_settle_s,
+        )
+        deadline = time.monotonic() + self.refill_settle_s
+        while not rospy.is_shutdown():
+            if self._is_canceled():
+                raise DockSupplyError('CANCELED', 'canceled')
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0.0:
+                break
+            rospy.sleep(min(0.2, remaining_s))
+        self._stop_move()
+        rospy.loginfo('[SUPPLY] post-refill wait complete')
 
     def _run_charge_phase(self) -> None:
         self._set_state('CHARGE_CMD_SENT')
@@ -982,7 +996,7 @@ class DockSupplyManager:
             self._charge_enable(False)
             rospy.sleep(0.5)
 
-            # 6) post-charge supply. Refill remains behind an explicit switch.
+            # 6) post-charge supply: drain first, then refill and wait.
             self._run_drain_phase()
             self._run_refill_phase()
 

@@ -11,6 +11,7 @@ void NoiseGenerator::initialize(
 {
     settings_ = settings;
     is_holonomic_ = is_holonomic;
+    regenerate_noises_ = settings_.regenerate_noises;
     active_ = true;
 
     ndistribution_vx_ = std::normal_distribution(0.0f, settings_.sampling_std.vx);
@@ -18,12 +19,9 @@ void NoiseGenerator::initialize(
     ndistribution_wz_ = std::normal_distribution(0.0f, settings_.sampling_std.wz);
 
     generateNoisedControls();
-
-    //   if (regenerate_noises_) {
-    //     noise_thread_ = std::thread(std::bind(&NoiseGenerator::noiseThread, this));
-    //   } else {
-    //     generateNoisedControls();
-    //   }
+    if (regenerate_noises_) {
+        noise_thread_ = std::thread(&NoiseGenerator::noiseThread, this);
+    }
 }
 
 void NoiseGenerator::generateNoisedControls()

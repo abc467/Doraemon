@@ -17,6 +17,8 @@ class ExecutorFsmCommandContractTest(unittest.TestCase):
         fsm._run_id = ""
         fsm._pause_req = False
         fsm._cancel_req = False
+        fsm._execution_epoch = 0
+        fsm._state = "IDLE"
         fsm._water_off_latched = False
         fsm._state_changes = []
         fsm._threads = []
@@ -72,6 +74,63 @@ class ExecutorFsmCommandContractTest(unittest.TestCase):
         self.assertEqual(fsm._run_id, "run_123")
         self.assertEqual(fsm._threads, ["start"])
         self.assertEqual(fsm._state_changes, ["START_REQ"])
+
+    @mock.patch("coverage_executor.fsm.rospy.logwarn")
+    def test_start_during_live_execution_does_not_steal_run_ownership(self, _logwarn):
+        fsm = self._fsm()
+        fsm._zone_id = "zone_old"
+        fsm._run_id = "run_old"
+        fsm._pause_req = True
+        fsm._cancel_req = True
+        fsm._running_thread = types.SimpleNamespace(is_alive=lambda: True)
+
+        ExecutorFSM._apply_cmd(fsm, "start zone_id=zone_new run_id=run_new")
+
+        self.assertEqual(fsm._zone_id, "zone_old")
+        self.assertEqual(fsm._run_id, "run_old")
+        self.assertTrue(fsm._pause_req)
+        self.assertTrue(fsm._cancel_req)
+        self.assertEqual(fsm._threads, [])
+        self.assertEqual(fsm._state_changes, [])
+        self.assertIn("CMD_REJECTED:start:EXECUTION_ACTIVE", fsm._events)
+
+    @mock.patch("coverage_executor.fsm.rospy.logwarn")
+    def test_resume_during_live_execution_does_not_clear_cancel(self, _logwarn):
+        fsm = self._fsm()
+        fsm._zone_id = "zone_old"
+        fsm._run_id = "run_old"
+        fsm._cancel_req = True
+        fsm._running_thread = types.SimpleNamespace(is_alive=lambda: True)
+
+        ExecutorFSM._apply_cmd(fsm, "resume run_id=run_new")
+
+        self.assertEqual(fsm._run_id, "run_old")
+        self.assertTrue(fsm._cancel_req)
+        self.assertEqual(fsm._threads, [])
+        self.assertEqual(fsm._state_changes, [])
+        self.assertIn("CMD_REJECTED:resume:EXECUTION_ACTIVE", fsm._events)
+
+    def test_motion_watchdog_accepts_rotation_as_progress(self):
+        anchor, progress_ts = ExecutorFSM._advance_motion_watchdog(
+            (1.0, 2.0, 0.0),
+            10.0,
+            (1.0, 2.0, 0.10),
+            12.0,
+            0.03,
+            0.08,
+        )
+
+        self.assertEqual(anchor, (1.0, 2.0, 0.10))
+        self.assertEqual(progress_ts, 12.0)
+
+    def test_se2_handoff_residual_includes_wrapped_yaw(self):
+        dist, yaw = ExecutorFSM._se2_residual(
+            (1.1, 2.0, -3.13),
+            (1.0, 2.0, 3.13),
+        )
+
+        self.assertAlmostEqual(dist, 0.1)
+        self.assertLess(yaw, 0.03)
 
     @mock.patch("coverage_executor.fsm.rospy.logwarn")
     def test_cancel_while_idle_keeps_executor_idle(self, logwarn):

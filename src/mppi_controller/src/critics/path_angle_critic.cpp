@@ -25,19 +25,20 @@ void PathAngleCritic::initialize()
 
   int mode = 0;
   nh_.param(param_prefix + "mode", mode, mode);
-  mode_ = static_cast<PathAngleMode>(mode);
-  // if (!reversing_allowed_ && mode_ == PathAngleMode::NO_DIRECTIONAL_PREFERENCE) {
-  //   mode_ = PathAngleMode::FORWARD_PREFERENCE;
-  //   ROS_WARN("Path angle mode set to no directional preference, but controller's settings "
-  //     "don't allow for reversing! Setting mode to forward preference.");
-  // }
-  // ROS_INFO_STREAM("Path angle critic initialized with parameters: " << " power: " << power_);
+  mode_ = pathAngleModeFromInt(mode);
+  if (!reversing_allowed_ &&
+      mode_ == PathAngleMode::NO_DIRECTIONAL_PREFERENCE)
+  {
+    mode_ = PathAngleMode::FORWARD_PREFERENCE;
+    ROS_WARN(
+      "PathAngleCritic mode has no directional preference, but vx_min "
+      "disallows reverse; using forward preference");
+  }
 }
 
 void PathAngleCritic::score(CriticData & data)
 {
-  if (!enabled_ ||
-    utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal))
+  if (!enabled_ || data.state.local_path_length <= threshold_to_consider_)
   {
     return;
   }

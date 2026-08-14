@@ -94,6 +94,7 @@
 
   <group if="$(arg enable_rect_zone_planner)">
     <node pkg="coverage_planner" type="rect_zone_planner_node.py" name="rect_zone_planner" output="screen" respawn="true" respawn_delay="2.0">
+      <rosparam command="load" file="$(arg planner_defaults_yaml)"/>
       <param name="plan_db_path" value="$(arg plan_db_path)"/>
       <param name="robot_id" value="$(arg robot_id)"/>
       <param name="map_topic" value="$(arg map_topic)"/>

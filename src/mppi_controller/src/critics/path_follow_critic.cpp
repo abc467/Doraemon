@@ -16,25 +16,33 @@ void PathFollowCritic::initialize()
   param_exists &= nh_.param(param_prefix + "offset_from_furthest", offset_from_furthest_, 6);
   param_exists &= nh_.param(param_prefix + "cost_power", power_, 1);
   param_exists &= nh_.param(param_prefix + "cost_weight", weight_, 5.0f);
+  nh_.param(
+    "path_occupancy_uses_footprint",
+    path_occupancy_uses_footprint_, false);
 
   if(!param_exists){
     ROS_WARN("PathFollowCritic param doesn't exist !!!");
   }else{
     ROS_WARN("PathFollowCritic param exist !!!");
   }
+  ROS_INFO(
+    "PathFollowCritic path occupancy uses %s",
+    path_occupancy_uses_footprint_ ?
+    "filled footprint" : "official center point");
 
 }
 
 void PathFollowCritic::score(CriticData & data)
 {
   if (!enabled_ || data.path.x.size() < 2 ||
-    utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal))
+    data.state.local_path_length < threshold_to_consider_)
   {
     return;
   }
 
   utils::setPathFurthestPointIfNotSet(data);
-  utils::setPathCostsIfNotSet(data, costmap_ros_);
+  utils::setPathCostsIfNotSet(
+    data, costmap_ros_, path_occupancy_uses_footprint_);
   const size_t path_size = data.path.x.size() - 1;
 
   // 取最远点并防止越界

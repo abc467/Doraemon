@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/runtime_common.sh"
 
-OUT_DIR="${BAG_OUTPUT_DIR:-/var/log/doraemon/debug-bags}"
+OUT_DIR="${BAG_OUTPUT_DIR:-/home/a/test_bag}"
 PREFIX="${BAG_PREFIX:-loc_debug}"
 PROFILE="${BAG_PROFILE:-analysis}"
 SPLIT_DURATION="${BAG_SPLIT_DURATION:-5m}"
@@ -39,7 +39,7 @@ laser, odometry, IMU, TF, and runtime state topics while avoiding large depth
 camera streams.
 
 Options:
-  --out DIR              Output directory. Default: /var/log/doraemon/debug-bags
+  --out DIR              Output directory. Default: /home/a/test_bag
   --prefix NAME          Bag filename prefix. Default: loc_debug
   --profile NAME         core, analysis, or full. Default: analysis
   --duration DURATION    Split duration passed to rosbag. Default: 5m
@@ -244,9 +244,10 @@ NAV_TOPICS=(
   /move_base_flex/local_costmap/costmap_updates
   /move_base_flex/global_costmap/footprint
   /move_base_flex/local_costmap/footprint
-  /move_base_flex/MPPI_Eco_Controller/optimal_trajectory
   /move_base_flex/MPPI_Standard_Controller/optimal_trajectory
-  /move_base_flex/MPPI_Heavy_Controller/optimal_trajectory
+  /move_base_flex/MPPI_Standard_Controller/critic_stats
+  /move_base_flex/MPPI_State_Lattice_Controller/optimal_trajectory
+  /move_base_flex/MPPI_State_Lattice_Controller/critic_stats
   /move_base_flex/ThetaStarPlanner/theta_star_plan
   /coverage_executor/state
   /coverage_executor/run_progress
@@ -338,7 +339,7 @@ fi
 {
   echo "run_id: ${RUN_ID}"
   echo "start_time: $(date --iso-8601=seconds)"
-  echo "repo_root: ${REPO_ROOT}"
+  echo "repo_root: ${DORAEMON_REPO_ROOT}"
   echo "ros_master_uri: ${ROS_MASTER_URI:-}"
   echo "workspace_setup: ${DORAEMON_WORKSPACE_SETUP:-}"
   echo "ros_master_ready: ${ROS_MASTER_READY}"

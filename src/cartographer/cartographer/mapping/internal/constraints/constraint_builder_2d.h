@@ -61,6 +61,12 @@ struct EstimatedPose {
 // of the Submap.
 transform::Rigid2d ComputeSubmapPose(const Submap2D& submap);
 
+// Keeps points within 'max_range' for active-to-frozen constraints. If that
+// would leave fewer than 'min_points', expands the range only far enough to
+// include 'min_points' instead of jumping to the full cloud.
+sensor::PointCloud FilterActiveFrozenConstraintPointCloud(
+    const sensor::PointCloud& point_cloud, double max_range, int min_points);
+
 // Asynchronously computes constraints.
 //
 // Intermingle an arbitrary number of calls to 'MaybeAddConstraint',
@@ -113,7 +119,7 @@ class ConstraintBuilder2D {
                           const NodeId& node_id,
                           const TrajectoryNode::Data* const constant_data,
                           const transform::Rigid2d& initial_relative_pose,
-                          bool collect_top_candidates = false);
+                          bool active_node_to_frozen_submap = false);
 
   // Schedules exploring a new constraint between 'submap' identified by
   // 'submap_id' and the 'compressed_point_cloud' for 'node_id'.
@@ -124,7 +130,7 @@ class ConstraintBuilder2D {
   void MaybeAddGlobalConstraint(
       const SubmapId& submap_id, const Submap2D* submap, const NodeId& node_id,
       const TrajectoryNode::Data* const constant_data,
-      bool collect_top_candidates = false);
+      bool active_node_to_frozen_submap = false);
 
   // Must be called after all computations related to one node have been added.
   void NotifyEndOfNode();
@@ -169,7 +175,7 @@ class ConstraintBuilder2D {
   // anymore. As output, it may create a new Constraint in 'constraint'.
   void ComputeConstraint(const SubmapId& submap_id, const Submap2D* submap,
                          const NodeId& node_id, bool match_full_submap,
-                         bool collect_top_candidates,
+                         bool active_node_to_frozen_submap,
                          const TrajectoryNode::Data* const constant_data,
                          const transform::Rigid2d& initial_relative_pose,
                          const SubmapScanMatcher& submap_scan_matcher,

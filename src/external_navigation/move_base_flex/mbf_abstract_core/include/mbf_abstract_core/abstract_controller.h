@@ -46,6 +46,8 @@
 #include <geometry_msgs/TwistStamped.h>
 #include <geometry_msgs/PoseStamped.h>
 
+#include <mbf_abstract_core/plan_execution_context.h>
+
 namespace mbf_abstract_core{
 
   class AbstractController{
@@ -100,11 +102,26 @@ namespace mbf_abstract_core{
       virtual bool isGoalReached(double dist_tolerance, double angle_tolerance) = 0;
 
       /**
+       * @brief Whether goal completion includes the controller's own stopped/
+       *        stability policy and must not be bypassed by MBF geometry alone.
+       */
+      virtual bool usesInternalGoalReachedPolicy() const { return false; }
+
+      /**
        * @brief Set the plan that the local planner is following
        * @param plan The plan to pass to the local planner
        * @return True if the plan was updated successfully, false otherwise
        */
       virtual bool setPlan(const std::vector<geometry_msgs::PoseStamped> &plan) = 0;
+
+      /**
+       * @brief Set explicit ownership metadata for the next setPlan call.
+       *
+       * Existing MBF controllers remain source compatible through this no-op
+       * default. Lifecycle-aware wrappers/controllers override it.
+       */
+      virtual void setPlanExecutionContext(
+          const PlanExecutionContext & /*context*/) {}
 
       /**
        * @brief Requests the planner to cancel, e.g. if it takes too much time.

@@ -20,11 +20,11 @@ actuator_profiles:
     # 刷盘升降机构下降距离，范围 0-1800
     brush_down_distance: 1000
     # 清水泵强度，范围 0-100；0 表示关闭
-    water_pump_pwm: 12
+    water_pump_pwm: 2
     # 吸水风机/吸水机强度，范围 0-100；0 表示关闭
-    suction_machine_pwm: 70
+    suction_machine_pwm: 50
     # 真空电机强度，范围 0-100；0 表示关闭
-    vacuum_motor_pwm: 70
+    vacuum_motor_pwm: 50
     # 刷盘高度参数（预留）
     height_scrub: 10
     # 是否启用刷盘高度控制

@@ -119,7 +119,7 @@ void AbstractRecoveryExecution::run()
   try
   {
     outcome_ = behavior_->runBehavior(message_);
-    if (cancel_)
+    if (cancel_.load())
     {
       setState(CANCELED);
     }

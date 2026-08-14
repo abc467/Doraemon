@@ -5,11 +5,11 @@ mode_profiles:
     default_clean_mode: "scrub"
 
   heavy:
-    mbf_controller_name: "MPPI_Heavy_Controller"
+    mbf_controller_name: "MPPI_Standard_Controller"
     actuator_profile_name: "heavy"
     default_clean_mode: "scrub"
 
   eco:
-    mbf_controller_name: "MPPI_Eco_Controller"
+    mbf_controller_name: "MPPI_Standard_Controller"
     actuator_profile_name: "eco"
     default_clean_mode: "scrub"

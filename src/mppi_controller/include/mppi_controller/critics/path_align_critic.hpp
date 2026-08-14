@@ -30,6 +30,7 @@ protected:
   float threshold_to_consider_{0};
   float max_path_occupancy_ratio_{0};
   bool use_path_orientations_{false};
+  bool path_occupancy_uses_footprint_{false};
   int power_{0};
   float weight_{0};
 };

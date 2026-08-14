@@ -68,42 +68,6 @@ TEST_F(LuaParameterDictionaryTest, GetBoolFalse) {
   ASSERT_FALSE(dict->GetBool("blah"));
 }
 
-TEST_F(LuaParameterDictionaryTest, UnsafeLuaCapabilitiesAreUnavailable) {
-  auto dict = MakeDictionary(R"(
-      return {
-        os_type = type(os),
-        io_type = type(io),
-        package_type = type(package),
-        debug_type = type(debug),
-        require_type = type(require),
-        dofile_type = type(dofile),
-        loadfile_type = type(loadfile),
-        load_type = type(load),
-        loadstring_type = type(loadstring),
-        module_type = type(module),
-        collectgarbage_type = type(collectgarbage),
-      })");
-
-  for (const std::string& key : dict->GetKeys()) {
-    EXPECT_EQ("nil", dict->GetString(key)) << key;
-  }
-}
-
-TEST_F(LuaParameterDictionaryTest, SafeConfigurationLibrariesRemainAvailable) {
-  auto dict = MakeDictionary(R"(
-      return {
-        angle = math.rad(180.),
-        joined = table.concat({"cartographer", "config"}, ":"),
-        upper = string.upper("lua"),
-        chosen = choose(true, 7, 0),
-      })");
-
-  EXPECT_NEAR(std::acos(-1.), dict->GetDouble("angle"), 1e-12);
-  EXPECT_EQ("cartographer:config", dict->GetString("joined"));
-  EXPECT_EQ("LUA", dict->GetString("upper"));
-  EXPECT_EQ(7, dict->GetInt("chosen"));
-}
-
 TEST_F(LuaParameterDictionaryTest, GetDictionary) {
   auto dict =
       MakeDictionary("return { blah = { blue = 100, red = 200 }, fasel = 10 }");

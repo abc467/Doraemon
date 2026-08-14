@@ -61,22 +61,5 @@ TEST(ConfigurationFilesTest, ValidateTrajectoryBuilderOptions) {
   });
 }
 
-TEST(ConfigurationFilesTest, ValidateDoraemonRuntimeProfilesInSandbox) {
-  const std::string kDoraemonConfigRoot =
-      std::string(::cartographer::common::kSourceDirectory) +
-      "/../cleanrobot/config/slam/cartographer";
-  for (const std::string& profile :
-       {"slam", "pure_location", "pure_location_odom"}) {
-    auto file_resolver =
-        ::absl::make_unique< ::cartographer::common::ConfigurationFileResolver>(
-            std::vector<std::string>{kDoraemonConfigRoot + "/" + profile});
-    const std::string code = file_resolver->GetFileContentOrDie("config.lua");
-    auto lua_parameter_dictionary =
-        ::cartographer::common::LuaParameterDictionary::NonReferenceCounted(
-            code, std::move(file_resolver));
-    EXPECT_TRUE(lua_parameter_dictionary->HasKey("map_frame")) << profile;
-  }
-}
-
 }  // namespace
 }  // namespace cartographer

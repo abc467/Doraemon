@@ -55,6 +55,35 @@ class ConstraintBuilder2DTest : public ::testing::Test {
   common::testing::ThreadPoolForTesting thread_pool_;
 };
 
+TEST(ConstraintBuilder2DPointCloudTest, ExpandsNearRangeOnlyAsNeeded) {
+  sensor::PointCloud point_cloud;
+  point_cloud.push_back({Eigen::Vector3f(1.f, 0.f, 0.f)});
+  point_cloud.push_back({Eigen::Vector3f(7.9f, 0.f, 0.f)});
+  point_cloud.push_back({Eigen::Vector3f(8.1f, 0.f, 0.f)});
+  point_cloud.push_back({Eigen::Vector3f(12.f, 0.f, 0.f)});
+
+  const sensor::PointCloud filtered =
+      FilterActiveFrozenConstraintPointCloud(point_cloud, 8., 2);
+  ASSERT_EQ(filtered.size(), 2u);
+  EXPECT_FLOAT_EQ(filtered[0].position.x(), 1.f);
+  EXPECT_FLOAT_EQ(filtered[1].position.x(), 7.9f);
+
+  const sensor::PointCloud smoothly_expanded =
+      FilterActiveFrozenConstraintPointCloud(point_cloud, 8., 3);
+  ASSERT_EQ(smoothly_expanded.size(), 3u);
+  EXPECT_FLOAT_EQ(smoothly_expanded[0].position.x(), 1.f);
+  EXPECT_FLOAT_EQ(smoothly_expanded[1].position.x(), 7.9f);
+  EXPECT_FLOAT_EQ(smoothly_expanded[2].position.x(), 8.1f);
+
+  const sensor::PointCloud all_available =
+      FilterActiveFrozenConstraintPointCloud(point_cloud, 8., 4);
+  EXPECT_EQ(all_available.size(), point_cloud.size());
+
+  const sensor::PointCloud disabled =
+      FilterActiveFrozenConstraintPointCloud(point_cloud, 0., 2);
+  EXPECT_EQ(disabled.size(), point_cloud.size());
+}
+
 TEST_F(ConstraintBuilder2DTest, CallsBack) {
   EXPECT_EQ(constraint_builder_->GetNumFinishedNodes(), 0);
   EXPECT_CALL(mock_, Run(::testing::IsEmpty()));

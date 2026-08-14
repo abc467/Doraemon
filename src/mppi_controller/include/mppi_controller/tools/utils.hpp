@@ -2,10 +2,14 @@
 
 #include <Eigen/Dense>
 
+#include <cmath>
+#include <cstdint>
 #include <vector>
 #include <string>
 
 #include <ros/ros.h>
+#include <base_local_planner/footprint_helper.h>
+#include <costmap_2d/cost_values.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Path.h>
 #include <geometry_msgs/TwistStamped.h>
@@ -22,6 +26,7 @@
 #include "mppi_controller/models/optimizer_settings.hpp"
 #include "mppi_controller/models/control_sequence.hpp"
 #include "mppi_controller/models/path.hpp"
+#include "mppi_controller/tools/footprint_collision.hpp"
 #include "mppi_controller/critic_data.hpp"
 
 namespace mppi::utils
@@ -260,10 +265,18 @@ inline void savitskyGolayFilter(
   std::array<mppi::models::Control, 4> & control_history,
   const models::OptimizerSettings & settings)
 {
-  // Savitzky-Golay Quadratic, 9-point Coefficients
+  // Nav2 supports either a degree-1 moving average or the standard degree-2
+  // Savitzky-Golay filter over the same 9-point window.
   Eigen::Array<float, 9, 1> filter;
-  filter << -21.0f, 14.0f, 39.0f, 54.0f, 59.0f, 54.0f, 39.0f, 14.0f, -21.0f;
-  filter /= 231.0f;
+  if (settings.sgf_order == 1u) {
+    filter.setOnes();
+    filter /= 9.0f;
+  } else {
+    filter <<
+      -21.0f, 14.0f, 39.0f, 54.0f, 59.0f,
+      54.0f, 39.0f, 14.0f, -21.0f;
+    filter /= 231.0f;
+  }
 
   // 若窗口太窄，则平滑无意义
   const unsigned int num_sequences = control_sequence.vx.size() - 1;
@@ -432,34 +445,54 @@ inline geometry_msgs::TwistStamped toTwistStamped(
  */
 inline size_t findPathFurthestReachedPoint(const CriticData & data)
 {
-  int traj_cols = data.trajectories.x.cols();
-  // 提取所有候选轨迹的终点坐标
-  const auto traj_x = data.trajectories.x.col(traj_cols - 1);
-  const auto traj_y = data.trajectories.y.col(traj_cols - 1);
-
-  // 路径点与轨迹终点的距离矩阵计算
-  const auto dx = (data.path.x.transpose()).replicate(traj_x.rows(), 1).colwise() - traj_x;
-  const auto dy = (data.path.y.transpose()).replicate(traj_y.rows(), 1).colwise() - traj_y;
-  // 计算每个路径点与每个轨迹终点的欧氏距离平方 [batch_size, n_path_points]
-  const auto dists = dx * dx + dy * dy;
-
-  int max_id_by_trajectories = 0, min_id_by_path = 0;
-  float min_distance_by_path = std::numeric_limits<float>::max();
-  size_t n_rows = dists.rows();
-  size_t n_cols = dists.cols();
-  for (size_t i = 0; i != n_rows; i++) {
-    min_id_by_path = 0;
-    min_distance_by_path = std::numeric_limits<float>::max();
-    for (size_t j = max_id_by_trajectories; j != n_cols; j++) { // 找到路径上距离轨迹终点的最近点id
-      const float cur_dist = dists(i, j);
-      if (cur_dist < min_distance_by_path) {
-        min_distance_by_path = cur_dist;
-        min_id_by_path = j;
-      }
-    }
-    max_id_by_trajectories = std::max(max_id_by_trajectories, min_id_by_path); // 找到这些id中最大的id
+  const int traj_cols = data.trajectories.x.cols();
+  const int n_rows = static_cast<int>(data.trajectories.x.rows());
+  const int n_cols = static_cast<int>(data.path.x.size());
+  if (traj_cols <= 0 || n_rows <= 0 || n_cols <= 0) {
+    return 0u;
   }
-  return max_id_by_trajectories;
+
+  // Bound every endpoint match by that candidate's own travelled arc length.
+  // Without this, compact U-turns can alias their geometrically close return
+  // leg and make the path critics believe a short rollout crossed the turn.
+  std::vector<float> path_integrated_dists(n_cols, 0.0f);
+  for (int index = 1; index < n_cols; ++index) {
+    const float dx = data.path.x(index) - data.path.x(index - 1);
+    const float dy = data.path.y(index) - data.path.y(index - 1);
+    path_integrated_dists[index] =
+      path_integrated_dists[index - 1] + std::hypot(dx, dy);
+  }
+
+  Eigen::ArrayXf traj_integrated_dists = Eigen::ArrayXf::Zero(n_rows);
+  if (traj_cols > 1) {
+    traj_integrated_dists =
+      ((data.trajectories.x.rightCols(traj_cols - 1) -
+        data.trajectories.x.leftCols(traj_cols - 1)).square() +
+       (data.trajectories.y.rightCols(traj_cols - 1) -
+        data.trajectories.y.leftCols(traj_cols - 1)).square())
+      .sqrt().rowwise().sum();
+  }
+
+  const auto & traj_x_end = data.trajectories.x.col(traj_cols - 1);
+  const auto & traj_y_end = data.trajectories.y.col(traj_cols - 1);
+  int max_idx = 0;
+  for (int row = 0; row < n_rows; ++row) {
+    int max_reachable_idx = static_cast<int>(
+      std::lower_bound(
+        path_integrated_dists.begin(), path_integrated_dists.end(),
+        traj_integrated_dists(row)) - path_integrated_dists.begin());
+    max_reachable_idx = std::min(max_reachable_idx, n_cols - 1);
+
+    Eigen::Index closest_idx = 0;
+    ((data.path.x.head(max_reachable_idx + 1) - traj_x_end(row)).square() +
+      (data.path.y.head(max_reachable_idx + 1) - traj_y_end(row)).square())
+    .minCoeff(&closest_idx);
+    max_idx = std::max(max_idx, static_cast<int>(closest_idx));
+    if (max_idx == n_cols - 1) {
+      break;
+    }
+  }
+  return static_cast<size_t>(max_idx);
 }
 
 /**
@@ -481,37 +514,92 @@ struct Pose2D
 };
 
 /**
+ * @brief Test one reference-path pose against the local costmap.
+ *
+ * The default center-point mode intentionally preserves upstream Nav2 MPPI
+ * behavior. The optional filled-footprint mode is for large non-circular
+ * robots: it rejects a path pose when the robot body at that SE(2) pose covers
+ * a real lethal obstacle, unknown space, or the map boundary. Soft inflated
+ * costs inside the polygon remain valid to avoid inflating the robot twice;
+ * the reference point itself retains the upstream INSCRIBED rejection.
+ */
+inline bool isPathPoseValid(
+  const costmap_2d::Costmap2D & costmap,
+  const std::vector<geometry_msgs::Point> & footprint,
+  base_local_planner::FootprintHelper & footprint_helper,
+  float x, float y, float yaw,
+  bool use_filled_footprint,
+  bool tracking_unknown)
+{
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw)) {
+    return false;
+  }
+
+  unsigned int map_x = 0u;
+  unsigned int map_y = 0u;
+  if (!costmap.worldToMap(x, y, map_x, map_y)) {
+    return false;
+  }
+
+  const unsigned char center_cost = costmap.getCost(map_x, map_y);
+  if (center_cost == costmap_2d::LETHAL_OBSTACLE ||
+      center_cost == costmap_2d::INSCRIBED_INFLATED_OBSTACLE)
+  {
+    return false;
+  }
+  if (center_cost == costmap_2d::NO_INFORMATION) {
+    // Preserve the official center-point behavior when the extension is off.
+    // The production footprint-aware mode is deliberately fail-closed.
+    return use_filled_footprint ? false : tracking_unknown;
+  }
+
+  if (!use_filled_footprint) {
+    return true;
+  }
+  if (footprint.size() < 3u) {
+    return false;
+  }
+
+  return isFootprintPoseHardCollisionFree(
+    costmap, footprint, footprint_helper,
+    static_cast<double>(x), static_cast<double>(y),
+    static_cast<double>(yaw), false);
+}
+
+inline bool isPathPoseValid(
+  const costmap_2d::Costmap2D & costmap,
+  const std::vector<geometry_msgs::Point> & footprint,
+  float x, float y, float yaw,
+  bool use_filled_footprint,
+  bool tracking_unknown)
+{
+  base_local_planner::FootprintHelper footprint_helper;
+  return isPathPoseValid(
+    costmap, footprint, footprint_helper,
+    x, y, yaw, use_filled_footprint, tracking_unknown);
+}
+
+/**
  * @brief evaluate path costs 评估参考路径点是否有效
  * @param data Data to use
  */
 inline void findPathCosts(
   CriticData & data,
-  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros)
+  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros,
+  bool use_filled_footprint = false)
 {
   auto * costmap = costmap_ros->getCostmap();
-  unsigned int map_x, map_y;
   const size_t path_segments_count = data.path.x.size() - 1;
   data.path_pts_valid = std::vector<bool>(path_segments_count, false);
   const bool tracking_unknown = costmap_ros->getLayeredCostmap()->isTrackingUnknown();
+  const auto footprint = use_filled_footprint ?
+    costmap_ros->getRobotFootprint() : std::vector<geometry_msgs::Point>();
+  base_local_planner::FootprintHelper footprint_helper;
   for (unsigned int idx = 0; idx < path_segments_count; idx++) {
-    if (!costmap->worldToMap(data.path.x(idx), data.path.y(idx), map_x, map_y)) {
-      (*data.path_pts_valid)[idx] = false;
-      continue;
-    }
-
-    switch (costmap->getCost(map_x, map_y)) {
-      case (costmap_2d::LETHAL_OBSTACLE):
-        (*data.path_pts_valid)[idx] = false;
-        continue;
-      case (costmap_2d::INSCRIBED_INFLATED_OBSTACLE):
-        (*data.path_pts_valid)[idx] = false;
-        continue;
-      case (costmap_2d::NO_INFORMATION):
-        (*data.path_pts_valid)[idx] = tracking_unknown ? true : false;
-        continue;
-    }
-
-    (*data.path_pts_valid)[idx] = true;
+    (*data.path_pts_valid)[idx] = isPathPoseValid(
+      *costmap, footprint, footprint_helper,
+      data.path.x(idx), data.path.y(idx), data.path.yaws(idx),
+      use_filled_footprint, tracking_unknown);
   }
 }
 
@@ -521,10 +609,11 @@ inline void findPathCosts(
  */
 inline void setPathCostsIfNotSet(
   CriticData & data,
-  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros)
+  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros,
+  bool use_filled_footprint = false)
 {
   if (!data.path_pts_valid) {
-    findPathCosts(data, costmap_ros);
+    findPathCosts(data, costmap_ros, use_filled_footprint);
   }
 }
 
@@ -661,12 +750,19 @@ inline float clamp(
   return std::min(upper_bound, std::max(input, lower_bound));
 }
 
-
-
-
-
-
-
-
+/** Sign-aware acceleration envelope used by upstream MPPI. */
+inline float clampVelocityByAccel(
+  const float last_velocity, const float requested_velocity,
+  const float minimum_delta, const float maximum_delta)
+{
+  if (last_velocity >= 0.0f) {
+    return clamp(
+      last_velocity + minimum_delta,
+      last_velocity + maximum_delta, requested_velocity);
+  }
+  return clamp(
+    last_velocity - maximum_delta,
+    last_velocity - minimum_delta, requested_velocity);
+}
 
 }

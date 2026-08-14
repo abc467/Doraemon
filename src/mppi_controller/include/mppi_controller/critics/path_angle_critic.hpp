@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdexcept>
 #include <string>
 #include "mppi_controller/critic_function.hpp"
 #include "mppi_controller/models/state.hpp"
@@ -19,10 +20,24 @@ enum class PathAngleMode
   CONSIDER_FEASIBLE_PATH_ORIENTATIONS = 2 // 精确跟踪路径终点方向
 };
 
+inline PathAngleMode pathAngleModeFromInt(const int mode)
+{
+  switch (mode) {
+    case 0:
+      return PathAngleMode::FORWARD_PREFERENCE;
+    case 1:
+      return PathAngleMode::NO_DIRECTIONAL_PREFERENCE;
+    case 2:
+      return PathAngleMode::CONSIDER_FEASIBLE_PATH_ORIENTATIONS;
+    default:
+      throw std::invalid_argument("PathAngleCritic mode must be 0, 1, or 2");
+  }
+}
+
 /**
  * @brief Method to convert mode enum to string for printing
  */
-std::string modeToStr(const PathAngleMode & mode)
+inline std::string modeToStr(const PathAngleMode & mode)
 {
   if (mode == PathAngleMode::FORWARD_PREFERENCE) {
     return "Forward Preference";
@@ -66,4 +81,3 @@ protected:
 };
 
 }  // namespace mppi::critics
-

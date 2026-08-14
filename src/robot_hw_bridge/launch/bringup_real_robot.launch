@@ -81,9 +81,11 @@
   <arg name="skip_precise_docking_if_station_in_place" default="false"/>
   <arg name="direct_charge_after_precise_docking" default="true"/>
   <arg name="dock_supply_enable_drain" default="true"/>
-  <arg name="dock_supply_enable_refill" default="false"/>
+  <arg name="dock_supply_enable_refill" default="true"/>
   <arg name="dock_supply_drain_timeout_s" default="600.0"/>
-  <arg name="dock_supply_drain_settle_s" default="30.0"/>
+  <arg name="dock_supply_target_clean_level" default="74"/>
+  <arg name="dock_supply_refill_timeout_s" default="600.0"/>
+  <arg name="dock_supply_refill_settle_s" default="20.0"/>
   <arg name="dock_supply_combined_status_wait_s" default="5.0"/>
   <arg name="dock_supply_combined_status_stale_timeout_s" default="3.0"/>
   <arg name="task_auto_charge_enable" default="false"/>
@@ -186,7 +188,9 @@
     <arg name="dock_supply_enable_drain" value="$(arg dock_supply_enable_drain)"/>
     <arg name="dock_supply_enable_refill" value="$(arg dock_supply_enable_refill)"/>
     <arg name="dock_supply_drain_timeout_s" value="$(arg dock_supply_drain_timeout_s)"/>
-    <arg name="dock_supply_drain_settle_s" value="$(arg dock_supply_drain_settle_s)"/>
+    <arg name="dock_supply_target_clean_level" value="$(arg dock_supply_target_clean_level)"/>
+    <arg name="dock_supply_refill_timeout_s" value="$(arg dock_supply_refill_timeout_s)"/>
+    <arg name="dock_supply_refill_settle_s" value="$(arg dock_supply_refill_settle_s)"/>
     <arg name="dock_supply_combined_status_wait_s" value="$(arg dock_supply_combined_status_wait_s)"/>
     <arg name="dock_supply_combined_status_stale_timeout_s" value="$(arg dock_supply_combined_status_stale_timeout_s)"/>
     <arg name="charge_voltage_confirm_enable" value="$(arg charge_voltage_confirm_enable)"/>

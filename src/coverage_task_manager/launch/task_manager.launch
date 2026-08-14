@@ -221,14 +221,18 @@
     <param name="undock_forward_m" value="0.6"/>
     <param name="dock_timeout_s" value="600.0"/>
     <param name="wait_executor_paused_s" value="20.0"/>
+    <!-- 恢复命令必须在该窗口内由同一 run_id 的 RunProgress 确认进入
+         CONNECT/FOLLOW/DONE；否则回到可人工恢复的 PAUSED_RECOVERY。 -->
+    <param name="auto_resume_timeout_s" value="60.0"/>
     <param name="charge_timeout_s" value="14400.0"/>
     <param name="charge_battery_stale_timeout_s" value="300.0"/>
 
     <!-- docking navigation (MBF move_base) -->
     <param name="mbf_move_base_action" value="/move_base_flex/move_base"/>
     <param name="mbf_exe_path_action" value="/move_base_flex/exe_path"/>
-    <param name="mbf_planner" value=""/>
-    <param name="mbf_controller" value=""/>
+    <param name="mbf_planner" value="SmacLatticePlanner"/>
+    <!-- 回桩第一阶段与离桩使用 State Lattice 全局路径及其专用 MPPI。 -->
+    <param name="mbf_controller" value="MPPI_State_Lattice_Controller"/>
     <param name="mbf_recovery" value=""/>
 
     <!-- health monitor / watchdog -->

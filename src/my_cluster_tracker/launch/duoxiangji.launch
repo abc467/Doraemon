@@ -48,8 +48,11 @@
   <arg name="min_cluster_size" default="10"/>
   <arg name="max_cluster_size" default="10000"/>
   <arg name="min_obstacle_points" default="10"/>
-  <arg name="obstacle_expand_enabled" default="true"/>
-  <arg name="obstacle_expand_radius" default="0.25"/>
+  <!-- Publish measured obstacle geometry. Shared costmap inflation supplies
+       the soft gradient; duplicating every camera point into a 0.25 m lethal
+       disk made low obstacles an unnecessarily large hard stop region. -->
+  <arg name="obstacle_expand_enabled" default="false"/>
+  <arg name="obstacle_expand_radius" default="0.00"/>
   <arg name="obstacle_expand_resolution" default="0.05"/>
 
   <arg name="cam2_ns"            default="right"/>

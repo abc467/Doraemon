@@ -65,7 +65,7 @@ class ModeProfileCatalog:
     Expected structure (example):
       mode_profiles:
         heavy:
-          mbf_controller_name: MPPI_Heavy_Controller
+          mbf_controller_name: MPPI_Standard_Controller
           actuator_profile_name: heavy
           default_clean_mode: scrub
         standard: { ... }

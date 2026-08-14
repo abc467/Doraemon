@@ -12,17 +12,17 @@ void TwirlingCritic::initialize()
 
   nh_.param(param_prefix + "cost_power", power_, 1);
   nh_.param(param_prefix + "cost_weight", weight_, 10.0f);
-  nh_.param(param_prefix + "threshold_to_consider", threshold_to_consider_, 0.3f);
+  // ROS1 has no GoalChecker object in CriticData. Read the adapter's goal
+  // tolerance once to preserve upstream's rule of disabling twirling cost
+  // inside the goal position tolerance.
+  nh_.param("goal_tolerance", goal_tolerance_, 0.2f);
 
   ROS_INFO("TwirlingCritic instantiated with %d power and %f weight.", power_, weight_);
 }
 
 void TwirlingCritic::score(CriticData & data)
 {
-  // 接近目标时跳过
-  if (!enabled_ ||
-    utils::withinPositionGoalTolerance(threshold_to_consider_, data.state.pose.pose, data.goal))
-  {
+  if (!enabled_ || data.state.local_path_length < goal_tolerance_) {
     return;
   }
   // 抑制不必要的转向

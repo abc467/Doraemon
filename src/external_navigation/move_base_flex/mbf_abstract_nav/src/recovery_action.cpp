@@ -46,6 +46,11 @@ namespace mbf_abstract_nav
 RecoveryAction::RecoveryAction(const std::string &name, const mbf_utility::RobotInformation &robot_info)
   : AbstractActionBase(name, robot_info){}
 
+RecoveryAction::~RecoveryAction()
+{
+  cancelAll();
+}
+
 void RecoveryAction::runImpl(GoalHandle &goal_handle, AbstractRecoveryExecution &execution)
 {
   ROS_DEBUG_STREAM_NAMED(name_, "Start action "  << name_);
@@ -85,6 +90,14 @@ void RecoveryAction::runImpl(GoalHandle &goal_handle, AbstractRecoveryExecution 
         {
           ROS_INFO_STREAM("Recovery behavior \"" << goal.behavior << "\" patience exceeded! Cancel recovering...");
           execution.cancel();
+          recovery_active = false;
+          result.outcome = mbf_msgs::RecoveryResult::PAT_EXCEEDED;
+          result.message =
+              "Recovery behavior \"" + goal.behavior + "\" exceeded patience";
+          // A server-side timeout is a failed recovery attempt.  Returning a
+          // canceled action would make the owning MoveBase action wait for an
+          // outer cancellation which never occurred.
+          goal_handle.setAborted(result, result.message);
         }
 
         ROS_DEBUG_STREAM_THROTTLE_NAMED(3, name_, "Recovering with: " << goal.behavior);

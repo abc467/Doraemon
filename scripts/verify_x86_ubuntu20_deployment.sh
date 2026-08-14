@@ -306,7 +306,7 @@ check_static_runtime_contract() {
       grep -Fq 'orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))' \
         "${boot_preflight}" && \
       ! grep -Fq 'DORAEMON_ORBBEC_LIST_DEVICES_BINARY' "${boot_preflight}"; then
-    ok "Orbbec boot gate requires two exact snapshots within the shared timeout"
+    ok "strict Orbbec boot gate retains two exact snapshots within the shared timeout"
   else
     fail "Orbbec boot gate stability and fixed-binary contract"
   fi
@@ -341,25 +341,31 @@ check_installed_vehicle_identity() {
     ok "internal wired interface is explicit"
   fi
 
-  if commercial_validate_required_orbbec_identities \
-      "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER:-}" \
-      "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER:-}" \
-      "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}" \
-      "${RUNTIME_ORBBEC_CAMERA1_USB_PORT:-}" \
-      "${RUNTIME_ORBBEC_CAMERA2_USB_PORT:-}" \
-      "${RUNTIME_ORBBEC_CAMERA3_USB_PORT:-}"; then
-    ok "vehicle camera serials and USB topologies are explicit, unique, and syntactically valid"
+  if ! valid_boolean "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}"; then
+    fail "DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES must be an explicit boolean"
+  elif truthy "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}"; then
+    if commercial_validate_required_orbbec_identities \
+        "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER:-}" \
+        "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER:-}" \
+        "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}" \
+        "${RUNTIME_ORBBEC_CAMERA1_USB_PORT:-}" \
+        "${RUNTIME_ORBBEC_CAMERA2_USB_PORT:-}" \
+        "${RUNTIME_ORBBEC_CAMERA3_USB_PORT:-}"; then
+      ok "strict vehicle camera serials and USB topologies are explicit, unique, and syntactically valid"
+    else
+      fail "strict vehicle camera identities must contain three unique serials and three valid unique USB topologies"
+    fi
   else
-    fail "vehicle camera identities must contain three unique serials and three valid unique USB topologies"
+    ok "depth camera identity/topology gate disabled (non-blocking startup)"
   fi
 
   valid_boolean "${RUNTIME_START_DEPTH_CAMERAS:-}" && \
     truthy "${RUNTIME_START_DEPTH_CAMERAS:-}" && \
     ok "three-camera commercial baseline enabled" || fail "RUNTIME_START_DEPTH_CAMERAS=true"
-  truthy "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}" && \
-    ok "depth camera topic gate enabled" || fail "RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=true"
-  truthy "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-}" && \
-    ok "depth camera identity gate enabled" || fail "DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=true"
+  valid_boolean "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}" && \
+    ! truthy "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-}" && \
+    ok "depth camera topic gate disabled (non-blocking startup)" || \
+    fail "RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=false"
   valid_boolean "${DORAEMON_NO_ACTION_ACCEPTANCE:-}" && \
     truthy "${DORAEMON_NO_ACTION_ACCEPTANCE:-}" && \
     ok "no-action acceptance mode enabled" || fail "DORAEMON_NO_ACTION_ACCEPTANCE=true during phases H/K"
@@ -722,7 +728,7 @@ if commercial_validate_runtime_env_file /etc/doraemon/runtime.env; then
       DORAEMON_RUNTIME_CONFIG_FILE=/etc/doraemon/runtime.env \
       DORAEMON_BOOT_WAIT_TIMEOUT=30 \
       "${REPO_ROOT}/scripts/wait_robot_boot_ready.sh"; then
-    ok "local hardware identities, udev permissions, network, and Orbbec SDK pairs"
+    ok "required non-camera hardware, udev permissions, and network dependencies"
   else
     fail "local hardware/udev/network commercial preflight"
   fi

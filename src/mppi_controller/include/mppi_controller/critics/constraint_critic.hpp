@@ -23,14 +23,15 @@ public:
    */
   void score(CriticData & data) override;
 
-  float getMaxVelConstraint() {return max_vel_;}
-  float getMinVelConstraint() {return min_vel_;}
+  float getMaxVelConstraint() const {return vx_max_;}
+  float getMinVelConstraint() const {return vx_min_;}
 
 protected:
-  int power_{0};
-  float weight_{0};
-  float min_vel_;
-  float max_vel_;
+  unsigned int power_{0};
+  float weight_{0.0f};
+  float vx_max_{0.0f};
+  float vx_min_{0.0f};
+  float vy_max_{0.0f};
 };
 
 }  // namespace mppi::critics

@@ -35,7 +35,7 @@ class CommercialHardwareGateTest(unittest.TestCase):
         self.assertNotIn("/home/lb/cartographer_web", source)
         self.assertNotIn("nodes_dense.csv", source)
 
-    def test_vehicle_identity_template_is_fail_closed(self):
+    def test_vehicle_identity_template_keeps_camera_readiness_non_blocking(self):
         config = read_env_defaults("config/runtime.a26022.env")
         serials = [config["RUNTIME_ORBBEC_CAMERA%d_SERIAL_NUMBER" % index] for index in (1, 2, 3)]
         paths = [config["RUNTIME_ORBBEC_CAMERA%d_USB_PORT" % index] for index in (1, 2, 3)]
@@ -43,8 +43,11 @@ class CommercialHardwareGateTest(unittest.TestCase):
         self.assertIn("REPLACE", config["DORAEMON_A_BOX_IFACE"])
         self.assertTrue(all("REPLACE" in value for value in serials + paths))
         self.assertEqual(config.get("RUNTIME_START_DEPTH_CAMERAS"), "true")
-        self.assertEqual(config.get("DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES"), "true")
-        self.assertEqual(config.get("RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS"), "true")
+        self.assertEqual(config.get("DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES"), "false")
+        self.assertEqual(config.get("RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS"), "false")
+        self.assertEqual(config.get("RUNTIME_ENABLE_DEPTH_LEFT_CAM"), "true")
+        self.assertEqual(config.get("RUNTIME_ENABLE_DEPTH_RIGHT_CAM"), "true")
+        self.assertEqual(config.get("RUNTIME_ENABLE_DEPTH_UP_CAM"), "true")
         self.assertEqual(config.get("DORAEMON_NO_ACTION_ACCEPTANCE"), "true")
         self.assertEqual(config.get("DORAEMON_ACTION_TEST_APPROVED"), "false")
 
@@ -103,13 +106,41 @@ class CommercialHardwareGateTest(unittest.TestCase):
         self.assertNotIn("Unable to load", result.stdout + result.stderr)
         self.assertNotIn("/gemini_cf/camera/serial_number", result.stdout)
 
-    def test_startup_requires_all_three_camera_streams(self):
+    def test_strict_camera_topic_mode_requires_all_three_streams(self):
         source = read_repo_file("scripts/start_runtime.sh")
         self.assertIn("normalize_boolean_variable RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS", source)
+        self.assertNotIn("runtime_warn_if_optional_topic_missing /gemini_", source)
+        self.assertIn("相机缺失或异常不阻塞整机启动", source)
         for namespace in ("gemini_cf", "gemini_nj", "gemini_front"):
             self.assertIn("runtime_wait_for_topic /%s/depth/image_raw" % namespace, source)
             self.assertIn("runtime_wait_for_topic /%s/depth/points" % namespace, source)
             self.assertIn("runtime_require_orbbec_serial %s" % namespace, source)
+
+    def test_depth_obstacle_sources_are_independently_wired_and_non_blocking(self):
+        source = read_repo_file("scripts/start_runtime.sh")
+        for runtime_name, launch_name in (
+            ("RUNTIME_ENABLE_DEPTH_LEFT_CAM", "enable_depth_left_cam"),
+            ("RUNTIME_ENABLE_DEPTH_RIGHT_CAM", "enable_depth_right_cam"),
+            ("RUNTIME_ENABLE_DEPTH_UP_CAM", "enable_depth_up_cam"),
+        ):
+            self.assertIn(
+                "normalize_boolean_variable %s" % runtime_name,
+                source,
+            )
+            self.assertIn(
+                "%s:=${%s}" % (launch_name, runtime_name),
+                source,
+            )
+        self.assertIn(
+            'if [[ "${RUNTIME_ENABLE_DEPTH_UP_CAM}" == "true" ]]',
+            source,
+        )
+        self.assertIn(
+            'runtime_warn_if_optional_node_missing /up/gs_node "前向深度避障节点"',
+            source,
+        )
+        self.assertNotIn("runtime_wait_for_node /up/gs_node", source)
+        self.assertNotIn("runtime_wait_for_topic /up/obstacle_2d", source)
 
     def test_camera_arguments_are_protected_from_extra_args(self):
         source = read_repo_file("scripts/start_runtime.sh")
@@ -158,10 +189,20 @@ validate_commercial_vehicle_identity
 [[ "${RUNTIME_START_DEPTH_CAMERAS}" == true ]]
 [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" == true ]]
 [[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == true ]]
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=off
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=no
+RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER=
+RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER=
+RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER=
+RUNTIME_ORBBEC_CAMERA1_USB_PORT=
+RUNTIME_ORBBEC_CAMERA2_USB_PORT=
+RUNTIME_ORBBEC_CAMERA3_USB_PORT=
+validate_commercial_vehicle_identity
+[[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" == false ]]
+[[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == false ]]
 RUNTIME_START_DEPTH_CAMERAS=off
-if validate_commercial_vehicle_identity; then
-  exit 12
-fi
+validate_commercial_vehicle_identity
+[[ "${RUNTIME_START_DEPTH_CAMERAS}" == false ]]
 RUNTIME_START_DEPTH_CAMERAS=true
 DORAEMON_NO_ACTION_ACCEPTANCE=false
 DORAEMON_ACTION_TEST_APPROVED=false
@@ -258,33 +299,23 @@ fi
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(expected_error, result.stdout)
 
-    def test_boot_preflight_rejects_disabled_commercial_cameras_before_hardware_wait(self):
-        env = os.environ.copy()
-        env.update(
-            {
-                "ROBOT_ID": "CR-TEST",
-                "DORAEMON_A_BOX_IFACE": "enp1s0",
-                "DORAEMON_NO_ACTION_ACCEPTANCE": "true",
-                "DORAEMON_ACTION_TEST_APPROVED": "false",
-                "RUNTIME_START_DEPTH_CAMERAS": "false",
-                "RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS": "true",
-                "DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES": "true",
-                "DORAEMON_BOOT_WAIT_TIMEOUT": "1",
-            }
-        )
-        result = subprocess.run(
-            ["bash", "scripts/wait_robot_boot_ready.sh"],
-            cwd=REPO_ROOT,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
+    def test_boot_preflight_allows_depth_camera_gates_to_be_disabled(self):
+        source = read_repo_file("scripts/wait_robot_boot_ready.sh")
+        self.assertNotIn(
             "commercial preflight requires RUNTIME_START_DEPTH_CAMERAS=true",
-            result.stdout,
+            source,
+        )
+        self.assertNotIn(
+            "enabled depth cameras require both topic and identity commercial gates",
+            source,
+        )
+        self.assertIn(
+            "camera faults will not block robot startup",
+            source,
+        )
+        self.assertIn(
+            "Orbbec serial/topology/SDK readiness gate disabled",
+            source,
         )
 
     def test_boot_preflight_rejects_unapproved_action_mode_before_hardware_wait(self):

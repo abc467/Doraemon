@@ -11,11 +11,13 @@
 #include <nav_msgs/Path.h>
 #include "theta_star_planner/theta_star.h"
 #include "theta_star_planner/path_tools.h"
+#include "theta_star_planner/se2_path_refiner.h"
 #include <tf2_ros/transform_listener.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2/utils.h>
 #include <vector>
 #include <optional>
+#include <functional>
 
 namespace mbf_global_planner
 {
@@ -32,7 +34,7 @@ public:
     
 protected:
     std::string name_;
-    bool initialized_;
+    bool initialized_ = false;
     costmap_2d::Costmap2DROS* costmap_ros_;
     costmap_2d::Costmap2D* costmap_;
     std::unique_ptr<theta_star::ThetaStar> planner_;
@@ -50,6 +52,23 @@ protected:
     double path_check_interval_ = 0.05;  // 路径碰撞检查的间隔（米）
     double path_max_age_ = 20.0;
     bool use_footprint_path_check_ = true;
+    double goal_orientation_tolerance_ = 0.05;
+
+    // Theta* first guarantees XY reachability. The terminal layer then reshapes
+    // the suffix of that successful path so its geometric tangent agrees with
+    // the requested goal yaw. It is deliberately non-fatal: Connect MPPI can
+    // still optimize the reachable base path if no reshaped suffix is safe.
+    bool terminal_approach_enabled_ = true;
+    double terminal_straight_length_ = 0.40;
+    double terminal_min_straight_length_ = 0.0;
+    double terminal_straight_length_step_ = 0.10;
+    // Zero means differential-drive mode: no car-like minimum turn radius.
+    // A positive value retains the optional curvature/Dubins constraint for
+    // other chassis types.
+    double terminal_min_turn_radius_ = 0.0;
+    double terminal_sample_step_ = 0.05;
+    double terminal_max_prefix_splice_distance_ = 1.80;
+    theta_star::SE2RefinerConfig se2_refiner_config_;
 
     static std::vector<geometry_msgs::PoseStamped> linearInterpolation(
         const std::vector<coordsW> & raw_path, const double & dist_bw_points);
@@ -58,7 +77,30 @@ protected:
     std::vector<geometry_msgs::PoseStamped> downsamplePath(const std::vector<geometry_msgs::PoseStamped>& orig_global_plan, double sampling_distance);
     std::optional<std::vector<geometry_msgs::PoseStamped>> smoothPath(const std::vector<geometry_msgs::PoseStamped>& orig_global_plan);
     void printPoseStampedVector(const std::vector<geometry_msgs::PoseStamped>& poses);
-    void applyFinalGoalOrientation(std::vector<geometry_msgs::PoseStamped>& plan, const geometry_msgs::PoseStamped& goal);
+    bool generatePositionPath(
+        const geometry_msgs::PoseStamped& start,
+        const geometry_msgs::PoseStamped& position_goal,
+        std::vector<geometry_msgs::PoseStamped>& path,
+        std::string& failure_reason);
+    std::vector<double> terminalStraightLengths() const;
+    bool isCentrelineCollisionFree(
+        const std::vector<geometry_msgs::PoseStamped>& path);
+
+    static void assignPathOrientations(
+        std::vector<geometry_msgs::PoseStamped>& path,
+        const std::optional<double>& final_yaw = std::nullopt);
+    static double maximumDiscreteCurvature(
+        const std::vector<geometry_msgs::PoseStamped>& path);
+    static std::optional<std::vector<geometry_msgs::PoseStamped>>
+    buildTerminalApproachGeometry(
+        const std::vector<geometry_msgs::PoseStamped>& prefix,
+        const geometry_msgs::PoseStamped& goal,
+        double straight_length,
+        double minimum_turn_radius,
+        double sample_step,
+        double maximum_prefix_splice_distance,
+        const std::function<bool(
+            const std::vector<geometry_msgs::PoseStamped>&)>& validator);
 
     bool canReusePath(const geometry_msgs::PoseStamped& current_start, 
                                         const geometry_msgs::PoseStamped& current_goal) {
@@ -74,6 +116,15 @@ protected:
         );
         if (goal_dist > goal_tolerance_) {
             ROS_DEBUG("Goal changed (distance: %.2f m), cannot reuse path", goal_dist);
+            return false;
+        }
+        const double goal_yaw_error = angles::shortest_angular_distance(
+            tf2::getYaw(last_goal_.pose.orientation),
+            tf2::getYaw(current_goal.pose.orientation));
+        if (std::fabs(goal_yaw_error) > goal_orientation_tolerance_) {
+            ROS_DEBUG(
+                "Goal orientation changed (error: %.3f rad), cannot reuse path",
+                goal_yaw_error);
             return false;
         }
 
@@ -93,56 +144,31 @@ protected:
     }
 
     bool isPathCollisionFree(const std::vector<geometry_msgs::PoseStamped>& path) {
-        base_local_planner::CostmapModel collision_checker(*costmap_);
-        const auto footprint = costmap_ros_ ? costmap_ros_->getRobotFootprint() : std::vector<geometry_msgs::Point>{};
-
-        // 遍历路径点（按间隔检查，避免重复计算）
-        for (size_t i = 0; i < path.size(); i += std::max(1, (int)(path_check_interval_ / costmap_->getResolution()))) {
-            const auto& pose = path[i];
-            unsigned int mx, my;
-            // 转换路径点到地图坐标（栅格索引）
-            if (!costmap_->worldToMap(pose.pose.position.x, pose.pose.position.y, mx, my)) {
-                ROS_DEBUG("Path point out of costmap bounds: (%.2f, %.2f)", pose.pose.position.x, pose.pose.position.y);
-                return false;  // 路径点超出地图范围 → 不安全
-            }
-            unsigned char cost = costmap_->getCost(mx, my);
-            if (cost != UNKNOWN_COST && static_cast<int>(cost) > planner_->max_allowed_cost_) {
-                ROS_DEBUG(
-                    "Path point (%.2f, %.2f) exceeds max allowed cost: %d > %d",
-                    pose.pose.position.x, pose.pose.position.y, static_cast<int>(cost),
-                    planner_->max_allowed_cost_);
-                return false;
-            }
-            if (cost == UNKNOWN_COST && !planner_->allow_unknown_) {
-                ROS_DEBUG("Path point (%.2f, %.2f) is unknown", pose.pose.position.x, pose.pose.position.y);
-                return false;
-            }
-
-            if (use_footprint_path_check_ && !footprint.empty()) {
-                const double yaw = tf2::getYaw(pose.pose.orientation);
-                const double footprint_cost = collision_checker.footprintCost(
-                    pose.pose.position.x,
-                    pose.pose.position.y,
-                    yaw,
-                    footprint);
-                if (footprint_cost < 0.0) {
-                    if (footprint_cost == -2.0 && planner_->allow_unknown_) {
-                        continue;
-                    }
-                    ROS_DEBUG(
-                        "Path footprint collision at (%.2f, %.2f, %.2f), footprint_cost=%.1f",
-                        pose.pose.position.x, pose.pose.position.y, yaw, footprint_cost);
-                    return false;
-                }
-            }
+        if (!isCentrelineCollisionFree(path)) {
+            return false;
         }
-        return true;  // 所有检查点均安全
+        if (!use_footprint_path_check_) {
+            return true;
+        }
+        const auto footprint = costmap_ros_ ?
+            costmap_ros_->getRobotFootprint() :
+            std::vector<geometry_msgs::Point>{};
+        if (footprint.size() < 3) {
+            return false;
+        }
+        return !theta_star::SE2PathRefiner::firstUnsafeSegment(
+            *costmap_, footprint, path,
+            std::min(path_check_interval_, 0.5 * costmap_->getResolution()),
+            false).has_value();
     }
 
     bool cropPathToStart(const geometry_msgs::PoseStamped& current_start, 
                                         const std::vector<geometry_msgs::PoseStamped>& last_path,
                                         std::vector<geometry_msgs::PoseStamped>& cropped_path) {
         cropped_path.clear();
+        if (last_path.size() < 2) {
+            return false;
+        }
         // 找到历史路径中与当前起点最近的点（作为裁剪起点）
         size_t closest_idx = 0;
         double min_dist = INFINITY;
@@ -163,6 +189,14 @@ protected:
             return false;
         }
 
+        // A one-pose suffix has no approach geometry. Replacing that sole pose
+        // with current_start used to discard the exact goal position/yaw and
+        // turn a periodic replan into a false success at the robot pose.
+        if (closest_idx + 1 >= last_path.size()) {
+            ROS_DEBUG("Cached suffix has no terminal geometry; replanning");
+            return false;
+        }
+
         // 裁剪：从最近点到终点的路径
         for (size_t i = closest_idx; i < last_path.size(); ++i) {
             cropped_path.push_back(last_path[i]);
@@ -178,6 +212,14 @@ protected:
                 cropped_path[i+1].pose.position.x - cropped_path[i].pose.position.x
             );
             cropped_path[i].pose.orientation = tf::createQuaternionMsgFromYaw(angle);
+        }
+        cropped_path.front().pose.orientation = current_start.pose.orientation;
+        // Preserve the exact terminal SE(2) state even after recomputing all
+        // tangent orientations in the cropped prefix.
+        cropped_path.back() = last_path.back();
+        if (cropped_path.size() < 2) {
+            cropped_path.clear();
+            return false;
         }
         return true;
     }

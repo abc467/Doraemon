@@ -17,17 +17,23 @@ namespace mppi::critics
     nh_.param(param_prefix + "trajectory_point_step", trajectory_point_step_, 4);
     nh_.param(param_prefix + "threshold_to_consider", threshold_to_consider_, 0.5f);
     nh_.param(param_prefix + "use_path_orientations", use_path_orientations_, false);
+    // This is deliberately controller-scoped rather than critic-scoped so
+    // PathAlign and PathFollow always share one path-blockage definition.
+    nh_.param(
+      "path_occupancy_uses_footprint",
+      path_occupancy_uses_footprint_, false);
 
     ROS_INFO(
-        "ReferenceTrajectoryCritic instantiated with %d power and %f weight",
-        power_, weight_);
+        "ReferenceTrajectoryCritic instantiated with %d power and %f weight; "
+        "path occupancy uses %s",
+        power_, weight_, path_occupancy_uses_footprint_ ?
+        "filled footprint" : "official center point");
   }
 
   void PathAlignCritic::score(CriticData &data)
   {
     // 当接近目标时不使用，让goal critic接管
-    if (!enabled_ || utils::withinPositionGoalTolerance(
-                         threshold_to_consider_, data.state.pose.pose, data.goal))
+    if (!enabled_ || data.state.local_path_length < threshold_to_consider_)
     {
       return;
     }
@@ -44,7 +50,8 @@ namespace mppi::critics
     }
 
     // 当动态障碍物阻塞局部路径时跳过评分
-    utils::setPathCostsIfNotSet(data, costmap_ros_);
+    utils::setPathCostsIfNotSet(
+      data, costmap_ros_, path_occupancy_uses_footprint_);
     std::vector<bool> &path_pts_valid = *data.path_pts_valid;
     float invalid_ctr = 0.0f;
     for (size_t i = 0; i < path_segments_count; i++)

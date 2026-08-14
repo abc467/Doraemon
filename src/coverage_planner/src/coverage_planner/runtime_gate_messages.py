@@ -76,12 +76,23 @@ def runtime_map_mismatch_reason(
     runtime_map_id = str(runtime_map_id or "").strip()
     runtime_map_md5 = str(runtime_map_md5 or "").strip()
 
-    if active_revision_id and runtime_revision_id and runtime_revision_id != active_revision_id:
-        return "runtime revision %s != %s revision %s" % (
-            runtime_revision_id,
-            expected_label,
-            active_revision_id,
-        )
+    if active_revision_id and runtime_revision_id:
+        if runtime_revision_id != active_revision_id:
+            return "runtime revision %s != %s revision %s" % (
+                runtime_revision_id,
+                expected_label,
+                active_revision_id,
+            )
+        # A verified asset and its live OccupancyGrid representation may use
+        # different id/md5 values. An exact revision match is the canonical
+        # identity; hashes remain the fail-closed fallback for legacy states.
+        if active_map_name and runtime_map_name and runtime_map_name != active_map_name:
+            return "runtime map_name %s != %s %s" % (
+                runtime_map_name,
+                expected_label,
+                active_map_name,
+            )
+        return ""
     if active_map_name and runtime_map_name and runtime_map_name != active_map_name:
         return "runtime map_name %s != %s %s" % (runtime_map_name, expected_label, active_map_name)
     if active_map_id and runtime_map_id and runtime_map_id != active_map_id:

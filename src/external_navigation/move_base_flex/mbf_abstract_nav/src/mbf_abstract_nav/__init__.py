@@ -18,7 +18,7 @@ def add_mbf_abstract_nav_params(gen):
     gen.add("planner_frequency", double_t, 0,
             "The rate in Hz at which to run the planning loop", 0, 0, 100)
     gen.add("planner_patience", double_t, 0,
-            "How long the planner will wait in seconds in an attempt to find a valid plan before giving up", 5.0, 0, 100)
+            "How long the planner will wait in seconds in an attempt to find a valid plan before giving up", 5.0, 0, 600)
     gen.add("planner_max_retries", int_t, 0,
             "How many times we will recall the planner in an attempt to find a valid plan before giving up", -1, -1, 1000)
 

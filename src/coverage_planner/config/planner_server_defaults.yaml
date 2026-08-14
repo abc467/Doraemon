@@ -16,15 +16,19 @@ map_identity_timeout_s: 2.0
 planner_version: "coverage_planner_v1"
 # 当虚拟墙没有单独配置 buffer 时使用的默认缓冲距离，单位米。
 default_virtual_wall_buffer_m: 0.25
+# 以下三项只用于生成 Coverage 有效规划边界，不能作为导航代价地图的 254 硬边界。
 # 旧版等距膨胀参数；非矩形或显式等距配置的兼容兜底，单位米。
 default_no_go_buffer_m: 0.05
 # 矩形禁行区长边的法向外扩距离，不是沿长边方向延长，单位米。
-default_no_go_long_edge_normal_buffer_m: 0.15
+# 配合 wall_margin=0.38 m、0.65 m 物理车宽，直线段理论车体净距为：
+# 0.115 + 0.38 - 0.65 / 2 = 0.17 m。
+default_no_go_long_edge_normal_buffer_m: 0.115
 # 矩形禁行区短边的法向外扩距离，不是沿短边方向延长，单位米。
 default_no_go_short_edge_normal_buffer_m: 0.40
 robot:
-  # Fields2Cover 使用的覆盖条带宽度；它更接近相邻清扫路径间距，而不是路径点间距，单位米。
-  cov_width: 0.54
+  # Fields2Cover 使用的覆盖条带宽度；由 0.54 m 增加 0.05 m，当前相邻内部
+  # 清扫直线中心间距为 0.59 m；它不是路径点间距。
+  cov_width: 0.59
   # 机器人物理宽度，单位米。
   width: 0.65
   # 机器人最小转弯半径，单位米。
@@ -66,13 +70,15 @@ planner:
   edge_corner_pull: 0.10
   # 每个圆角最少采样点数。
   edge_corner_min_pts: 36
-  # 在蛇形主路径上选择预连接点时，前向投影窗口的起点，单位米。
-  pre_proj_min: 0.50
-  # 在蛇形主路径上选择预连接点时，前向投影窗口的终点，单位米。
-  pre_proj_max: 0.60
-  # 在蛇形主路径前缀上搜索预连接点时允许搜索的最大弧长，单位米。
-  pre_prefix_max: 1.00
-  # 在边缘收边环路上选择回接点时，弧长窗口的起点，单位米。
-  e_pre_min: 0.40
-  # 在边缘收边环路上选择回接点时，弧长窗口的终点，单位米。
-  e_pre_max: 0.50
+  # 在蛇形主路径上选择 P_pre 时，前向投影窗口的起点，单位米。
+  # 增大该窗口可让 conn1 以更平缓的角度接入外围环路。
+  pre_proj_min: 0.90
+  # 在蛇形主路径上选择 P_pre 时，前向投影窗口的终点，单位米。
+  pre_proj_max: 1.00
+  # 在蛇形主路径前缀上搜索 P_pre 时允许搜索的最大弧长，单位米。
+  # 必须覆盖 pre_proj_max；保留约 0.40m 余量以应对弯曲前缀。
+  pre_prefix_max: 1.40
+  # 从 E_start 沿外围环路选择 e_pre 时，弧长窗口的起点，单位米。
+  e_pre_min: 0.90
+  # 从 E_start 沿外围环路选择 e_pre 时，弧长窗口的终点，单位米。
+  e_pre_max: 1.00

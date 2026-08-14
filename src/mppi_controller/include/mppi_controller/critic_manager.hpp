@@ -4,7 +4,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <diagnostic_msgs/DiagnosticArray.h>
 #include <pluginlib/class_loader.hpp>
+#include <ros/publisher.h>
 
 #include "geometry_msgs/TwistStamped.h"
 #include "costmap_2d/costmap_2d_ros.h"
@@ -12,6 +14,7 @@
 #include "mppi_controller/tools/utils.hpp"
 #include "mppi_controller/critic_data.hpp"
 #include "mppi_controller/critic_function.hpp"
+#include "mppi_controller/critic_stats.hpp"
 
 namespace mppi
 {
@@ -56,6 +59,16 @@ protected:
   virtual void loadCritics();
 
   /**
+   * @brief Publish and reset the accumulated low-rate critic cost statistics.
+   */
+  void publishCriticStatistics() const;
+
+  /**
+   * @brief Reset statistics when no subscriber is present or after publication.
+   */
+  void resetCriticStatistics() const;
+
+  /**
     * @brief 获取插件的完整类名
     */
   std::string getFullName(const std::string & name);
@@ -72,6 +85,20 @@ protected:
   bool timing_diagnostics_{false};
   mutable size_t timing_cycles_{0};
   mutable std::vector<double> critic_time_totals_ms_;
+
+  bool publish_critic_stats_{false};
+  int critic_stats_publish_period_{10};
+  ros::Publisher critic_stats_pub_;
+  mutable size_t critic_stats_cycles_{0u};
+  mutable size_t critic_stats_fail_cycles_{0u};
+  mutable std::vector<CriticCostAccumulator> critic_cost_accumulators_;
+  mutable size_t path_progress_samples_{0u};
+  mutable double furthest_path_index_sum_{0.0};
+  mutable double furthest_path_arc_sum_{0.0};
+  mutable double max_candidate_arc_sum_{0.0};
+  mutable double furthest_path_index_max_{0.0};
+  mutable double furthest_path_arc_max_{0.0};
+  mutable double max_candidate_arc_max_{0.0};
 };
 
 }  // namespace mppi

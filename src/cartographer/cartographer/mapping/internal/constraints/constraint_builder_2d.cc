@@ -65,6 +65,42 @@ transform::Rigid2d ComputeSubmapPose(const Submap2D& submap) {
   return transform::Project2D(submap.local_pose());
 }
 
+sensor::PointCloud FilterActiveFrozenConstraintPointCloud(
+    const sensor::PointCloud& point_cloud, const double max_range,
+    const int min_points) {
+  if (max_range <= 0.) {
+    return point_cloud;
+  }
+  const float max_range_squared =
+      static_cast<float>(max_range * max_range);
+  sensor::PointCloud near_range_cloud = point_cloud.copy_if(
+      [max_range_squared](const sensor::RangefinderPoint& point) {
+        return point.position.squaredNorm() <= max_range_squared;
+      });
+  if (min_points <= 0 ||
+      static_cast<int>(near_range_cloud.size()) >= min_points) {
+    return near_range_cloud;
+  }
+  if (static_cast<int>(point_cloud.size()) <= min_points) {
+    return point_cloud;
+  }
+
+  std::vector<float> squared_ranges;
+  squared_ranges.reserve(point_cloud.size());
+  for (const sensor::RangefinderPoint& point : point_cloud) {
+    squared_ranges.push_back(point.position.squaredNorm());
+  }
+  const auto minimum_count_range =
+      squared_ranges.begin() + (min_points - 1);
+  std::nth_element(squared_ranges.begin(), minimum_count_range,
+                   squared_ranges.end());
+  const float expanded_max_range_squared = *minimum_count_range;
+  return point_cloud.copy_if(
+      [expanded_max_range_squared](const sensor::RangefinderPoint& point) {
+        return point.position.squaredNorm() <= expanded_max_range_squared;
+      });
+}
+
 double NormalizeAngleDifference(const double angle) {
   return std::atan2(std::sin(angle), std::cos(angle));
 }
@@ -206,9 +242,15 @@ void ConstraintBuilder2D::MaybeAddConstraint(
     const SubmapId& submap_id, const Submap2D* const submap,
     const NodeId& node_id, const TrajectoryNode::Data* const constant_data,
     const transform::Rigid2d& initial_relative_pose,
-    const bool collect_top_candidates) {
-  // 超过范围的不进行约束的计算
-  if (initial_relative_pose.translation().norm() >
+    const bool active_node_to_frozen_submap) {
+  // For ordinary loop closures, the submap origin is a useful proximity
+  // proxy. For active-to-frozen localization it is not: the vehicle may be
+  // inside a long submap while revisiting it in the opposite direction, many
+  // meters away from that submap's first insertion pose. The pose graph has
+  // already selected frozen submaps by their insertion-node footprint, so do
+  // not reject them here a second time using origin distance.
+  if (!active_node_to_frozen_submap &&
+      initial_relative_pose.translation().norm() >
       options_.max_constraint_distance()) {
     return;
   }
@@ -235,7 +277,7 @@ void ConstraintBuilder2D::MaybeAddConstraint(
   auto constraint_task = absl::make_unique<common::Task>();
   constraint_task->SetWorkItem([=]() LOCKS_EXCLUDED(mutex_) {
     ComputeConstraint(submap_id, submap, node_id, false, /* match_full_submap */
-                      collect_top_candidates,
+                      active_node_to_frozen_submap,
                       constant_data, initial_relative_pose, *scan_matcher,
                       constraint);
   });
@@ -248,7 +290,7 @@ void ConstraintBuilder2D::MaybeAddConstraint(
 void ConstraintBuilder2D::MaybeAddGlobalConstraint(
     const SubmapId& submap_id, const Submap2D* const submap,
     const NodeId& node_id, const TrajectoryNode::Data* const constant_data,
-    const bool collect_top_candidates) {
+    const bool active_node_to_frozen_submap) {
   absl::MutexLock locker(&mutex_);
   if (when_done_) {
     LOG(WARNING)
@@ -264,7 +306,7 @@ void ConstraintBuilder2D::MaybeAddGlobalConstraint(
   // 生成个计算全局约束的任务
   constraint_task->SetWorkItem([=]() LOCKS_EXCLUDED(mutex_) {
     ComputeConstraint(submap_id, submap, node_id, true, /* match_full_submap */
-                      collect_top_candidates,
+                      active_node_to_frozen_submap,
                       constant_data, transform::Rigid2d::Identity(),
                       *scan_matcher, constraint);
   });
@@ -341,7 +383,7 @@ ConstraintBuilder2D::DispatchScanMatcherConstruction(const SubmapId& submap_id,
 void ConstraintBuilder2D::ComputeConstraint(
     const SubmapId& submap_id, const Submap2D* const submap,
     const NodeId& node_id, bool match_full_submap,
-    const bool collect_top_candidates,
+    const bool active_node_to_frozen_submap,
     const TrajectoryNode::Data* const constant_data,
     const transform::Rigid2d& initial_relative_pose,
     const SubmapScanMatcher& submap_scan_matcher,
@@ -358,6 +400,17 @@ void ConstraintBuilder2D::ComputeConstraint(
   // - the ComputeSubmapPose() (map <- submap i)
   float score = 0.;
   transform::Rigid2d pose_estimate = transform::Rigid2d::Identity();
+  const sensor::PointCloud active_frozen_point_cloud =
+      active_node_to_frozen_submap
+          ? FilterActiveFrozenConstraintPointCloud(
+                constant_data->filtered_gravity_aligned_point_cloud,
+                options_.active_frozen_constraint_max_range(),
+                options_.active_frozen_constraint_min_points())
+          : sensor::PointCloud();
+  const sensor::PointCloud& constraint_point_cloud =
+      active_node_to_frozen_submap
+          ? active_frozen_point_cloud
+          : constant_data->filtered_gravity_aligned_point_cloud;
 
   // Compute 'pose_estimate' in three stages:
   // 1. Fast estimate using the fast correlative scan matcher.
@@ -370,16 +423,16 @@ void ConstraintBuilder2D::ComputeConstraint(
   if (match_full_submap) {
     kGlobalConstraintsSearchedMetric->Increment();
     const bool matched =
-        collect_top_candidates
+        active_node_to_frozen_submap
             ? submap_scan_matcher.fast_correlative_scan_matcher
                   ->MatchFullSubmapWithTopCandidates(
-                      constant_data->filtered_gravity_aligned_point_cloud,
+                      constraint_point_cloud,
                       options_.global_localization_min_score(),
                       kTopCandidateCount, kTopCandidateShadowScoreMargin,
                       &score, &pose_estimate, &top_candidates)
             : submap_scan_matcher.fast_correlative_scan_matcher
                   ->MatchFullSubmap(
-                      constant_data->filtered_gravity_aligned_point_cloud,
+                      constraint_point_cloud,
                       options_.global_localization_min_score(), &score,
                       &pose_estimate);
     if (matched) {
@@ -400,22 +453,25 @@ void ConstraintBuilder2D::ComputeConstraint(
     }
   } else {
     kConstraintsSearchedMetric->Increment();
+    const float local_min_score =
+        active_node_to_frozen_submap &&
+                options_.active_frozen_local_min_score() > 0.
+            ? static_cast<float>(options_.active_frozen_local_min_score())
+            : static_cast<float>(options_.min_score());
     const bool matched =
-        collect_top_candidates
+        active_node_to_frozen_submap
             ? submap_scan_matcher.fast_correlative_scan_matcher
                   ->MatchWithTopCandidates(
-                      initial_pose,
-                      constant_data->filtered_gravity_aligned_point_cloud,
-                      options_.min_score(), kTopCandidateCount,
+                      initial_pose, constraint_point_cloud, local_min_score,
+                      kTopCandidateCount,
                       kTopCandidateShadowScoreMargin, &score, &pose_estimate,
                       &top_candidates)
             : submap_scan_matcher.fast_correlative_scan_matcher->Match(
-                  initial_pose,
-                  constant_data->filtered_gravity_aligned_point_cloud,
-                  options_.min_score(), &score, &pose_estimate);
+                  initial_pose, constraint_point_cloud,
+                  local_min_score, &score, &pose_estimate);
     if (matched) {
       // We've reported a successful local match.
-      CHECK_GT(score, options_.min_score());
+      CHECK_GT(score, local_min_score);
       kConstraintsFoundMetric->Increment();
       kConstraintScoresMetric->Observe(score);
     } else {
@@ -434,7 +490,7 @@ void ConstraintBuilder2D::ComputeConstraint(
     // Step:3 使用ceres进行精匹配, 就是前端扫描匹配使用的函数
   ceres::Solver::Summary unused_summary;
   ceres_scan_matcher_.Match(pose_estimate.translation(), pose_estimate,
-                            constant_data->filtered_gravity_aligned_point_cloud,
+                            constraint_point_cloud,
                             *submap_scan_matcher.grid, &pose_estimate,
                             &unused_summary);
 
@@ -452,10 +508,9 @@ void ConstraintBuilder2D::ComputeConstraint(
   candidate->fast_score = score;
   candidate->match_full_submap = match_full_submap;
   candidate->top_candidates = top_candidates;
-  if (collect_top_candidates) {
+  if (active_node_to_frozen_submap) {
     candidate->geometry_quality = ComputeGeometryQuality(
-        *submap_scan_matcher.grid,
-        constant_data->filtered_gravity_aligned_point_cloud, pose_estimate);
+        *submap_scan_matcher.grid, constraint_point_cloud, pose_estimate);
   }
   *constraint = std::move(candidate);
   // if (submap_id.trajectory_id != node_id.trajectory_id) {
@@ -466,7 +521,7 @@ void ConstraintBuilder2D::ComputeConstraint(
   if (options_.log_matches()) {
     std::ostringstream info;
     info << "Node " << node_id << " with "
-         << constant_data->filtered_gravity_aligned_point_cloud.size()
+         << constraint_point_cloud.size()
          << " points on submap " << submap_id << std::fixed;
     if (match_full_submap) {
       info << " matches";

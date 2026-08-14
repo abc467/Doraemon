@@ -9,6 +9,10 @@
       <description>mppi critic for cost at inflation layer</description>
     </class>
 
+    <class type="mppi::critics::ObstaclesCritic" base_class_type="mppi::critics::CriticFunction">
+      <description>mppi critic for inflation-distance obstacle avoidance</description>
+    </class>
+
     <class type="mppi::critics::GoalAngleCritic" base_class_type="mppi::critics::CriticFunction">
       <description>mppi critic for goal angle</description>
     </class>
@@ -35,6 +39,10 @@
 
     <class type="mppi::critics::TwirlingCritic" base_class_type="mppi::critics::CriticFunction">
       <description>mppi critic for Twirling</description>
+    </class>
+
+    <class type="mppi::critics::VelocityDeadbandCritic" base_class_type="mppi::critics::CriticFunction">
+      <description>mppi critic for platform velocity deadbands</description>
     </class>
 
   </library>

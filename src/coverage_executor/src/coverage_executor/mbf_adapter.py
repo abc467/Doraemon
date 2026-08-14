@@ -41,6 +41,8 @@ class MBFAdapter:
         self._exe = actionlib.SimpleActionClient(self.exe_path_action, ExePathAction)
 
         self._last_exe_pose: Optional[PoseStamped] = None
+        self._last_connect_result = None
+        self._last_exe_result = None
         self._clear_costmaps_cli = None
         if self.clear_costmaps_service:
             try:
@@ -67,6 +69,8 @@ class MBFAdapter:
             self._exe.cancel_all_goals()
         except Exception:
             pass
+        self._last_connect_result = None
+        self._last_exe_result = None
 
     # -------------------- CONNECT (MoveBase) --------------------
     def send_connect(self, target: PoseStamped, controller: Optional[str] = None):
@@ -74,11 +78,19 @@ class MBFAdapter:
         g.target_pose = target
         if hasattr(g, "planner") and self.planner:
             g.planner = self.planner
-        selected_controller = self.controller if controller is None else str(controller).strip()
+        # Every point-to-point action, including charge approach and undock,
+        # defaults to the dedicated State Lattice controller.  The coverage
+        # controller is only a fallback for legacy launch files.
+        selected_controller = (
+            (self.connect_controller or self.controller)
+            if controller is None
+            else str(controller).strip()
+        )
         if hasattr(g, "controller") and selected_controller:
             g.controller = selected_controller
         if hasattr(g, "recovery_behaviors") and self.recovery:
             g.recovery_behaviors = self.recovery
+        self._last_connect_result = None
         self._mb.send_goal(g)
 
     def connect_done(self) -> bool:
@@ -93,6 +105,15 @@ class MBFAdapter:
 
     def connect_succeeded(self) -> bool:
         return self._mb.get_state() == actionlib.GoalStatus.SUCCEEDED
+
+    def get_connect_result(self):
+        try:
+            result = self._mb.get_result()
+            if result is not None:
+                self._last_connect_result = result
+        except Exception:
+            pass
+        return self._last_connect_result
 
     # -------------------- EXECUTE PATH (ExePath) --------------------
     def send_execute_path(self, path: Path, tolerance_from_action: float = 0.0):
@@ -111,6 +132,7 @@ class MBFAdapter:
                 pass
 
         self._last_exe_pose = None
+        self._last_exe_result = None
         self._exe.send_goal(g, feedback_cb=_fb_cb)
 
     def exe_done(self) -> bool:
@@ -125,6 +147,15 @@ class MBFAdapter:
 
     def exe_succeeded(self) -> bool:
         return self._exe.get_state() == actionlib.GoalStatus.SUCCEEDED
+
+    def get_exe_result(self):
+        try:
+            result = self._exe.get_result()
+            if result is not None:
+                self._last_exe_result = result
+        except Exception:
+            pass
+        return self._last_exe_result
 
     def get_last_exe_pose(self) -> Optional[PoseStamped]:
         return self._last_exe_pose

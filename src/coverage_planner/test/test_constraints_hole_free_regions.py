@@ -25,6 +25,7 @@ from coverage_planner.constraints import (
     _HAS_SHAPELY,
     _geometry_to_region_list,
     compile_map_constraints,
+    compile_navigation_map_constraints,
     compile_zone_constraints,
     filter_effective_regions_for_planner,
     make_hole_free_effective_regions,
@@ -252,6 +253,73 @@ class ConstraintHoleFreeRegionTest(unittest.TestCase):
         self.assertEqual(area["buffer_mode"], "rect_anisotropic")
         self.assertAlmostEqual(area["long_edge_normal_buffer_m"], 0.15, places=3)
         self.assertAlmostEqual(area["short_edge_normal_buffer_m"], 0.40, places=3)
+
+    def test_navigation_view_keeps_raw_no_go_while_planning_view_is_buffered(self):
+        no_go_outer = [[3.0, 1.5], [7.0, 1.5], [7.0, 3.5], [3.0, 3.5]]
+        common = {
+            "map_id": "map_demo",
+            "map_md5": "demo-md5",
+            "constraint_version": "constraints-demo",
+            "no_go_areas": [
+                {
+                    "area_id": "nogo_rect",
+                    "polygon": no_go_outer,
+                    "enabled": True,
+                }
+            ],
+            "virtual_walls": [],
+            "prec": 3,
+        }
+
+        navigation_constraints = compile_navigation_map_constraints(**common)
+        planning_constraints = compile_map_constraints(
+            **common,
+            default_no_go_long_edge_normal_buffer_m=0.18,
+            default_no_go_short_edge_normal_buffer_m=0.40,
+        )
+
+        navigation_ring = navigation_constraints.no_go_polygons[0]["geometry"][0]["outer"]
+        planning_ring = planning_constraints.no_go_polygons[0]["geometry"][0]["outer"]
+        self.assertEqual(_ring_bounds(navigation_ring), (3.0, 1.5, 7.0, 3.5))
+        self.assertEqual(_ring_bounds(planning_ring), (2.6, 1.32, 7.4, 3.68))
+        self.assertEqual(navigation_constraints.map_id, planning_constraints.map_id)
+        self.assertEqual(navigation_constraints.map_md5, planning_constraints.map_md5)
+        self.assertEqual(
+            navigation_constraints.constraint_version,
+            planning_constraints.constraint_version,
+        )
+
+    def test_navigation_view_ignores_no_go_planning_metadata_but_keeps_wall_width(self):
+        navigation_constraints = compile_navigation_map_constraints(
+            map_id="map_demo",
+            map_md5="demo-md5",
+            constraint_version="constraints-demo",
+            no_go_areas=[
+                {
+                    "area_id": "nogo_rect",
+                    "polygon": [[3.0, 1.5], [7.0, 1.5], [7.0, 3.5], [3.0, 3.5]],
+                    "enabled": True,
+                    "buffer_m": 0.75,
+                    "long_edge_normal_buffer_m": 0.18,
+                    "short_edge_normal_buffer_m": 0.40,
+                }
+            ],
+            virtual_walls=[
+                {
+                    "wall_id": "wall_demo",
+                    "polyline": [[0.0, 0.0], [2.0, 0.0]],
+                    "buffer_m": 0.25,
+                    "enabled": True,
+                }
+            ],
+            default_virtual_wall_buffer_m=0.25,
+            prec=3,
+        )
+
+        no_go_ring = navigation_constraints.no_go_polygons[0]["geometry"][0]["outer"]
+        wall_ring = navigation_constraints.virtual_wall_keepouts[0]["geometry"][0]["outer"]
+        self.assertEqual(_ring_bounds(no_go_ring), (3.0, 1.5, 7.0, 3.5))
+        self.assertEqual(_ring_bounds(wall_ring), (0.0, -0.25, 2.0, 0.25))
 
     def test_rotated_rectangular_keepout_uses_local_edge_normals(self):
         angle = math.radians(31.0)

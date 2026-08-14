@@ -1,356 +1,394 @@
+#include "mppi_controller/mppi_controller.hpp"
+
 #include <algorithm>
 #include <chrono>
-#include "mppi_controller/mppi_controller.hpp"
-#include <pluginlib/class_list_macros.h>
+#include <cmath>
+#include <stdexcept>
+#include <utility>
 
-// 通过该指令注册为BaseLocalPlanner插件
+#include <pluginlib/class_list_macros.h>
+#include <tf2/utils.h>
+
 PLUGINLIB_EXPORT_CLASS(local_planner::MPPIController, nav_core::BaseLocalPlanner)
 
 namespace local_planner
 {
 
-    MPPIController::MPPIController() {}
+MPPIController::MPPIController(
+  std::string name, tf2_ros::Buffer * tf,
+  costmap_2d::Costmap2DROS * costmap_ros)
+{
+  initialize(std::move(name), tf, costmap_ros);
+}
 
-    MPPIController::MPPIController(std::string name, tf2_ros::Buffer *tf, costmap_2d::Costmap2DROS *costmap_ros)
-        : costmap_ros_(nullptr), initialized_(false)
-    {
-        initialize(name, tf, costmap_ros);
-    }
+void MPPIController::initialize(
+  std::string name, tf2_ros::Buffer * tf,
+  costmap_2d::Costmap2DROS * costmap_ros)
+{
+  if (initialized_) {
+    ROS_WARN("MPPIController is already initialized");
+    return;
+  }
+  if (tf == nullptr || costmap_ros == nullptr) {
+    throw std::invalid_argument("MPPIController requires TF and costmap instances");
+  }
 
-    MPPIController::~MPPIController() {}
+  costmap_ros_ = std::shared_ptr<costmap_2d::Costmap2DROS>(
+    costmap_ros, [](costmap_2d::Costmap2DROS *) {});
+  tf_buffer_ = std::shared_ptr<tf2_ros::Buffer>(tf, [](tf2_ros::Buffer *) {});
 
-    void MPPIController::initialize(std::string name, tf2_ros::Buffer *tf, costmap_2d::Costmap2DROS *costmap_ros)
-    {
-        if (!initialized_)
-        {
-            costmap_ros_ = std::shared_ptr<costmap_2d::Costmap2DROS>(costmap_ros, [](auto *) {}); // 创建一个std::shared_ptr 的接口
+  name_ = name;
+  private_nh_ = ros::NodeHandle("~/" + name_);
+  applyAdapterParameters(readAdapterParameters());
 
-            tf_buffer_ = std::shared_ptr<tf2_ros::Buffer>(tf, [](auto *) {});
-            // tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
-            ros::NodeHandle private_nh("~/" + name);
+  std::string odom_topic("/odom");
+  private_nh_.param("odom_topic", odom_topic, odom_topic);
+  odom_helper_ = std::make_shared<base_local_planner::OdometryHelperRos>(
+    odom_topic);
 
-            private_nh.param("visualize", visualize_, false);
-            private_nh.param("timing_diagnostics", timing_diagnostics_, false);
-            private_nh.param("goal_tolerance", goal_tolerance_, 0.2);
-            private_nh.param("angle_tolerance", angle_tolerance_, 0.2);
-            private_nh.param("rotate_to_goal_enabled", rotate_to_goal_enabled_, true);
-            private_nh.param("rotate_to_goal_kp", rotate_to_goal_kp_, 0.8);
-            private_nh.param(
-                "rotate_to_goal_min_angular_speed",
-                rotate_to_goal_min_angular_speed_, 0.12);
-            private_nh.param(
-                "rotate_to_goal_max_angular_speed",
-                rotate_to_goal_max_angular_speed_, 0.4);
-            private_nh.param(
-                "rotate_to_goal_collision_horizon",
-                rotate_to_goal_collision_horizon_, 0.5);
-            private_nh.param(
-                "rotate_to_goal_collision_step",
-                rotate_to_goal_collision_step_, 0.05);
-            std::string odom_topic("/odom");
-            private_nh.param("odom_topic", odom_topic, std::string("/odom"));
-            ROS_INFO("MPPIController: goal_tolerance: %f, angle_tolerance: %f", goal_tolerance_, angle_tolerance_);
-            ROS_INFO(
-                "MPPIController: rotate_to_goal=%s kp=%.2f angular_speed=[%.2f, %.2f]",
-                rotate_to_goal_enabled_ ? "true" : "false",
-                rotate_to_goal_kp_,
-                rotate_to_goal_min_angular_speed_,
-                rotate_to_goal_max_angular_speed_);
-            ROS_INFO_STREAM("MPPIController: odom topic: " << odom_topic);
+  optimizer_ = std::make_unique<mppi::Optimizer>();
+  optimizer_->initialize(private_nh_, name_, costmap_ros_);
+  path_handler_.initialize(private_nh_, name_, costmap_ros_, tf_buffer_);
+  trajectory_visualizer_.initialize(
+    private_nh_, name_, costmap_ros_->getGlobalFrameID());
 
-            odom_helper_ = std::make_shared<base_local_planner::OdometryHelperRos>(odom_topic);
-            optimizer_.initialize(private_nh, name, costmap_ros_);
-            path_handler_.initialize(private_nh, name, costmap_ros_, tf_buffer_);
-            trajectory_visualizer_.initialize(private_nh, name, costmap_ros_->getGlobalFrameID());
+  initialized_ = true;
+  subscribeToSpeedLimit();
+  reload_parameters_service_ = private_nh_.advertiseService(
+    "reload_parameters", &MPPIController::reloadParameters, this);
+  ROS_INFO(
+    "MPPIController initialized with goal tolerance %.3fm / %.3frad and "
+    "stopped gate %.3fm/s / %.3frad/s for %.3fs",
+    goal_tolerance_, angle_tolerance_, trans_stopped_velocity_,
+    rot_stopped_velocity_, goal_stopped_time_);
+}
 
-            initialized_ = true;
-            ROS_INFO("MPPIController initialized");
-        }
-        else
-        {
-            ROS_WARN("This controller is initialized .");
-        }
-    }
+MPPIController::AdapterParameters MPPIController::readAdapterParameters() const
+{
+  AdapterParameters parameters;
+  private_nh_.param("visualize", parameters.visualize, false);
+  private_nh_.param("timing_diagnostics", parameters.timing_diagnostics, false);
+  private_nh_.param("goal_tolerance", parameters.goal_tolerance, 0.20);
+  private_nh_.param("angle_tolerance", parameters.angle_tolerance, 0.20);
+  private_nh_.param(
+    "trans_stopped_velocity", parameters.trans_stopped_velocity, 0.02);
+  private_nh_.param(
+    "rot_stopped_velocity", parameters.rot_stopped_velocity, 0.03);
+  private_nh_.param("goal_stopped_time", parameters.goal_stopped_time, 0.30);
+  private_nh_.param(
+    "speed_limit_topic", parameters.speed_limit_topic,
+    std::string("/coverage_executor/speed_limit_scale"));
+  const auto require_nonnegative_finite = [](
+    double value, const char * parameter_name) {
+      if (!std::isfinite(value) || value < 0.0) {
+        throw std::invalid_argument(
+          std::string(parameter_name) + " must be finite and nonnegative");
+      }
+      return value;
+    };
+  parameters.goal_tolerance = require_nonnegative_finite(
+    parameters.goal_tolerance, "goal_tolerance");
+  parameters.angle_tolerance = require_nonnegative_finite(
+    parameters.angle_tolerance, "angle_tolerance");
+  parameters.trans_stopped_velocity = require_nonnegative_finite(
+    parameters.trans_stopped_velocity, "trans_stopped_velocity");
+  parameters.rot_stopped_velocity = require_nonnegative_finite(
+    parameters.rot_stopped_velocity, "rot_stopped_velocity");
+  parameters.goal_stopped_time = require_nonnegative_finite(
+    parameters.goal_stopped_time, "goal_stopped_time");
+  return parameters;
+}
 
-    bool MPPIController::setPlan(const std::vector<geometry_msgs::PoseStamped> &orig_global_plan)
-    {
-        if (!initialized_)
-        {
-            ROS_ERROR("This planner has not been initialized, please call initialize() before using this planner");
-            return false;
-        }
+void MPPIController::applyAdapterParameters(
+  const AdapterParameters & parameters)
+{
+  visualize_ = parameters.visualize;
+  timing_diagnostics_ = parameters.timing_diagnostics;
+  goal_tolerance_ = parameters.goal_tolerance;
+  angle_tolerance_ = parameters.angle_tolerance;
+  trans_stopped_velocity_ = parameters.trans_stopped_velocity;
+  rot_stopped_velocity_ = parameters.rot_stopped_velocity;
+  goal_stopped_time_ = parameters.goal_stopped_time;
+  speed_limit_topic_ = parameters.speed_limit_topic;
+  goal_reached_evaluator_.configure(
+    goal_tolerance_, angle_tolerance_, trans_stopped_velocity_,
+    rot_stopped_velocity_, goal_stopped_time_);
+}
 
-        global_path_.header.frame_id = "map";
-        global_path_.header.stamp = ros::Time::now();
-        global_path_.poses = orig_global_plan;
-        path_handler_.setPath(global_path_);
+void MPPIController::subscribeToSpeedLimit()
+{
+  speed_limit_subscriber_.shutdown();
+  if (!speed_limit_topic_.empty()) {
+    speed_limit_subscriber_ = private_nh_.subscribe<std_msgs::Float32>(
+      speed_limit_topic_, 1, &MPPIController::speedLimitScaleCallback, this);
+  }
+}
 
-        reach_goal_ = false;
-        first_rotate_ = false;
+bool MPPIController::reloadParameters(
+  std_srvs::Trigger::Request &,
+  std_srvs::Trigger::Response & response)
+{
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  if (!initialized_ || !optimizer_) {
+    response.success = false;
+    response.message = "MPPIController is not initialized";
+    return true;
+  }
 
+  try {
+    const auto adapter_parameters = readAdapterParameters();
+    auto replacement = std::make_unique<mppi::Optimizer>();
+    replacement->initialize(private_nh_, name_, costmap_ros_);
+
+    if (optimizer_->isSpeedLimitActive()) {
+      const auto & old_base = optimizer_->getSettings().base_constraints;
+      const auto & new_base = replacement->getSettings().base_constraints;
+      constexpr float epsilon = 1e-6f;
+      const bool velocity_limits_changed =
+        std::fabs(old_base.vx_max - new_base.vx_max) > epsilon ||
+        std::fabs(old_base.vx_min - new_base.vx_min) > epsilon ||
+        std::fabs(old_base.vy - new_base.vy) > epsilon ||
+        std::fabs(old_base.wz - new_base.wz) > epsilon;
+      if (velocity_limits_changed) {
+        response.success = false;
+        response.message =
+          "clear the active runtime speed limit before changing velocity bounds";
         return true;
+      }
+      replacement->setSpeedLimit(speed_limit_scale_ * 100.0, true);
     }
 
-    bool MPPIController::isGoalReached()
-    {
-        return reach_goal_;
+    path_handler_.reloadParameters();
+    optimizer_.swap(replacement);
+    const bool speed_topic_changed =
+      speed_limit_topic_ != adapter_parameters.speed_limit_topic;
+    applyAdapterParameters(adapter_parameters);
+    if (speed_topic_changed) {
+      subscribeToSpeedLimit();
     }
+    goal_reached_ = false;
+    response.success = true;
+    response.message = "MPPI parameters reloaded transactionally";
+    ROS_INFO("[%s] %s", name_.c_str(), response.message.c_str());
+  } catch (const std::exception & ex) {
+    response.success = false;
+    response.message = std::string("MPPI parameter reload rejected: ") + ex.what();
+    ROS_ERROR("[%s] %s", name_.c_str(), response.message.c_str());
+  }
+  return true;
+}
 
-    bool MPPIController::computeVelocityCommands(geometry_msgs::Twist &cmd_vel)
-    {
-        // 获取 local costmap 全局坐标系下的 robot pose。
-        geometry_msgs::PoseStamped robot_pose;
-        if (!costmap_ros_->getRobotPose(robot_pose))
-        {
-            ROS_ERROR("MPPIController: Can not get robot pose.");
-            return false;
-        }
-        // 获取速度
-        geometry_msgs::PoseStamped robot_vel;
-        odom_helper_->getRobotVel(robot_vel);
-        geometry_msgs::Twist robot_speed;
-        robot_speed.linear.x = robot_vel.pose.position.x;
-        robot_speed.linear.y = robot_vel.pose.position.y;
-        robot_speed.angular.z = tf2::getYaw(robot_vel.pose.orientation);
+void MPPIController::speedLimitScaleCallback(
+  const std_msgs::Float32ConstPtr & message)
+{
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  if (!initialized_ || !message) {
+    return;
+  }
+  double scale = static_cast<double>(message->data);
+  if (!std::isfinite(scale)) {
+    ROS_ERROR_THROTTLE(
+      1.0, "MPPI received a non-finite speed-limit scale; stopping");
+    scale = 0.0;
+  }
+  scale = std::clamp(scale, 0.0, 1.0);
+  if (std::fabs(scale - speed_limit_scale_) <= 1e-6) {
+    return;
+  }
+  speed_limit_scale_ = scale;
+  optimizer_->setSpeedLimit(scale * 100.0, true);
+  ROS_INFO("MPPI speed-limit scale updated to %.3f", scale);
+}
 
-        geometry_msgs::Pose goal;
-        nav_msgs::Path transformed_plan;
-        const auto path_start = std::chrono::steady_clock::now();
-        try
-        {
-            // 转化到局部代价地图坐标系下
-            // goal = path_handler_.getTransformedGoal().pose;
-            transformed_plan = path_handler_.transformPath(robot_pose);
-            goal = transformed_plan.poses.back().pose;
-        }
-        catch (const std::exception & ex)
-        {
-            ROS_ERROR_THROTTLE(
-                1.0, "[mppi_controller] Failed to transform path: %s", ex.what());
-            return false;
-        }
-        catch (...)
-        {
-            ROS_ERROR_THROTTLE(
-                1.0, "[mppi_controller] Failed to transform path: unknown exception");
-            return false;
-        }
-        const auto optimizer_start = std::chrono::steady_clock::now();
-        const bool local_plan_reaches_goal =
-            path_handler_.transformedPathEndsAtGoal();
+bool MPPIController::setPlan(
+  const std::vector<geometry_msgs::PoseStamped> & plan)
+{
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  if (!initialized_) {
+    ROS_ERROR("MPPIController must be initialized before setPlan()");
+    return false;
+  }
+  if (plan.empty()) {
+    ROS_ERROR("MPPIController rejected an empty plan");
+    return false;
+  }
 
-        if (local_plan_reaches_goal && isGoalReached(robot_pose.pose, goal))
-        {
-            reach_goal_ = true;
-            cmd_vel.linear.x = 0;
-            cmd_vel.linear.y = 0;
-            cmd_vel.angular.z = 0;
-            return true;
-        }
-
-        const double dx = goal.position.x - robot_pose.pose.position.x;
-        const double dy = goal.position.y - robot_pose.pose.position.y;
-        const double position_error = std::hypot(dx, dy);
-        const double yaw_error = angles::shortest_angular_distance(
-            tf2::getYaw(robot_pose.pose.orientation),
-            tf2::getYaw(goal.orientation));
-
-        if (rotate_to_goal_enabled_ &&
-            local_plan_reaches_goal &&
-            position_error <= goal_tolerance_ &&
-            std::fabs(yaw_error) > angle_tolerance_)
-        {
-            double angular_velocity = std::clamp(
-                rotate_to_goal_kp_ * yaw_error,
-                -rotate_to_goal_max_angular_speed_,
-                rotate_to_goal_max_angular_speed_);
-
-            if (std::fabs(angular_velocity) < rotate_to_goal_min_angular_speed_)
-            {
-                angular_velocity = std::copysign(
-                    rotate_to_goal_min_angular_speed_, yaw_error);
-            }
-
-            cmd_vel.linear.x = 0.0;
-            cmd_vel.linear.y = 0.0;
-            cmd_vel.angular.z = 0.0;
-
-            if (!isRotationCollisionFree(robot_pose.pose, angular_velocity))
-            {
-                ROS_ERROR_THROTTLE(
-                    1.0,
-                    "MPPIController: goal alignment rotation blocked by footprint collision");
-                return false;
-            }
-
-            cmd_vel.angular.z = angular_velocity;
-            ROS_DEBUG_THROTTLE(
-                1.0,
-                "MPPIController: rotating at goal, distance=%.3f yaw_error=%.3f cmd_w=%.3f",
-                position_error, yaw_error, angular_velocity);
-            return true;
-        }
-        // if (first_rotate_ == false)
-        // {
-        //     double cur_angle = tf2::getYaw(robot_pose.value().pose.orientation);
-        //     double path_angle = tf2::getYaw(transformed_plan.poses.front().pose.orientation);
-        //     double angle_diff = std::remainder(path_angle - cur_angle, 2.0 * M_PI);
-        //     if (std::fabs(angle_diff) <= 0.2)
-        //     {
-        //         first_rotate_ = true;
-        //     }
-        //     else
-        //     {
-        //         cmd_vel.linear.x = 0;
-        //         cmd_vel.angular.z = std::clamp(angle_diff * 0.5,
-        //                                        (angle_diff >= 0) ? 0 : -1.0,
-        //                                        (angle_diff >= 0) ? 1.0 : 0);
-        //     }
-        //     return true;
-        // }
-
-        try
-        {
-            // auto start = std::chrono::high_resolution_clock::now(); // 开始计时
-            cmd_vel = optimizer_.evalControl(robot_pose, robot_speed, transformed_plan, goal).twist;
-            // auto end = std::chrono::high_resolution_clock::now();
-            // auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            // std::cout << "耗时: " << duration.count() << " 毫秒" << std::endl;
-        }
-        catch (...)
-        {
-            ROS_ERROR("[mppi_controller] Failed to evaluate control");
-            return false;
-        }
-        const auto optimizer_end = std::chrono::steady_clock::now();
-
-        if (timing_diagnostics_)
-        {
-            path_time_total_ms_ += std::chrono::duration<double, std::milli>(
-                optimizer_start - path_start).count();
-            optimizer_time_total_ms_ += std::chrono::duration<double, std::milli>(
-                optimizer_end - optimizer_start).count();
-
-            if (++timing_cycles_ >= 50)
-            {
-                const double cycles = static_cast<double>(timing_cycles_);
-                ROS_INFO(
-                    "[mppi_controller] cycle average: path=%.3fms optimizer=%.3fms",
-                    path_time_total_ms_ / cycles,
-                    optimizer_time_total_ms_ / cycles);
-                timing_cycles_ = 0;
-                path_time_total_ms_ = 0.0;
-                optimizer_time_total_ms_ = 0.0;
-            }
-        }
-
-        if (visualize_)
-        {
-            visualize(std::move(transformed_plan));
-        }
-
-        return true;
+  global_path_.header = plan.front().header;
+  if (global_path_.header.frame_id.empty()) {
+    global_path_.header.frame_id = costmap_ros_->getGlobalFrameID();
+  }
+  global_path_.header.stamp = ros::Time::now();
+  global_path_.poses = plan;
+  for (auto & pose : global_path_.poses) {
+    if (pose.header.frame_id.empty()) {
+      pose.header.frame_id = global_path_.header.frame_id;
     }
+  }
 
-    void MPPIController::visualize(nav_msgs::Path path)
-    {
-        if (!trajectory_visualizer_.hasSubscribers())
-        {
-            return;
-        }
+  try {
+    path_handler_.setPath(global_path_);
+  } catch (const std::exception & ex) {
+    ROS_ERROR("MPPIController rejected plan: %s", ex.what());
+    return false;
+  }
+  goal_reached_ = false;
+  goal_reached_evaluator_.restoreConfiguredTolerances();
+  return true;
+}
 
-        const bool publish_trajectories = trajectory_visualizer_.hasTrajectorySubscribers();
-        const bool publish_optimal_path = trajectory_visualizer_.hasOptimalPathSubscribers();
+bool MPPIController::computeVelocityCommands(geometry_msgs::Twist & command)
+{
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  setZeroCommand(command);
+  if (!initialized_) {
+    ROS_ERROR_THROTTLE(1.0, "MPPIController is not initialized");
+    return false;
+  }
 
-        if (publish_trajectories)
-        {
-            trajectory_visualizer_.add(
-                optimizer_.getGeneratedTrajectories(), "Candidate Trajectories");
-        }
+  geometry_msgs::PoseStamped robot_pose;
+  if (!costmap_ros_->getRobotPose(robot_pose)) {
+    ROS_ERROR_THROTTLE(1.0, "MPPIController cannot obtain the robot pose");
+    return false;
+  }
 
-        if (publish_trajectories || publish_optimal_path)
-        {
-            trajectory_visualizer_.add(
-                optimizer_.getOptimizedTrajectory(), "Optimal Trajectory", ros::Time::now());
-        }
+  geometry_msgs::PoseStamped robot_velocity_pose;
+  odom_helper_->getRobotVel(robot_velocity_pose);
+  geometry_msgs::Twist robot_speed;
+  robot_speed.linear.x = robot_velocity_pose.pose.position.x;
+  robot_speed.linear.y = robot_velocity_pose.pose.position.y;
+  robot_speed.angular.z = tf2::getYaw(robot_velocity_pose.pose.orientation);
 
-        trajectory_visualizer_.visualize(std::move(path));
+  const auto path_start = std::chrono::steady_clock::now();
+  nav_msgs::Path transformed_plan;
+  geometry_msgs::Pose goal;
+  try {
+    transformed_plan = path_handler_.transformPath(robot_pose);
+    // Upstream semantics: critics always receive the original global goal,
+    // not the end of a truncated local-costmap window.
+    goal = path_handler_.getTransformedGoal().pose;
+  } catch (const std::exception & ex) {
+    ROS_ERROR_THROTTLE(
+      1.0, "MPPIController failed to transform path: %s", ex.what());
+    return false;
+  }
+  const auto optimizer_start = std::chrono::steady_clock::now();
+
+  const bool local_plan_reaches_goal =
+    path_handler_.transformedPathEndsAtGoal();
+  if (local_plan_reaches_goal &&
+      poseWithinGoalTolerance(robot_pose.pose, goal))
+  {
+    const double distance = std::hypot(
+      robot_pose.pose.position.x - goal.position.x,
+      robot_pose.pose.position.y - goal.position.y);
+    const double yaw_error = angles::shortest_angular_distance(
+      tf2::getYaw(robot_pose.pose.orientation), tf2::getYaw(goal.orientation));
+    goal_reached_ = goal_reached_evaluator_.update(
+      distance, yaw_error, robot_speed.linear.x, robot_speed.angular.z,
+      ros::WallTime::now().toSec());
+    setZeroCommand(command);
+    return true;
+  }
+  goal_reached_evaluator_.reset();
+  goal_reached_ = false;
+
+  try {
+    auto result = optimizer_->evalControl(
+      robot_pose, robot_speed, transformed_plan, goal);
+    const auto & optimized_control = std::get<0>(result);
+    command = optimized_control.twist;
+    if (visualize_) {
+      visualize(
+        std::move(transformed_plan), std::get<1>(result),
+        optimized_control.header.stamp);
     }
+  } catch (const std::exception & ex) {
+    setZeroCommand(command);
+    ROS_ERROR_THROTTLE(
+      1.0, "MPPIController failed to produce a safe control: %s", ex.what());
+    return false;
+  }
+  if (!std::isfinite(command.linear.x) ||
+      !std::isfinite(command.linear.y) ||
+      !std::isfinite(command.angular.z))
+  {
+    setZeroCommand(command);
+    ROS_ERROR_THROTTLE(1.0, "MPPIController produced a non-finite control");
+    return false;
+  }
 
-    bool MPPIController::isGoalReached(const geometry_msgs::Pose &robot_pose,
-                                       const geometry_msgs::Pose &goal_pose)
-    {
-        const double dx = robot_pose.position.x - goal_pose.position.x;
-        const double dy = robot_pose.position.y - goal_pose.position.y;
-
-        const double robot_yaw = tf2::getYaw(robot_pose.orientation);
-        const double goal_yaw = tf2::getYaw(goal_pose.orientation);
-        const double yaw_diff = angles::shortest_angular_distance(robot_yaw, goal_yaw);
-        return std::sqrt(dx * dx + dy * dy) <= goal_tolerance_ && std::fabs(yaw_diff) <= angle_tolerance_;
+  const auto optimizer_end = std::chrono::steady_clock::now();
+  if (timing_diagnostics_) {
+    path_time_total_ms_ += std::chrono::duration<double, std::milli>(
+      optimizer_start - path_start).count();
+    optimizer_time_total_ms_ += std::chrono::duration<double, std::milli>(
+      optimizer_end - optimizer_start).count();
+    if (++timing_cycles_ >= 50u) {
+      const double count = static_cast<double>(timing_cycles_);
+      ROS_INFO(
+        "MPPIController cycle average: path=%.3fms optimizer=%.3fms",
+        path_time_total_ms_ / count, optimizer_time_total_ms_ / count);
+      timing_cycles_ = 0u;
+      path_time_total_ms_ = 0.0;
+      optimizer_time_total_ms_ = 0.0;
     }
+  }
 
-    bool MPPIController::isRotationCollisionFree(
-        const geometry_msgs::Pose &robot_pose, double angular_velocity) const
-    {
-        if (!costmap_ros_ || !costmap_ros_->getCostmap())
-        {
-            return false;
-        }
+  return true;
+}
 
-        const double start_yaw = tf2::getYaw(robot_pose.orientation);
-        const double rotation = angular_velocity * rotate_to_goal_collision_horizon_;
-        const int samples = std::max(
-            1,
-            static_cast<int>(
-                std::ceil(std::fabs(rotation) /
-                          std::max(rotate_to_goal_collision_step_, 0.01))));
+bool MPPIController::isGoalReached()
+{
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  return goal_reached_;
+}
 
-        base_local_planner::CostmapModel collision_checker(
-            *costmap_ros_->getCostmap());
-        const auto footprint = costmap_ros_->getRobotFootprint();
-        const double inscribed_radius =
-            costmap_ros_->getLayeredCostmap()->getInscribedRadius();
-        const double circumscribed_radius =
-            costmap_ros_->getLayeredCostmap()->getCircumscribedRadius();
+bool MPPIController::isGoalReachedWithTolerances(
+  double distance_tolerance, double angle_tolerance)
+{
+  std::lock_guard<std::mutex> lock(controller_mutex_);
+  goal_reached_evaluator_.applyToleranceUpperBounds(
+    distance_tolerance, angle_tolerance);
+  goal_reached_ = goal_reached_evaluator_.reached();
+  return goal_reached_;
+}
 
-        for (int i = 1; i <= samples; ++i)
-        {
-            const double ratio =
-                static_cast<double>(i) / static_cast<double>(samples);
-            const double footprint_cost = collision_checker.footprintCost(
-                robot_pose.position.x,
-                robot_pose.position.y,
-                start_yaw + rotation * ratio,
-                footprint,
-                inscribed_radius,
-                circumscribed_radius);
-            if (footprint_cost < 0.0)
-            {
-                return false;
-            }
-        }
-        return true;
-    }
+bool MPPIController::poseWithinGoalTolerance(
+  const geometry_msgs::Pose & robot_pose,
+  const geometry_msgs::Pose & goal_pose) const
+{
+  const double distance = std::hypot(
+    robot_pose.position.x - goal_pose.position.x,
+    robot_pose.position.y - goal_pose.position.y);
+  const double yaw_error = angles::shortest_angular_distance(
+    tf2::getYaw(robot_pose.orientation), tf2::getYaw(goal_pose.orientation));
+  return distance <= goal_reached_evaluator_.activePositionTolerance() &&
+         std::fabs(yaw_error) <= goal_reached_evaluator_.activeYawTolerance();
+}
 
-    std::optional<geometry_msgs::PoseStamped> MPPIController::getRobotPose()
-    {
-        geometry_msgs::TransformStamped transformStamped;
-        try
-        {
-            transformStamped = tf_buffer_->lookupTransform(costmap_ros_->getGlobalFrameID(), costmap_ros_->getBaseFrameID(), ros::Time(0), ros::Duration(1.0));
-        }
-        catch (tf2::TransformException &ex)
-        {
-            ROS_WARN("tf error: %s", ex.what());
-            return std::nullopt;
-        }
+void MPPIController::visualize(
+  nav_msgs::Path path, const Eigen::ArrayXXf & optimal_trajectory,
+  const ros::Time & command_stamp)
+{
+  if (!trajectory_visualizer_.hasSubscribers()) {
+    return;
+  }
+  if (trajectory_visualizer_.hasTrajectorySubscribers()) {
+    trajectory_visualizer_.add(
+      optimizer_->getGeneratedTrajectories(), "Candidate Trajectories");
+  }
+  if (trajectory_visualizer_.hasTrajectorySubscribers() ||
+      trajectory_visualizer_.hasOptimalPathSubscribers())
+  {
+    trajectory_visualizer_.add(
+      optimal_trajectory, "Optimal Trajectory", command_stamp);
+  }
+  trajectory_visualizer_.visualize(std::move(path));
+}
 
-        geometry_msgs::PoseStamped result;
-        result.header = transformStamped.header;
-        result.pose.position.x = transformStamped.transform.translation.x;
-        result.pose.position.y = transformStamped.transform.translation.y;
-        result.pose.orientation = transformStamped.transform.rotation;
-        return std::optional(result);
-    }
+void MPPIController::setZeroCommand(geometry_msgs::Twist & command)
+{
+  command = geometry_msgs::Twist();
+}
 
-} // namespace local_planner
+}  // namespace local_planner

@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <string>
 #include <algorithm>
+#include <cmath>
+#include <vector>
 
 #include "mppi_controller/models/control_sequence.hpp"
 #include "mppi_controller/models/state.hpp"
@@ -35,10 +37,34 @@ public:
    * @param control_constraints 控制约束
    * @param model_dt 单个时间步长
    */
-  void initialize(const models::ControlConstraints &control_constraints, float model_dt)
+  void initialize(
+    const models::ControlConstraints & control_constraints, float model_dt,
+    float model_delay_vx = 0.0f, float model_delay_vy = 0.0f,
+    float model_delay_wz = 0.0f, bool clamp_raw_controls = false)
   {
     control_constraints_ = control_constraints;
     model_dt_ = model_dt;
+    model_delay_vx_ = model_delay_vx;
+    model_delay_vy_ = model_delay_vy;
+    model_delay_wz_ = model_delay_wz;
+    clamp_raw_controls_ = clamp_raw_controls;
+    cmd_history_vx_.assign(offsetSteps(model_delay_vx_), 0.0f);
+    cmd_history_vy_.assign(offsetSteps(model_delay_vy_), 0.0f);
+    cmd_history_wz_.assign(offsetSteps(model_delay_wz_), 0.0f);
+  }
+
+  void pushCommandHistory(float vx, float vy, float wz)
+  {
+    pushOne(cmd_history_vx_, vx);
+    pushOne(cmd_history_vy_, vy);
+    pushOne(cmd_history_wz_, wz);
+  }
+
+  void clearCommandHistory()
+  {
+    std::fill(cmd_history_vx_.begin(), cmd_history_vx_.end(), 0.0f);
+    std::fill(cmd_history_vy_.begin(), cmd_history_vy_.end(), 0.0f);
+    std::fill(cmd_history_wz_.begin(), cmd_history_wz_.end(), 0.0f);
   }
 
   /**
@@ -51,34 +77,53 @@ public:
     float max_delta_vx = model_dt_ * control_constraints_.ax_max;
     float min_delta_vx = model_dt_ * control_constraints_.ax_min;
     float max_delta_vy = model_dt_ * control_constraints_.ay_max;
+    float min_delta_vy = model_dt_ * control_constraints_.ay_min;
     float max_delta_wz = model_dt_ * control_constraints_.az_max;
 
-    unsigned int n_rows = state.vx.rows();
     unsigned int n_cols = state.vx.cols();
 
-    // Eigen 中的默认布局是列主序，因此以列主序方式访问元素以尽可能利用 L1 缓存
-    for (unsigned int i = 1; i != n_cols; i++)
-    {
-      for (unsigned int j = 0; j != n_rows; j++)
-      {
-        float vx_last = state.vx(j, i - 1);
-        float &cvx_curr = state.cvx(j, i - 1);
-        cvx_curr = utils::clamp(vx_last + min_delta_vx, vx_last + max_delta_vx, cvx_curr);
-        state.vx(j, i) = cvx_curr;
+    // Only rollout velocities are dynamically clamped by default. Keeping the
+    // raw samples preserves the information-theoretic MPPI control cost.
+    for (unsigned int i = 1; i != n_cols; ++i) {
+      const auto vx_lower = (state.vx.col(i - 1) > 0.0f).select(
+        state.vx.col(i - 1) + min_delta_vx,
+        state.vx.col(i - 1) - max_delta_vx);
+      const auto vx_upper = (state.vx.col(i - 1) > 0.0f).select(
+        state.vx.col(i - 1) + max_delta_vx,
+        state.vx.col(i - 1) - min_delta_vx);
+      state.vx.col(i) = state.cvx.col(i - 1)
+        .cwiseMax(vx_lower).cwiseMin(vx_upper);
+      if (clamp_raw_controls_) {
+        state.cvx.col(i - 1) = state.vx.col(i);
+      }
 
-        float wz_last = state.wz(j, i - 1);
-        float &cwz_curr = state.cwz(j, i - 1);
-        cwz_curr = utils::clamp(wz_last - max_delta_wz, wz_last + max_delta_wz, cwz_curr);
-        state.wz(j, i) = cwz_curr;
+      state.wz.col(i) = state.cwz.col(i - 1)
+        .cwiseMax(state.wz.col(i - 1) - max_delta_wz)
+        .cwiseMin(state.wz.col(i - 1) + max_delta_wz);
+      if (clamp_raw_controls_) {
+        state.cwz.col(i - 1) = state.wz.col(i);
+      }
 
-        if (is_holo)
-        {
-          float vy_last = state.vy(j, i - 1);
-          float &cvy_curr = state.cvy(j, i - 1);
-          cvy_curr = utils::clamp(vy_last - max_delta_vy, vy_last + max_delta_vy, cvy_curr);
-          state.vy(j, i) = cvy_curr;
+      if (is_holo) {
+        const auto vy_lower = (state.vy.col(i - 1) > 0.0f).select(
+          state.vy.col(i - 1) + min_delta_vy,
+          state.vy.col(i - 1) - max_delta_vy);
+        const auto vy_upper = (state.vy.col(i - 1) > 0.0f).select(
+          state.vy.col(i - 1) + max_delta_vy,
+          state.vy.col(i - 1) - min_delta_vy);
+        state.vy.col(i) = state.cvy.col(i - 1)
+          .cwiseMax(vy_lower).cwiseMin(vy_upper);
+        if (clamp_raw_controls_) {
+          state.cvy.col(i - 1) = state.vy.col(i);
         }
       }
+    }
+
+    const unsigned int offset_vx = static_cast<unsigned int>(offsetSteps(model_delay_vx_));
+    const unsigned int offset_vy = static_cast<unsigned int>(offsetSteps(model_delay_vy_));
+    const unsigned int offset_wz = static_cast<unsigned int>(offsetSteps(model_delay_wz_));
+    if (offset_vx > 0u || offset_wz > 0u || (is_holo && offset_vy > 0u)) {
+      applyDelayShift(state, is_holo, offset_vx, offset_vy, offset_wz);
     }
   }
 
@@ -95,9 +140,62 @@ public:
   virtual void applyConstraints(models::ControlSequence & /*control_sequence*/) {}
 
 protected:
+  void applyDelayShift(
+    models::State & state, bool is_holonomic,
+    unsigned int offset_vx, unsigned int offset_vy,
+    unsigned int offset_wz) const
+  {
+    const auto shift = [](
+      Eigen::ArrayXXf & velocities, unsigned int offset,
+      const std::vector<float> & history) {
+        const unsigned int columns = static_cast<unsigned int>(velocities.cols());
+        if (offset == 0u || columns == 0u) {
+          return;
+        }
+        for (unsigned int index = offset < columns ? columns - offset : 0u;
+          index > 0u; --index)
+        {
+          velocities.col(offset + index - 1u) = velocities.col(index);
+        }
+        const unsigned int end = std::min(offset, columns);
+        for (unsigned int index = 1u; index < end; ++index) {
+          velocities.col(index).setConstant(history[index]);
+        }
+      };
+    shift(state.vx, offset_vx, cmd_history_vx_);
+    shift(state.wz, offset_wz, cmd_history_wz_);
+    if (is_holonomic) {
+      shift(state.vy, offset_vy, cmd_history_vy_);
+    }
+  }
+
+  std::size_t offsetSteps(float delay) const
+  {
+    if (delay <= 0.0f || model_dt_ <= 0.0f) {
+      return 0u;
+    }
+    return static_cast<std::size_t>(std::floor(delay / model_dt_ + 0.5f));
+  }
+
+  static void pushOne(std::vector<float> & values, float value)
+  {
+    if (values.empty()) {
+      return;
+    }
+    std::rotate(values.begin(), values.begin() + 1, values.end());
+    values.back() = value;
+  }
+
   float model_dt_{0.0};
-  models::ControlConstraints control_constraints_{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                                                  0.0f};
+  float model_delay_vx_{0.0f};
+  float model_delay_vy_{0.0f};
+  float model_delay_wz_{0.0f};
+  bool clamp_raw_controls_{false};
+  std::vector<float> cmd_history_vx_;
+  std::vector<float> cmd_history_vy_;
+  std::vector<float> cmd_history_wz_;
+  models::ControlConstraints control_constraints_{
+    0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 };
 
 /**

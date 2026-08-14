@@ -1565,19 +1565,63 @@ class OperationsStore:
 
     def update_run_state(self, run_id: str, state: str, *, reason: str = "", set_end: bool = False):
         now = _now_ts()
+        state_s = str(state or "").strip()
+        reason_s = str(reason or "").strip()
+        run_id_s = str(run_id or "").strip()
         conn = self._connect()
         try:
-            if set_end:
+            preserve_paused_failure = state_s.upper() == "CANCELED" and not reason_s
+            if set_end and preserve_paused_failure:
+                # A later manual cancel is bookkeeping, not a replacement for
+                # the failure that put the run into PAUSED/FAILED. Keep that
+                # diagnostic while recording the terminal CANCELED state.
+                conn.execute(
+                    """
+                    UPDATE mission_runs
+                    SET state=?,
+                        reason=CASE
+                          WHEN UPPER(COALESCE(state, '')) IN ('PAUSED', 'FAILED')
+                               OR UPPER(COALESCE(state, '')) LIKE 'ERROR%'
+                            THEN reason
+                          ELSE ''
+                        END,
+                        end_ts=?, updated_ts=?
+                    WHERE run_id=?;
+                    """,
+                    (state_s, now, now, run_id_s),
+                )
+            elif set_end:
                 conn.execute(
                     "UPDATE mission_runs SET state=?, reason=?, end_ts=?, updated_ts=? WHERE run_id=?;",
-                    (str(state or "").strip(), str(reason or "").strip(), now, now, str(run_id or "").strip()),
+                    (state_s, reason_s, now, now, run_id_s),
                 )
             else:
                 conn.execute(
                     "UPDATE mission_runs SET state=?, reason=?, updated_ts=? WHERE run_id=?;",
-                    (str(state or "").strip(), str(reason or "").strip(), now, str(run_id or "").strip()),
+                    (state_s, reason_s, now, run_id_s),
                 )
             conn.commit()
+        finally:
+            conn.close()
+
+    def get_latest_run_error_event(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Return the latest committed ERROR/FATAL event for one mission run."""
+        run_id_s = str(run_id or "").strip()
+        if not run_id_s:
+            return None
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT event_id, ts, component, level, code, message, data_json
+                FROM robot_events
+                WHERE run_id=? AND UPPER(COALESCE(level, '')) IN ('ERROR', 'FATAL')
+                ORDER BY ts DESC, event_id DESC
+                LIMIT 1;
+                """,
+                (run_id_s,),
+            ).fetchone()
+            return dict(row) if row is not None else None
         finally:
             conn.close()
 

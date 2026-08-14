@@ -34,6 +34,7 @@ public:
 protected:
   float threshold_to_consider_{0};
   int offset_from_furthest_{0};
+  bool path_occupancy_uses_footprint_{false};
 
   int power_{0};
   float weight_{0};

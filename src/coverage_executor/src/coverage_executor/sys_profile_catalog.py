@@ -27,7 +27,9 @@ class SysProfileCatalog:
         if not isinstance(v, dict):
             prof = SysProfile(
                 name=key,
-                mbf_controller_name=f"MPPI_{key.capitalize()}_Controller",
+                # All coverage behavior profiles share the one production
+                # coverage controller; actuator behavior remains profile-specific.
+                mbf_controller_name="MPPI_Standard_Controller",
                 actuator_profile_name=key,
             )
             self._cache[key] = prof

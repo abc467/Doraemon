@@ -22,7 +22,10 @@ class DockSupplyWorkflowTest(unittest.TestCase):
         manager = DockSupplyManager.__new__(DockSupplyManager)
         manager.enable_drain = True
         manager.drain_timeout_s = 10.0
-        manager.drain_settle_s = 0.0
+        manager.enable_refill = True
+        manager.target_clean_level = 74
+        manager.refill_timeout_s = 10.0
+        manager.refill_settle_s = 20.0
         manager.combined_status_wait_s = 1.0
         manager.combined_status_stale_timeout_s = 3.0
         manager._comb = SimpleNamespace(sewage_level=50, clean_level=0)
@@ -31,6 +34,7 @@ class DockSupplyWorkflowTest(unittest.TestCase):
         manager._set_state = Mock()
         manager._station_cmd = Mock()
         manager._tap_cmd = Mock()
+        manager._stop_move = Mock()
         return manager
 
     def test_post_charge_drain_stops_only_after_zero(self):
@@ -40,7 +44,6 @@ class DockSupplyWorkflowTest(unittest.TestCase):
         manager._latest_combined_level = Mock(side_effect=[25, 0])
         manager._tap_cmd = Mock(side_effect=lambda tap_id, operation: events.append(("tap", tap_id, operation)))
         manager._station_cmd = Mock(side_effect=lambda operation, enabled: events.append(("station", operation, enabled)))
-        manager._run_drain_settle_phase = Mock(side_effect=lambda: events.append(("settle",)))
 
         with patch("dock_supply_manager.rospy.sleep"), patch(
             "dock_supply_manager.rospy.is_shutdown", return_value=False
@@ -59,21 +62,18 @@ class DockSupplyWorkflowTest(unittest.TestCase):
                 ("station", 3, True),
                 ("station", 3, False),
                 ("tap", 3, 0),
-                ("settle",),
             ],
         )
 
-    def test_drain_settle_holds_robot_stopped_for_configured_time(self):
+    def test_refill_settle_holds_robot_stopped_for_twenty_seconds(self):
         manager = self._drain_manager()
-        manager.drain_settle_s = 30.0
-        manager._stop_move = Mock()
 
-        with patch("dock_supply_manager.time.monotonic", side_effect=[100.0, 100.0, 130.0]), patch(
+        with patch("dock_supply_manager.time.monotonic", side_effect=[100.0, 100.0, 120.0]), patch(
             "dock_supply_manager.rospy.sleep"
         ), patch("dock_supply_manager.rospy.is_shutdown", return_value=False):
-            manager._run_drain_settle_phase()
+            manager._run_refill_settle_phase()
 
-        manager._set_state.assert_called_once_with("DRAIN_SETTLING")
+        manager._set_state.assert_called_once_with("REFILL_SETTLING")
         self.assertEqual(manager._stop_move.call_count, 2)
 
     def test_drain_timeout_fails_and_closes_outputs(self):
@@ -121,6 +121,81 @@ class DockSupplyWorkflowTest(unittest.TestCase):
 
         manager._tap_cmd.assert_not_called()
         manager._station_cmd.assert_not_called()
+
+    def test_refill_keeps_running_at_74_and_stops_at_75_before_wait(self):
+        manager = self._drain_manager()
+        events = []
+        manager._wait_for_fresh_combined_level = Mock(return_value=74)
+        manager._latest_combined_level = Mock(side_effect=[74, 75])
+        manager._tap_cmd = Mock(side_effect=lambda tap_id, operation: events.append(("tap", tap_id, operation)))
+        manager._station_cmd = Mock(side_effect=lambda operation, enabled: events.append(("station", operation, enabled)))
+        manager._run_refill_settle_phase = Mock(side_effect=lambda: events.append(("wait", 20)))
+
+        with patch("dock_supply_manager.rospy.sleep"), patch(
+            "dock_supply_manager.rospy.is_shutdown", return_value=False
+        ):
+            manager._run_refill_phase()
+
+        manager._set_state.assert_called_once_with("REFILLING")
+        self.assertEqual(
+            events,
+            [
+                ("tap", 2, 1),
+                ("station", 11, True),
+                ("station", 11, False),
+                ("tap", 2, 0),
+                ("wait", 20),
+            ],
+        )
+
+    def test_refill_already_above_74_skips_outputs_but_still_waits(self):
+        manager = self._drain_manager()
+        manager._wait_for_fresh_combined_level = Mock(return_value=75)
+        manager._run_refill_settle_phase = Mock()
+
+        manager._run_refill_phase()
+
+        manager._tap_cmd.assert_not_called()
+        manager._station_cmd.assert_not_called()
+        manager._run_refill_settle_phase.assert_called_once_with()
+
+    def test_refill_stale_status_fails_and_closes_outputs_without_wait(self):
+        manager = self._drain_manager()
+        manager._wait_for_fresh_combined_level = Mock(return_value=20)
+        manager._latest_combined_level = Mock(return_value=None)
+        manager._run_refill_settle_phase = Mock()
+
+        with patch("dock_supply_manager.rospy.sleep"), patch(
+            "dock_supply_manager.rospy.is_shutdown", return_value=False
+        ):
+            with self.assertRaises(DockSupplyError) as raised:
+                manager._run_refill_phase()
+
+        self.assertEqual(raised.exception.code, "FAILED_CLEAN_STATUS_STALE")
+        self.assertEqual(manager._station_cmd.call_args_list[-1].args, (11, False))
+        self.assertEqual(manager._tap_cmd.call_args_list[-1].args, (2, 0))
+        manager._run_refill_settle_phase.assert_not_called()
+
+    def test_production_runtime_wires_refill_threshold_timeout_and_wait(self):
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(THIS_DIR)))
+        with open(os.path.join(repo_root, "config", "runtime.a26022.env"), encoding="utf-8") as handle:
+            runtime_env = handle.read()
+        with open(os.path.join(repo_root, "scripts", "start_runtime.sh"), encoding="utf-8") as handle:
+            start_runtime = handle.read()
+        with open(
+            os.path.join(repo_root, "src", "robot_hw_bridge", "launch", "hardware_bridges.launch"),
+            encoding="utf-8",
+        ) as handle:
+            hardware_launch = handle.read()
+
+        for source in (runtime_env, start_runtime):
+            self.assertIn("DOCK_SUPPLY_ENABLE_REFILL=true", source)
+            self.assertIn("DOCK_SUPPLY_TARGET_CLEAN_LEVEL=74", source)
+            self.assertIn("DOCK_SUPPLY_REFILL_TIMEOUT_S=600.0", source)
+            self.assertIn("DOCK_SUPPLY_REFILL_SETTLE_S=20.0", source)
+        self.assertIn('<arg name="dock_supply_enable_refill" default="true"/>', hardware_launch)
+        self.assertIn('<arg name="dock_supply_target_clean_level" default="74"/>', hardware_launch)
+        self.assertIn('<arg name="dock_supply_refill_settle_s" default="20.0"/>', hardware_launch)
 
     def test_workflow_charges_then_disables_charge_then_drains(self):
         manager = DockSupplyManager.__new__(DockSupplyManager)

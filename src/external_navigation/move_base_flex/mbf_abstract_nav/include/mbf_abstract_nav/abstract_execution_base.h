@@ -41,6 +41,8 @@
 
 #include <boost/thread.hpp>
 
+#include <atomic>
+
 #include <mbf_abstract_nav/MoveBaseFlexConfig.h>
 
 #include <string>
@@ -120,7 +122,7 @@ protected:
   boost::thread thread_;
 
   //! flag for canceling controlling
-  bool cancel_;
+  std::atomic<bool> cancel_;
 
   //! the last received plugin execution outcome
   uint32_t outcome_;

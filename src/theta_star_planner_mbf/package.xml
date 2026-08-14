@@ -51,6 +51,7 @@
   <exec_depend>tf2</exec_depend>
   <exec_depend>tf2_geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <test_depend>gtest</test_depend>
   <export>
     <mbf_costmap_core plugin="${prefix}/theta_star_plugin.xml"/>
   </export>

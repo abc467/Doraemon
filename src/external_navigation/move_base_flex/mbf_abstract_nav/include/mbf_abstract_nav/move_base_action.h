@@ -40,6 +40,11 @@
 #ifndef MBF_ABSTRACT_NAV__MOVE_BASE_ACTION_H_
 #define MBF_ABSTRACT_NAV__MOVE_BASE_ACTION_H_
 
+#include <atomic>
+#include <cstdint>
+
+#include <boost/function.hpp>
+
 #include <actionlib/server/action_server.h>
 #include <actionlib/client/simple_action_client.h>
 
@@ -65,11 +70,15 @@ class MoveBaseAction
   typedef actionlib::SimpleActionClient<mbf_msgs::ExePathAction> ActionClientExePath;
   typedef actionlib::SimpleActionClient<mbf_msgs::RecoveryAction> ActionClientRecovery;
 
+  typedef boost::function<bool(
+      const mbf_msgs::ExePathGoal &, std::string &)> ContinuousPlanUpdater;
+
   typedef actionlib::ActionServer<mbf_msgs::MoveBaseAction>::GoalHandle GoalHandle;
 
   MoveBaseAction(const std::string &name,
                  const mbf_utility::RobotInformation &robot_info,
-                 const std::vector<std::string> &controllers);
+                 const std::vector<std::string> &controllers,
+                 const ContinuousPlanUpdater &continuous_plan_updater);
 
   ~MoveBaseAction();
 
@@ -77,32 +86,63 @@ class MoveBaseAction
 
   void cancel();
 
+  /**
+   * Cancel a specific outer MoveBase goal and complete it immediately.
+   *
+   * The asynchronous get_path callback is intentionally invalidated on
+   * cancellation, so it cannot be responsible for completing this goal.
+   */
+  void cancel(GoalHandle &goal_handle);
+
   void reconfigure(
       mbf_abstract_nav::MoveBaseFlexConfig &config, uint32_t level);
 
  protected:
 
-  void actionExePathFeedback(const mbf_msgs::ExePathFeedbackConstPtr &feedback);
+  void actionExePathFeedback(
+      const mbf_msgs::ExePathFeedbackConstPtr &feedback,
+      std::uint64_t execution_epoch,
+      std::uint64_t controller_generation);
 
   void actionGetPathDone(
       const actionlib::SimpleClientGoalState &state,
-      const mbf_msgs::GetPathResultConstPtr &result);
+      const mbf_msgs::GetPathResultConstPtr &result,
+      std::uint64_t request_generation,
+      std::uint64_t execution_epoch);
 
-  void actionExePathActive();
+  void actionExePathActive(
+      std::uint64_t execution_epoch,
+      std::uint64_t controller_generation);
 
   void actionExePathDone(
       const actionlib::SimpleClientGoalState &state,
-      const mbf_msgs::ExePathResultConstPtr &result);
+      const mbf_msgs::ExePathResultConstPtr &result,
+      std::uint64_t execution_epoch,
+      std::uint64_t controller_generation);
 
   void actionRecoveryDone(
       const actionlib::SimpleClientGoalState &state,
-      const mbf_msgs::RecoveryResultConstPtr &result);
+      const mbf_msgs::RecoveryResultConstPtr &result,
+      std::uint64_t execution_epoch);
 
   bool attemptRecovery();
 
   bool replanningActive() const;
 
+  /**
+   * Reject an old periodic result which the current robot cannot join and
+   * return the executable suffix beginning at the admitted projection.
+   */
+  bool periodicPlanIsFreshAndReachable(
+      const nav_msgs::Path &path,
+      const ros::WallTime &request_started_at,
+      nav_msgs::Path &joined_path,
+      std::string &reason) const;
+
   void replanningThread();
+
+  //! Cancel all child actions after invalidating their callbacks.
+  void cancelChildActions();
 
   /**
    * Utility method that fills move base action result with the result of any of the action clients.
@@ -155,14 +195,26 @@ class MoveBaseAction
   //! Action client used by the move_base action
   ActionClientGetPath action_client_get_path_;
 
+  //! Dedicated client for periodic replanning; never shares result ownership
+  //! with initial/post-recovery planning.
+  ActionClientGetPath action_client_replanning_;
+
   //! Action client used by the move_base action
   ActionClientRecovery action_client_recovery_;
 
-  //! current distance to goal (we will stop replanning if very close to avoid destabilizing the controller)
-  double dist_to_goal_;
+  //! In-process, atomic plan handoff which preserves the ExePath goal owner.
+  ContinuousPlanUpdater continuous_plan_updater_;
 
-  //! Replanning period dynamically reconfigurable
-  ros::Duration replanning_period_;
+  //! current distance to goal (we will stop replanning if very close to avoid destabilizing the controller)
+  std::atomic<double> dist_to_goal_;
+
+  //! Replanning period dynamically reconfigurable and read by its worker.
+  std::atomic<double> replanning_period_seconds_{0.0};
+
+  //! Maximum wall age and SE(2) join envelope for a periodic planner result.
+  double periodic_plan_max_age_{10.0};
+  double periodic_plan_max_join_distance_{0.75};
+  double periodic_plan_max_join_yaw_{1.57};
 
   //! Replanning thread, running permanently
   boost::thread replanning_thread_;
@@ -188,8 +240,22 @@ class MoveBaseAction
     FAILED
   };
 
-  MoveBaseActionState action_state_;
+  std::atomic<MoveBaseActionState> action_state_;
   MoveBaseActionState recovery_trigger_;
+
+  //! Monotonic ownership for controller executions and async planner calls.
+  std::atomic<std::uint64_t> execution_epoch_{0u};
+  std::atomic<std::uint64_t> fresh_plan_generation_{0u};
+  std::atomic<std::uint64_t> periodic_plan_generation_{0u};
+  std::atomic<std::uint64_t> controller_generation_{0u};
+  std::atomic<bool> shutting_down_{false};
+
+  //! Serializes outer-goal ownership with all asynchronous callbacks.
+  mutable boost::mutex lifecycle_mtx_;
+  std::atomic<bool> has_active_goal_{false};
+
+  //! Protect reusable action-goal templates from start/replanning races.
+  mutable boost::mutex goal_template_mtx_;
 };
 
 } /* mbf_abstract_nav */

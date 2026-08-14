@@ -1,4 +1,5 @@
 #include <cmath>
+#include <costmap_2d/cost_values.h>
 #include "mppi_controller/critics/obstacles_critic.hpp"
 
 namespace mppi::critics
@@ -17,7 +18,7 @@ void ObstaclesCritic::initialize()
   param_exists &= nh_.param(param_prefix + "collision_cost", collision_cost_, 100000.0f);
   param_exists &= nh_.param(param_prefix + "collision_margin_distance", collision_margin_distance_, 0.10f);
   param_exists &= nh_.param(param_prefix + "near_goal_distance", near_goal_distance_, 0.5f);
-  param_exists &= nh_.param(param_prefix + "inflation_layer_name", inflation_layer_name_, std::string("inflation_layer"));
+  param_exists &= nh_.param(param_prefix + "inflation_layer_name", inflation_layer_name_, std::string(""));
   
   if(!param_exists){
     ROS_WARN("ObstaclesCritic param doesn't exist !!!");
@@ -25,6 +26,7 @@ void ObstaclesCritic::initialize()
     ROS_WARN("ObstaclesCritic param exist !!!");
   }
 
+  collision_checker_ = std::make_unique<base_local_planner::CostmapModel>(*costmap_);
   possible_collision_cost_ = findCircumscribedCost(costmap_ros_);
 
   if (possible_collision_cost_ < 1.0f) {
@@ -55,8 +57,11 @@ float ObstaclesCritic::findCircumscribedCost(
 
   const costmap_2d::InflationLayer* inflation_layer = nullptr;
   for (auto& layer : *costmap->getLayeredCostmap()->getPlugins()) {
-    if (layer->getName() == inflation_layer_name_) {
-      inflation_layer = dynamic_cast<costmap_2d::InflationLayer*>(layer.get());
+    auto * candidate = dynamic_cast<costmap_2d::InflationLayer*>(layer.get());
+    if (candidate != nullptr &&
+        (inflation_layer_name_.empty() || layer->getName() == inflation_layer_name_))
+    {
+      inflation_layer = candidate;
       break;
     }
   }
@@ -64,8 +69,25 @@ float ObstaclesCritic::findCircumscribedCost(
   if (inflation_layer != nullptr) {
     const double resolution = costmap->getCostmap()->getResolution();
     result = inflation_layer->computeCost(circum_radius / resolution);
-    inflation_scale_factor_ = static_cast<float>(inflation_layer->getCostScalingFactor());
-    inflation_radius_ = static_cast<float>(inflation_layer->getInflationRadius());
+    // ROS1 InflationLayer does not expose these values through accessors.
+    // Its plugin name is also its parameter namespace, so retain the official
+    // distance-based critic by reading the same configured parameters.
+    double scaling = 0.0;
+    double radius = 0.0;
+    const std::string layer_namespace = inflation_layer->getName();
+    if (ros::param::get(
+        layer_namespace + "/cost_scaling_factor", scaling) &&
+        ros::param::get(layer_namespace + "/inflation_radius", radius))
+    {
+      inflation_scale_factor_ = static_cast<float>(scaling);
+      inflation_radius_ = static_cast<float>(radius);
+    } else {
+      inflation_scale_factor_ = 0.0f;
+      inflation_radius_ = 0.0f;
+      ROS_WARN_THROTTLE(
+        5.0, "ObstaclesCritic could not read ROS1 inflation parameters; "
+        "hard collision checking remains enabled, distance repulsion is disabled");
+    }
   } else {
     ROS_WARN(
       "No inflation layer found in costmap configuration. "
@@ -109,7 +131,7 @@ void ObstaclesCritic::score(CriticData & data)
 
   // If near the goal, don't apply the preferential term since the goal is near obstacles
   bool near_goal = false;
-  if (utils::withinPositionGoalTolerance(near_goal_distance_, data.state.pose.pose, data.goal)) {
+  if (data.state.local_path_length <= near_goal_distance_) {
     near_goal = true;
   }
 
@@ -180,16 +202,15 @@ void ObstaclesCritic::score(CriticData & data)
   */
 bool ObstaclesCritic::inCollision(float cost) const
 {
-  bool is_tracking_unknown =
+  const bool is_tracking_unknown =
     costmap_ros_->getLayeredCostmap()->isTrackingUnknown();
 
-  // using namespace nav2_costmap_2d; // NOLINT
   switch (static_cast<unsigned char>(cost)) {
-    case (LETHAL_OBSTACLE):
+    case (costmap_2d::LETHAL_OBSTACLE):
       return true;
-    case (INSCRIBED_INFLATED_OBSTACLE):
+    case (costmap_2d::INSCRIBED_INFLATED_OBSTACLE):
       return consider_footprint_ ? false : true;
-    case (NO_INFORMATION):
+    case (costmap_2d::NO_INFORMATION):
       return is_tracking_unknown ? false : true;
   }
 
@@ -202,17 +223,24 @@ CollisionCost ObstaclesCritic::costAtPose(float x, float y, float theta)
   float & cost = collision_cost.cost;
   collision_cost.using_footprint = false;
   unsigned int x_i, y_i;
-  if (!collision_checker_.worldToMap(x, y, x_i, y_i)) {
-    cost = nav2_costmap_2d::NO_INFORMATION;
+  if (!costmap_->worldToMap(x, y, x_i, y_i)) {
+    cost = costmap_2d::NO_INFORMATION;
     return collision_cost;
   }
-  cost = collision_checker_.pointCost(x_i, y_i);
+  cost = static_cast<float>(costmap_->getCost(x_i, y_i));
 
   if (consider_footprint_ &&
     (cost >= possible_collision_cost_ || possible_collision_cost_ < 1.0f))
   {
-    cost = static_cast<float>(collision_checker_.footprintCostAtPose(
-        x, y, theta, costmap_ros_->getRobotFootprint()));
+    const double footprint_cost = collision_checker_->footprintCost(
+      x, y, theta, costmap_ros_->getRobotFootprint());
+    if (footprint_cost < 0.0) {
+      cost = footprint_cost == -2.0 ?
+        static_cast<float>(costmap_2d::NO_INFORMATION) :
+        static_cast<float>(costmap_2d::LETHAL_OBSTACLE);
+    } else {
+      cost = static_cast<float>(footprint_cost);
+    }
     collision_cost.using_footprint = true;
   }
 

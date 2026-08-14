@@ -89,9 +89,19 @@ TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_wei
 TRAJECTORY_BUILDER_2D.submaps.num_range_data = 80 
 POSE_GRAPH.optimization_problem.huber_scale = 1e1
 POSE_GRAPH.optimize_every_n_nodes = 30 --提高后端优化频率，让定位轨迹更快被冻结地图约束拉回
-POSE_GRAPH.global_sampling_ratio = 0.005 --active->frozen 由外层轮询调度；该参数仅限制其他全局约束
+-- active->frozen 已固定使用当前位姿附近的局部搜索，不再因连接超时切到
+-- 全图轮询。该时间仅保留给其他跨轨迹约束逻辑。
+POSE_GRAPH.global_constraint_search_after_n_seconds = 30.
+POSE_GRAPH.global_sampling_ratio = 0.005 --active->frozen 不做全图轮询；该参数仅限制其他全局约束
 POSE_GRAPH.constraint_builder.min_score = 0.62
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.66 --提高全局重定位弱匹配门槛，降低重复结构误匹配
+-- active->frozen 后端约束只用近距离端点。前端仍保留 20 m 激光；这样避免
+-- 长通道 8~20 m 的掠射点因微小角度误差跨越多个 5 cm 栅格、拉低整帧 CSM 分数。
+POSE_GRAPH.constraint_builder.active_frozen_constraint_max_range = 8.
+POSE_GRAPH.constraint_builder.active_frozen_constraint_min_points = 100
+-- 这里只是 active->frozen 局部 FCSM 的候选入口门槛。低于 0.62 的候选
+-- 必须继续通过严格几何质量、小修正量和跨节点一致性检查，不能直接进入后端。
+POSE_GRAPH.constraint_builder.active_frozen_local_min_score = 0.50
 
 TRAJECTORY_BUILDER.pure_localization_trimmer.max_submaps_to_keep = 4 --trim 触发时保留更多上下文，减少 pure localization 重对齐跳变
 TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 3.0 --限制静止/低速时 node 过密，减少旋转后端优化集中触发

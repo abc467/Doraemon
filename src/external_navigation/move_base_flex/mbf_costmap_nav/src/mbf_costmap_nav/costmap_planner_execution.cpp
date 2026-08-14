@@ -52,6 +52,15 @@ CostmapPlannerExecution::CostmapPlannerExecution(const std::string& planner_name
 {
   ros::NodeHandle private_nh("~");
   private_nh.param("planner_lock_costmap", lock_costmap_, true);
+  // Snapshot-capable planners must be allowed to take their own short lock,
+  // copy an immutable map, and release the live Costmap2D while searching.
+  // Keep the historical global default for legacy plugins and opt out by
+  // planner name so a fallback planner cannot accidentally race map updates.
+  private_nh.param(
+      "planner_lock_costmap_overrides/" + planner_name,
+      lock_costmap_, lock_costmap_);
+  ROS_INFO("Planner '%s' live-costmap lock: %s", planner_name.c_str(),
+           lock_costmap_ ? "whole planning call" : "planner-managed snapshot");
 }
 
 CostmapPlannerExecution::~CostmapPlannerExecution()
