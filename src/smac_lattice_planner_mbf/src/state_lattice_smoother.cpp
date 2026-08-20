@@ -523,6 +523,14 @@ bool qualityGateAccepts(
   std::string & reason)
 {
   const double numerical_epsilon = 1e-6;
+  constexpr double kCurvatureRelativeNumericalTolerance = 1e-3;
+  const double maximum_physical_curvature =
+    (1.0 / minimum_turning_radius_m) *
+    (1.0 + kCurvatureRelativeNumericalTolerance) + numerical_epsilon;
+  if (candidate.max_abs_curvature_radpm > maximum_physical_curvature) {
+    reason = "smoothed path exceeded the configured minimum turning radius";
+    return false;
+  }
   if (candidate.length_m > raw.length_m * params.max_path_length_ratio + numerical_epsilon) {
     reason = "smoothed path length exceeded the acceptance ratio";
     return false;

@@ -18,8 +18,6 @@
 #include "ob_camera_node.h"
 #include <thread>
 #include <mutex>
-#include <semaphore.h>
-#include <pthread.h>
 
 namespace orbbec_camera {
 
@@ -82,9 +80,6 @@ class OBCameraNodeDriver {
   std::condition_variable reset_device_cv_;
   std::atomic_bool reset_device_{false};
   std::mutex reset_device_lock_;
-  pthread_mutex_t* orb_device_lock_ = nullptr;
-  pthread_mutexattr_t orb_device_lock_attr_;
-  uint8_t* orb_device_lock_shm_addr_ = nullptr;
   int orb_device_lock_shm_fd_ = -1;
   // net work config
   std::string ip_address_;

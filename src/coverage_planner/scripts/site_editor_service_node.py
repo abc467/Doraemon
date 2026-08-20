@@ -461,7 +461,7 @@ class SiteEditorServiceNode:
             rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.115)
         )
         self.default_no_go_short_edge_normal_buffer_m = float(
-            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.115)
         )
         self.default_plan_profile_name = str(rospy.get_param("~default_plan_profile_name", "cover_standard")).strip() or "cover_standard"
         self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)

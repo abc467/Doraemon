@@ -16,19 +16,13 @@ void PathFollowCritic::initialize()
   param_exists &= nh_.param(param_prefix + "offset_from_furthest", offset_from_furthest_, 6);
   param_exists &= nh_.param(param_prefix + "cost_power", power_, 1);
   param_exists &= nh_.param(param_prefix + "cost_weight", weight_, 5.0f);
-  nh_.param(
-    "path_occupancy_uses_footprint",
-    path_occupancy_uses_footprint_, false);
 
   if(!param_exists){
     ROS_WARN("PathFollowCritic param doesn't exist !!!");
   }else{
     ROS_WARN("PathFollowCritic param exist !!!");
   }
-  ROS_INFO(
-    "PathFollowCritic path occupancy uses %s",
-    path_occupancy_uses_footprint_ ?
-    "filled footprint" : "official center point");
+  ROS_INFO("PathFollowCritic shares official center-point path validity with PathAlign");
 
 }
 
@@ -41,27 +35,23 @@ void PathFollowCritic::score(CriticData & data)
   }
 
   utils::setPathFurthestPointIfNotSet(data);
-  utils::setPathCostsIfNotSet(
-    data, costmap_ros_, path_occupancy_uses_footprint_);
-  const size_t path_size = data.path.x.size() - 1;
+  utils::setPathCostsIfNotSet(data, costmap_ros_);
+  const size_t path_last_index = data.path.x.size() - 1u;
 
   // 取最远点并防止越界
-  auto offsetted_idx = std::min(
-    *data.furthest_reached_path_point + offset_from_furthest_, path_size);
+  const size_t requested_index = std::min(
+    *data.furthest_reached_path_point +
+      static_cast<size_t>(std::max(0, offset_from_furthest_)),
+    path_last_index);
 
   // Drive to the first valid path point, in case of dynamic obstacles on path
   // we want to drive past it, not through it
   // 向前寻找第一个有效的路径点（避开障碍物）
-  bool valid = false;
-  while (!valid && offsetted_idx < path_size - 1) {
-    valid = (*data.path_pts_valid)[offsetted_idx];
-    if (!valid) {
-      offsetted_idx++;
-    }
-  }
+  const size_t target_index = utils::pathFollowTargetIndex(
+    *data.path_pts_valid, requested_index, path_last_index);
 
-  const auto path_x = data.path.x(offsetted_idx);
-  const auto path_y = data.path.y(offsetted_idx);
+  const auto path_x = data.path.x(target_index);
+  const auto path_y = data.path.y(target_index);
 
   const int && rightmost_idx = data.trajectories.x.cols() - 1;
   const auto last_x = data.trajectories.x.col(rightmost_idx);

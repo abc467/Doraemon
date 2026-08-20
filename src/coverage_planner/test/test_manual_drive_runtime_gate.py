@@ -53,6 +53,11 @@ ROSBRIDGE_ADDRESS=127.0.0.1
 RUNTIME_START_DEPTH_CAMERAS=true
 RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=true
 DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=true
+RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE=true
+RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING=true
+RUNTIME_ENABLE_DEPTH_LEFT_CAM=true
+RUNTIME_ENABLE_DEPTH_RIGHT_CAM=true
+RUNTIME_ENABLE_DEPTH_UP_CAM=true
 RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER=S1
 RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER=S2
 RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER=S3
@@ -83,6 +88,11 @@ class ManualDriveRuntimeGateTest(unittest.TestCase):
             self.assertEqual(args.get("enable_manual_drive_service"), "false")
             self.assertEqual(args.get("manual_drive_no_action_acceptance"), "true")
             self.assertEqual(args.get("manual_drive_action_test_approved"), "false")
+            self.assertEqual(args.get("manual_drive_require_role"), "false")
+            self.assertEqual(args.get("manual_drive_require_slam_state"), "false")
+            self.assertEqual(args.get("manual_drive_require_task_state"), "false")
+            self.assertEqual(args.get("manual_drive_require_odometry_state"), "false")
+            self.assertEqual(args.get("manual_drive_require_combined_status"), "true")
 
         planner = ET.parse(planner_path).getroot()
         manual_group = next(
@@ -114,7 +124,7 @@ apply_no_action_acceptance_overrides
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-    def test_action_mode_rejects_each_missing_manual_drive_gate(self):
+    def test_action_mode_requires_platform_gate_and_rejects_business_gates(self):
         result = run_start_runtime_snippet(
             VALID_IDENTITY
             + r"""
@@ -123,20 +133,22 @@ DORAEMON_ACTION_TEST_APPROVED=true
 MCORE_MAX_ABS_LINEAR_VELOCITY=0.3
 MCORE_MAX_ABS_ANGULAR_VELOCITY=0.5
 ENABLE_MANUAL_DRIVE_SERVICE=true
-gate_names=(
+business_gate_names=(
   FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE
   FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE
   FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE
   FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE
-  FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS
 )
-for gate_name in "${gate_names[@]}"; do
-  for configured_gate in "${gate_names[@]}"; do printf -v "${configured_gate}" '%s' true; done
-  printf -v "${gate_name}" '%s' false
-  if validate_commercial_vehicle_identity; then exit 20; fi
-done
-for configured_gate in "${gate_names[@]}"; do printf -v "${configured_gate}" '%s' true; done
+for configured_gate in "${business_gate_names[@]}"; do printf -v "${configured_gate}" '%s' false; done
+FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS=false
+if validate_commercial_vehicle_identity; then exit 20; fi
+FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS=true
 validate_commercial_vehicle_identity
+for gate_name in "${business_gate_names[@]}"; do
+  printf -v "${gate_name}" '%s' true
+  if validate_commercial_vehicle_identity; then exit 21; fi
+  printf -v "${gate_name}" '%s' false
+done
 """
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -168,12 +180,12 @@ DORAEMON_NO_ACTION_ACCEPTANCE=false
 DORAEMON_ACTION_TEST_APPROVED=true
 ENABLE_MANUAL_DRIVE_SERVICE=true
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE=true
-FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE=true
-FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE=true
+FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE=false
+FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE=false
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE=false
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS=true
 if validate_manual_drive_mode; then exit 40; fi
-FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE=true
+FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE=false
 validate_manual_drive_mode
 """
         )
@@ -225,18 +237,14 @@ if assert_no_action_runtime_isolated; then exit 33; fi
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-    def test_node_fails_before_creating_publisher_unless_approval_and_five_gates_hold(self):
+    def test_node_requires_action_approval_and_physical_platform_gate(self):
         source = read_repo_file("src/coverage_planner/scripts/manual_drive_service_node.py")
         publisher_offset = source.index("self._cmd_pub = rospy.Publisher")
         for expected in (
             '"~commercial_no_action_acceptance"',
             '"~commercial_action_test_approved"',
-            '"require_role"',
-            '"require_slam_state"',
-            '"require_task_state"',
-            '"require_odometry_state"',
-            '"require_combined_status"',
-            "manual drive requires all commercial safety gates",
+            '"~require_combined_status"',
+            "manual drive requires the physical platform safety gate",
         ):
             self.assertIn(expected, source[:publisher_offset])
 

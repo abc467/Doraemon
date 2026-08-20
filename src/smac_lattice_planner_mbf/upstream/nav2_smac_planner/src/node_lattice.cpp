@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <queue>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,179 @@ using namespace std::chrono;  // NOLINT
 
 namespace nav2_smac_planner
 {
+
+void LatticeMotionTable::validateForwardSteeringPrimitives() const
+{
+  constexpr float kTranslationEpsilon = 1e-4f;
+  constexpr double kAngleEpsilon = 1e-5;
+  constexpr double kCurvatureRelativeTolerance = 1e-3;
+  constexpr double kMinimumForwardProjection = 0.95;
+  const auto heading_count = lattice_metadata.heading_angles.size();
+  if (heading_count == 0u || lattice_metadata.number_of_headings != heading_count) {
+    throw std::runtime_error("lattice heading metadata is empty or inconsistent");
+  }
+  if (!std::isfinite(lattice_metadata.min_turning_radius) ||
+    lattice_metadata.min_turning_radius <= 0.0f)
+  {
+    throw std::runtime_error("lattice minimum turning radius must be finite and positive");
+  }
+  if (motion_primitives.size() != heading_count) {
+    throw std::runtime_error("lattice primitive headings do not match metadata");
+  }
+
+  std::size_t primitive_count = 0u;
+  std::vector<std::vector<std::size_t>> heading_successors(heading_count);
+  const double maximum_curvature =
+    (1.0 / static_cast<double>(lattice_metadata.min_turning_radius)) *
+    (1.0 + kCurvatureRelativeTolerance) + 1e-6;
+  for (std::size_t heading = 0; heading < heading_count; ++heading) {
+    bool has_left = false;
+    bool has_straight = false;
+    bool has_right = false;
+    const double start_yaw = lattice_metadata.heading_angles[heading];
+    if (!std::isfinite(start_yaw)) {
+      throw std::runtime_error("lattice contains a non-finite heading angle");
+    }
+    for (const auto & primitive : motion_primitives[heading]) {
+      ++primitive_count;
+      if (primitive.poses.empty()) {
+        throw std::runtime_error("lattice contains an empty motion primitive");
+      }
+      const double rounded_start = std::round(primitive.start_angle);
+      const double rounded_end = std::round(primitive.end_angle);
+      if (!std::isfinite(primitive.start_angle) || !std::isfinite(primitive.end_angle) ||
+        std::abs(primitive.start_angle - rounded_start) > kAngleEpsilon ||
+        std::abs(primitive.end_angle - rounded_end) > kAngleEpsilon ||
+        rounded_start < 0.0 || rounded_end < 0.0 ||
+        rounded_start >= static_cast<double>(heading_count) ||
+        rounded_end >= static_cast<double>(heading_count) ||
+        static_cast<std::size_t>(rounded_start) != heading)
+      {
+        throw std::runtime_error("lattice primitive has an invalid heading index");
+      }
+      if (!std::isfinite(primitive.trajectory_length) ||
+        primitive.trajectory_length < 0.0f)
+      {
+        throw std::runtime_error("lattice primitive has an invalid trajectory length");
+      }
+
+      double accumulated_length = 0.0;
+      double previous_x = 0.0;
+      double previous_y = 0.0;
+      double previous_yaw = start_yaw;
+      bool has_translation = false;
+      for (const auto & pose : primitive.poses) {
+        if (!std::isfinite(pose._x) || !std::isfinite(pose._y) ||
+          !std::isfinite(pose._theta))
+        {
+          throw std::runtime_error("lattice primitive contains a non-finite pose");
+        }
+        const double dx = static_cast<double>(pose._x) - previous_x;
+        const double dy = static_cast<double>(pose._y) - previous_y;
+        const double distance = std::hypot(dx, dy);
+        const double yaw_delta = angles::shortest_angular_distance(
+          previous_yaw, static_cast<double>(pose._theta));
+        if (distance > kTranslationEpsilon) {
+          has_translation = true;
+          accumulated_length += distance;
+          const double bearing = std::atan2(dy, dx);
+          const double midpoint_yaw = previous_yaw + 0.5 * yaw_delta;
+          const double forward_projection = std::cos(
+            angles::shortest_angular_distance(midpoint_yaw, bearing));
+          if (forward_projection < kMinimumForwardProjection) {
+            throw std::runtime_error(
+                    "lattice translating primitive contains a non-forward segment");
+          }
+          const double curvature = std::abs(yaw_delta) / distance;
+          if (curvature > maximum_curvature) {
+            std::ostringstream message;
+            message << "lattice primitive curvature " << curvature
+                    << " rad/m exceeds minimum-radius bound " << maximum_curvature;
+            throw std::runtime_error(message.str());
+          }
+        } else if (std::abs(yaw_delta) <= kAngleEpsilon &&
+          distance > 0.0)
+        {
+          accumulated_length += distance;
+        }
+        previous_x = pose._x;
+        previous_y = pose._y;
+        previous_yaw = pose._theta;
+      }
+
+      const auto end_heading = static_cast<std::size_t>(rounded_end);
+      const double metadata_end_yaw = lattice_metadata.heading_angles[end_heading];
+      if (!std::isfinite(metadata_end_yaw) ||
+        std::abs(angles::shortest_angular_distance(
+          previous_yaw, metadata_end_yaw)) > kAngleEpsilon)
+      {
+        throw std::runtime_error("lattice primitive endpoint yaw disagrees with metadata");
+      }
+      const auto & endpoint = primitive.poses.back();
+      if (!has_translation || std::hypot(endpoint._x, endpoint._y) <= kTranslationEpsilon) {
+        if (primitive.trajectory_length > kTranslationEpsilon) {
+          throw std::runtime_error(
+                  "stationary lattice primitive has a non-zero trajectory length");
+        }
+        continue;
+      }
+      const double length_tolerance = std::max(1e-3, 0.01 * accumulated_length);
+      if (std::abs(
+          accumulated_length - static_cast<double>(primitive.trajectory_length)) >
+        length_tolerance)
+      {
+        throw std::runtime_error(
+                "lattice primitive trajectory length disagrees with sampled poses");
+      }
+      heading_successors[heading].push_back(end_heading);
+      const double yaw_delta = angles::shortest_angular_distance(start_yaw, metadata_end_yaw);
+      if (yaw_delta > kAngleEpsilon) {
+        has_left = true;
+      } else if (yaw_delta < -kAngleEpsilon) {
+        has_right = true;
+      } else {
+        has_straight = true;
+      }
+    }
+    if (!has_left || !has_straight || !has_right) {
+      std::ostringstream message;
+      message << "heading bin " << heading << " lacks translating forward ";
+      if (!has_left) {
+        message << "left ";
+      }
+      if (!has_straight) {
+        message << "straight ";
+      }
+      if (!has_right) {
+        message << "right ";
+      }
+      message << "primitive(s); refusing a forward-only search that can lose steering";
+      throw std::runtime_error(message.str());
+    }
+  }
+
+  if (primitive_count != lattice_metadata.number_of_trajectories) {
+    throw std::runtime_error("lattice primitive count disagrees with metadata");
+  }
+
+  std::vector<bool> reachable(heading_count, false);
+  std::vector<std::size_t> pending{0u};
+  reachable[0] = true;
+  while (!pending.empty()) {
+    const std::size_t heading = pending.back();
+    pending.pop_back();
+    for (const std::size_t successor : heading_successors[heading]) {
+      if (!reachable[successor]) {
+        reachable[successor] = true;
+        pending.push_back(successor);
+      }
+    }
+  }
+  if (std::find(reachable.begin(), reachable.end(), false) != reachable.end()) {
+    throw std::runtime_error(
+            "translating lattice heading graph is disconnected in forward-only mode");
+  }
+}
 
 // Each of these tables are the projected motion models through
 // time and space applied to the search on the current node in
@@ -59,6 +233,9 @@ void LatticeMotionTable::initMotionModel(
   use_quadratic_cost_penalty = search_info.use_quadratic_cost_penalty;
 
   if (current_lattice_filepath == search_info.lattice_filepath) {
+    if (search_info.require_forward_steering_primitives) {
+      validateForwardSteeringPrimitives();
+    }
     return;
   }
   current_lattice_filepath = search_info.lattice_filepath;
@@ -105,6 +282,10 @@ void LatticeMotionTable::initMotionModel(
     primitives.push_back(new_primitive);
   }
   motion_primitives.push_back(primitives);
+
+  if (search_info.require_forward_steering_primitives) {
+    validateForwardSteeringPrimitives();
+  }
 
   // Populate useful precomputed values to be leveraged
   trig_values.reserve(lattice_metadata.number_of_headings);

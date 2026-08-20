@@ -61,8 +61,8 @@ REQUIRE_LIDAR_PING="${DORAEMON_REQUIRE_LIDAR_PING:-true}"
 START_DEPTH_CAMERAS="${RUNTIME_START_DEPTH_CAMERAS:-false}"
 NO_ACTION_ACCEPTANCE="${DORAEMON_NO_ACTION_ACCEPTANCE:-true}"
 ACTION_TEST_APPROVED="${DORAEMON_ACTION_TEST_APPROVED:-false}"
-REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-false}"
-REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-false}"
+REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-true}"
+REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-true}"
 ORBBEC_CAMERA1_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER:-}"
 ORBBEC_CAMERA2_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER:-}"
 ORBBEC_CAMERA3_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}"
@@ -133,19 +133,6 @@ has_usb_serial() {
     [[ "$(<"${serial_file}")" == "${expected_serial}" ]] && return 0
   done
   return 1
-}
-
-has_usb_topology_path() {
-  local path="$1"
-  local root="/sys/bus/usb/devices/${path}"
-  local speed=""
-  [[ -d "${root}" ]] || return 1
-  [[ -r "${root}/idVendor" && "$(<"${root}/idVendor")" == "${ORBBEC_VENDOR_ID}" ]] || return 1
-  [[ -r "${root}/speed" ]] || return 1
-  speed="$(<"${root}/speed")"
-  [[ "${speed}" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
-  awk -v actual="${speed}" -v minimum="${ORBBEC_MIN_USB_SPEED}" \
-    'BEGIN { exit !(actual >= minimum) }'
 }
 
 is_placeholder() {
@@ -426,10 +413,6 @@ if truthy "${START_DEPTH_CAMERAS}" && truthy "${REQUIRE_DEPTH_CAMERA_IDENTITIES}
   wait_for "Orbbec left serial ${ORBBEC_CAMERA1_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA1_SERIAL_NUMBER}"
   wait_for "Orbbec right serial ${ORBBEC_CAMERA2_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA2_SERIAL_NUMBER}"
   wait_for "Orbbec front serial ${ORBBEC_CAMERA3_SERIAL_NUMBER}" has_usb_serial "${ORBBEC_CAMERA3_SERIAL_NUMBER}"
-  wait_for "Orbbec left USB3 topology ${ORBBEC_CAMERA1_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA1_USB_PORT}"
-  wait_for "Orbbec right USB3 topology ${ORBBEC_CAMERA2_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA2_USB_PORT}"
-  wait_for "Orbbec front USB3 topology ${ORBBEC_CAMERA3_USB_PORT}" has_usb_topology_path "${ORBBEC_CAMERA3_USB_PORT}"
-
   orbbec_binary="$(orbbec_list_devices_binary)" || {
     log "[ERROR] fixed Orbbec SDK enumerator is unavailable in this release"
     exit 1
@@ -452,14 +435,17 @@ if truthy "${START_DEPTH_CAMERAS}" && truthy "${REQUIRE_DEPTH_CAMERA_IDENTITIES}
   if ! python3 "${SCRIPT_DIR}/verify_orbbec_sdk_pairs.py" \
       --binary "${orbbec_binary}" \
       --timeout-seconds "${orbbec_remaining_sec}" \
+      --allow-topology-remap \
+      --vendor-id "${ORBBEC_VENDOR_ID}" \
+      --min-usb-speed "${ORBBEC_MIN_USB_SPEED}" \
       --expected "${ORBBEC_CAMERA1_SERIAL_NUMBER}|${ORBBEC_CAMERA1_USB_PORT}" \
       --expected "${ORBBEC_CAMERA2_SERIAL_NUMBER}|${ORBBEC_CAMERA2_USB_PORT}" \
       --expected "${ORBBEC_CAMERA3_SERIAL_NUMBER}|${ORBBEC_CAMERA3_USB_PORT}"; then
-    log "[ERROR] Orbbec SDK serial/topology stability gate failed"
+    log "[ERROR] Orbbec SDK serial identity/USB3 stability gate failed"
     exit 1
   fi
 else
-  log "[SKIP] Orbbec serial/topology/SDK readiness gate disabled; continuing without camera startup dependency"
+  log "[SKIP] Orbbec serial/USB3/SDK readiness gate disabled; continuing without camera startup dependency"
 fi
 
 log "[OK] Doraemon robot boot dependencies are ready"

@@ -19,7 +19,11 @@ from typing import Any, Union
 
 from nav2_smac_planner.lattice_primitives.helper import angle_difference, normalize_angle
 import numpy as np
-from numpy.typing import NDArray
+
+try:
+    from numpy.typing import NDArray
+except ImportError:  # NumPy < 1.20 on the ROS Noetic production image.
+    NDArray = Any
 
 # Python 3.8 cannot evaluate NumPy's parameterized scalar aliases at runtime.
 # Keep the official generator semantics while deferring the type specialization.

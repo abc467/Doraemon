@@ -457,6 +457,141 @@ TEST(OfficialStateLattice, PlansWithGeneratedDifferentialDrivePrimitives)
   }
 }
 
+TEST(ForwardSteeringLattice, RejectsMinimumDiffSetWhenStationaryMotionIsForbidden)
+{
+  const std::string lattice = ros::package::getPath("smac_lattice_planner_mbf") +
+    "/config/diff_5cm_0p40m_32bins.json";
+  const auto metadata =
+    nav2_smac_planner::LatticeMotionTable::getLatticeMetadata(lattice);
+  nav2_smac_planner::SearchInfo search_info;
+  search_info.lattice_filepath = lattice;
+  search_info.minimum_turning_radius = metadata.min_turning_radius / 0.05f;
+  search_info.allow_reverse_expansion = false;
+  search_info.require_forward_steering_primitives = true;
+
+  int max_iterations = 1000;
+  nav2_smac_planner::AStarAlgorithm<nav2_smac_planner::NodeLattice> planner(
+    nav2_smac_planner::MotionModel::STATE_LATTICE, search_info);
+  planner.initialize(true, max_iterations, 1000, 100, 1.0, 101.0, 32u);
+
+  costmap_2d::Costmap2D costmap(
+    80, 80, 0.05, 0.0, 0.0, costmap_2d::FREE_SPACE);
+  nav2_smac_planner::GridCollisionChecker checker(&costmap, 72u);
+  checker.setFootprint(robotFootprint(), false, 0.0);
+  EXPECT_THROW(planner.setCollisionChecker(&checker), std::runtime_error);
+}
+
+TEST(ForwardSteeringLattice, RejectsMalformedForwardGeometryAndCurvature)
+{
+  const std::string lattice = ros::package::getPath("smac_lattice_planner_mbf") +
+    "/config/diff_5cm_0p40m_32bins_forward.json";
+  const auto metadata =
+    nav2_smac_planner::LatticeMotionTable::getLatticeMetadata(lattice);
+  nav2_smac_planner::SearchInfo search_info;
+  search_info.lattice_filepath = lattice;
+  search_info.minimum_turning_radius = metadata.min_turning_radius / 0.05f;
+  search_info.allow_reverse_expansion = false;
+  search_info.require_forward_steering_primitives = false;
+  unsigned int size_x = 240u;
+
+  nav2_smac_planner::LatticeMotionTable reversed_table;
+  reversed_table.initMotionModel(size_x, search_info);
+  ASSERT_NO_THROW(reversed_table.validateForwardSteeringPrimitives());
+  auto & reversed = reversed_table.motion_primitives.at(0u).front();
+  ASSERT_FALSE(reversed.poses.empty());
+  reversed.poses.front()._x = -0.05f;
+  reversed.poses.front()._y = 0.0f;
+  reversed.poses.front()._theta = 0.0f;
+  EXPECT_THROW(reversed_table.validateForwardSteeringPrimitives(), std::runtime_error);
+
+  nav2_smac_planner::LatticeMotionTable tight_table;
+  tight_table.initMotionModel(size_x, search_info);
+  auto & too_tight = tight_table.motion_primitives.at(0u).front();
+  ASSERT_FALSE(too_tight.poses.empty());
+  too_tight.poses.front()._x = 0.01f;
+  too_tight.poses.front()._y = 0.0f;
+  too_tight.poses.front()._theta = 0.03f;
+  EXPECT_THROW(tight_table.validateForwardSteeringPrimitives(), std::runtime_error);
+}
+
+TEST(ForwardSteeringLattice, AxisAlignedStartCanMakeAForwardOnlyUTurn)
+{
+  const std::string lattice = ros::package::getPath("smac_lattice_planner_mbf") +
+    "/config/diff_5cm_0p40m_32bins_forward.json";
+  const auto metadata =
+    nav2_smac_planner::LatticeMotionTable::getLatticeMetadata(lattice);
+  ASSERT_EQ(metadata.motion_model, "diff");
+  ASSERT_EQ(metadata.number_of_headings, 32u);
+  ASSERT_EQ(metadata.number_of_trajectories, 312u);
+
+  costmap_2d::Costmap2D costmap(
+    360, 360, 0.05, 0.0, 0.0, costmap_2d::FREE_SPACE);
+  nav2_smac_planner::GridCollisionChecker checker(&costmap, 72u);
+  checker.setFootprint(robotFootprint(), false, 0.0);
+  checker.setCollisionCheckResolution(0.01);
+
+  nav2_smac_planner::SearchInfo search_info;
+  search_info.lattice_filepath = lattice;
+  search_info.minimum_turning_radius =
+    metadata.min_turning_radius / costmap.getResolution();
+  search_info.allow_reverse_expansion = false;
+  search_info.require_forward_steering_primitives = true;
+  search_info.analytic_expansion_max_length = 0.0f;
+  // Exercise every cardinal start and both a short and a longer connection.
+  // Each goal lies directly behind the measured start and requires the
+  // opposite arrival heading, so success proves real translating steering
+  // rather than one specially oriented primitive.
+  for (const unsigned int start_heading : {0u, 8u, 16u, 24u}) {
+    for (const float distance_cells : {50.0f, 100.0f}) {
+      SCOPED_TRACE(
+        "start_heading=" + std::to_string(start_heading) +
+        " distance_cells=" + std::to_string(distance_cells));
+      int max_iterations = 500000;
+      nav2_smac_planner::AStarAlgorithm<nav2_smac_planner::NodeLattice> planner(
+        nav2_smac_planner::MotionModel::STATE_LATTICE, search_info);
+      planner.initialize(true, max_iterations, 1000, 100, 8.0, 241.0, 32u);
+      planner.setCollisionChecker(&checker);
+      planner.setTransitionValidator(
+        [](const nav2_smac_planner::NodeLattice::Coordinates & from,
+          const nav2_smac_planner::NodeLattice::Coordinates & to) {
+          return std::hypot(to.x - from.x, to.y - from.y) > 1e-4f;
+        });
+      planner.setGoalTransitionValidator(
+        [](const nav2_smac_planner::NodeLattice::Coordinates & from,
+          const nav2_smac_planner::NodeLattice::Coordinates & to) {
+          return std::hypot(to.x - from.x, to.y - from.y) > 1e-4f;
+        });
+
+      constexpr float center = 180.0f;
+      const float start_yaw = metadata.heading_angles[start_heading];
+      const float goal_x = center - distance_cells * std::cos(start_yaw);
+      const float goal_y = center - distance_cells * std::sin(start_yaw);
+      const unsigned int goal_heading = (start_heading + 16u) % 32u;
+      planner.setStart(center, center, start_heading);
+      planner.setGoal(
+        goal_x, goal_y, goal_heading,
+        nav2_smac_planner::GoalHeadingMode::DEFAULT, 1);
+
+      nav2_smac_planner::NodeLattice::CoordinateVector path;
+      int iterations = 0;
+      const auto result = planner.createPathDetailed(
+        path, iterations, 0.0f, []() {return false;});
+      ASSERT_TRUE(result.hasPath());
+      ASSERT_EQ(result.termination, nav2_smac_planner::SearchTermination::SUCCESS);
+      ASSERT_GT(path.size(), 3u);
+      EXPECT_FALSE(containsReverseTranslation(path));
+      for (std::size_t index = path.size(); index > 1u; --index) {
+        const auto & start = path[index - 1u];
+        const auto & end = path[index - 2u];
+        EXPECT_GT(std::hypot(end.x - start.x, end.y - start.y), 1e-4f);
+        EXPECT_FALSE(checker.inCollisionContinuous(
+          start.x, start.y, start.theta,
+          end.x, end.y, end.theta, true));
+      }
+    }
+  }
+}
+
 TEST(OfficialStateLattice, PlansWithGeneratedHalfMeterDifferentialDrivePrimitives)
 {
   const std::string lattice = ros::package::getPath("smac_lattice_planner_mbf") +
@@ -868,6 +1003,75 @@ TEST(OfficialStateLattice, GoalTransitionValidatorRejectsRotationBeforeGoalVisit
       default_path[0].x - default_path[1].x,
       default_path[0].y - default_path[1].y),
     1e-4f);
+}
+
+TEST(OfficialStateLattice, ScopedTransitionValidatorFindsRotationFreeMovingArrival)
+{
+  const std::string lattice = ros::package::getPath("smac_lattice_planner_mbf") +
+    "/config/diff_5cm_0p40m_32bins.json";
+  const auto metadata =
+    nav2_smac_planner::LatticeMotionTable::getLatticeMetadata(lattice);
+  costmap_2d::Costmap2D costmap(
+    180, 180, 0.05, 0.0, 0.0, costmap_2d::FREE_SPACE);
+  nav2_smac_planner::GridCollisionChecker checker(&costmap, 72u);
+  checker.setFootprint(robotFootprint(), false, 0.0);
+  checker.setCollisionCheckResolution(0.01);
+
+  nav2_smac_planner::SearchInfo search_info;
+  search_info.lattice_filepath = lattice;
+  search_info.minimum_turning_radius =
+    metadata.min_turning_radius / costmap.getResolution();
+  search_info.allow_reverse_expansion = false;
+  search_info.analytic_expansion_max_length = 0.0f;
+  int max_iterations = 200000;
+  nav2_smac_planner::AStarAlgorithm<nav2_smac_planner::NodeLattice> planner(
+    nav2_smac_planner::MotionModel::STATE_LATTICE, search_info);
+  planner.initialize(true, max_iterations, 1000, 100, 5.0, 161.0, 32u);
+  planner.setCollisionChecker(&checker);
+
+  int rejected_rotations = 0;
+  planner.setTransitionValidator(
+    [&rejected_rotations](
+      const nav2_smac_planner::NodeLattice::Coordinates & from,
+      const nav2_smac_planner::NodeLattice::Coordinates & to) {
+      const bool translates = std::hypot(to.x - from.x, to.y - from.y) > 1e-4f;
+      if (!translates) {
+        ++rejected_rotations;
+      }
+      return translates;
+    });
+  planner.setStart(90.0f, 90.0f, 0u);
+  // A translated goal has a simple forward solution. Rotation primitives are
+  // still offered at every expansion, so the scoped validator is exercised
+  // without assuming that this finite lattice contains an exact closed loop
+  // to an adjacent heading at the original cell.
+  planner.setGoal(110.0f, 90.0f, 0u);
+  nav2_smac_planner::NodeLattice::CoordinateVector path;
+  int iterations = 0;
+  const auto result = planner.createPathDetailed(
+    path, iterations, 0.0f, []() {return false;});
+  EXPECT_GT(rejected_rotations, 0);
+  ASSERT_TRUE(result.hasPath());
+  ASSERT_EQ(result.termination, nav2_smac_planner::SearchTermination::SUCCESS);
+  ASSERT_GT(path.size(), 2u);
+  for (std::size_t index = path.size() - 1u; index > 0u; --index) {
+    EXPECT_GT(
+      std::hypot(
+        path[index - 1u].x - path[index].x,
+        path[index - 1u].y - path[index].y),
+      1e-4f);
+  }
+
+  planner.clearTransitionValidator();
+  planner.setCollisionChecker(&checker);
+  planner.setStart(90.0f, 90.0f, 0u);
+  planner.setGoal(90.0f, 90.0f, 1u);
+  path.clear();
+  iterations = 0;
+  ASSERT_TRUE(planner.createPath(path, iterations, 0.0f, []() {return false;}));
+  ASSERT_GT(path.size(), 1u);
+  EXPECT_LE(
+    std::hypot(path[0].x - path[1].x, path[0].y - path[1].y), 1e-4f);
 }
 
 TEST(OfficialStateLattice, AnalyticTerminalUsesNearestBinWithoutStationaryAppend)

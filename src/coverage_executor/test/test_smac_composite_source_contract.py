@@ -9,6 +9,8 @@ planner source, while the geometric helper itself is covered by its C++ unit
 tests in smac_lattice_planner_mbf.
 """
 
+import json
+import math
 import os
 import re
 import unittest
@@ -105,6 +107,26 @@ SMOOTHER_SOURCE = os.path.join(
     "src",
     "state_lattice_smoother.cpp",
 )
+BASE_LATTICE = os.path.join(
+    SOURCE_DIR,
+    "smac_lattice_planner_mbf",
+    "config",
+    "diff_5cm_0p40m_32bins.json",
+)
+FORWARD_STEERING_LATTICE = os.path.join(
+    SOURCE_DIR,
+    "smac_lattice_planner_mbf",
+    "config",
+    "diff_5cm_0p40m_32bins_forward.json",
+)
+NODE_LATTICE_SOURCE = os.path.join(
+    SOURCE_DIR,
+    "smac_lattice_planner_mbf",
+    "upstream",
+    "nav2_smac_planner",
+    "src",
+    "node_lattice.cpp",
+)
 
 
 def _read(path):
@@ -129,6 +151,94 @@ def _node_param(launch_path, node_name, param_name):
 
 
 class SmacCompositeSourceContractTest(unittest.TestCase):
+    def test_forward_only_runtime_uses_a_steerable_lattice(self):
+        config = _load_nav_config()
+        smac = config["SmacLatticePlanner"]
+        self.assertFalse(smac["allow_reverse_expansion"])
+        self.assertTrue(smac["require_forward_steering_primitives"])
+        self.assertTrue(
+            smac["lattice_filepath"].endswith(
+                "/diff_5cm_0p40m_32bins_forward.json"
+            )
+        )
+
+        with open(BASE_LATTICE, "r", encoding="utf-8") as handle:
+            base = json.load(handle)
+        with open(FORWARD_STEERING_LATTICE, "r", encoding="utf-8") as handle:
+            forward = json.load(handle)
+        self.assertEqual(base["lattice_metadata"]["number_of_trajectories"], 304)
+        self.assertEqual(forward["lattice_metadata"]["number_of_trajectories"], 312)
+        self.assertEqual(forward["lattice_metadata"]["motion_model"], "diff")
+
+        headings = forward["lattice_metadata"]["heading_angles"]
+        minimum_radius = float(forward["lattice_metadata"]["turning_radius"])
+        controls = [set() for _ in headings]
+        for primitive in forward["primitives"]:
+            previous_x = 0.0
+            previous_y = 0.0
+            previous_yaw = headings[primitive["start_angle_index"]]
+            accumulated_length = 0.0
+            for pose_x, pose_y, pose_yaw in primitive["poses"]:
+                self.assertTrue(
+                    all(math.isfinite(value) for value in (pose_x, pose_y, pose_yaw))
+                )
+                dx = pose_x - previous_x
+                dy = pose_y - previous_y
+                distance = math.hypot(dx, dy)
+                yaw_delta = (pose_yaw - previous_yaw + math.pi) % (
+                    2.0 * math.pi
+                ) - math.pi
+                if distance > 1e-4:
+                    accumulated_length += distance
+                    bearing = math.atan2(dy, dx)
+                    midpoint_yaw = previous_yaw + 0.5 * yaw_delta
+                    heading_error = (bearing - midpoint_yaw + math.pi) % (
+                        2.0 * math.pi
+                    ) - math.pi
+                    self.assertGreaterEqual(math.cos(heading_error), 0.95)
+                    self.assertLessEqual(
+                        abs(yaw_delta) / distance,
+                        (1.0 / minimum_radius) * 1.001 + 1e-6,
+                    )
+                previous_x = pose_x
+                previous_y = pose_y
+                previous_yaw = pose_yaw
+            end_pose = primitive["poses"][-1]
+            if math.hypot(end_pose[0], end_pose[1]) <= 1e-4:
+                continue
+            self.assertAlmostEqual(
+                accumulated_length,
+                float(primitive["trajectory_length"]),
+                delta=max(1e-3, 0.01 * accumulated_length),
+            )
+            start = headings[primitive["start_angle_index"]]
+            end = headings[primitive["end_angle_index"]]
+            delta = (end - start + math.pi) % (2.0 * math.pi) - math.pi
+            controls[primitive["start_angle_index"]].add(
+                "left" if delta > 1e-6 else "right" if delta < -1e-6 else "straight"
+            )
+        self.assertTrue(all(control == {"left", "straight", "right"} for control in controls))
+
+        planner = _read(PLANNER_SOURCE)
+        validator = _read(VALIDATOR_SOURCE)
+        node_lattice = _read(NODE_LATTICE_SOURCE)
+        for source in (planner, validator):
+            self.assertIn("diff_5cm_0p40m_32bins_forward.json", source)
+            self.assertIn("require_forward_steering_primitives", source)
+        self.assertIn("validateForwardSteeringPrimitives", node_lattice)
+        self.assertIn("refusing a forward-only search that can lose steering", node_lattice)
+        startup_validation = planner.index(
+            "validation_table.initMotionModel(validation_size_x, search_info_)"
+        )
+        self.assertLess(startup_validation, planner.index("initialized_ = true;"))
+        validator_startup_validation = validator.index(
+            "validation_table.initMotionModel(validation_size_x, search_info)"
+        )
+        self.assertLess(
+            validator_startup_validation,
+            validator.index("GridCollisionChecker checker"),
+        )
+
     def test_cpp_fallback_defaults_are_fail_closed(self):
         header = _read(PLANNER_HEADER)
         source = _read(PLANNER_SOURCE)
@@ -141,6 +251,10 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         self.assertRegex(
             header,
             r"double\s+theta_suffix_candidate_max_planning_time_\{60\.0\};",
+        )
+        self.assertRegex(
+            header,
+            r"double\s+theta_prefix_candidate_max_planning_time_\{20\.0\};",
         )
         self.assertRegex(
             source,
@@ -168,6 +282,11 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         )
         self.assertRegex(
             source,
+            r'private_nh\.param\(\s*"theta_prefix_candidate_max_planning_time",\s*'
+            r'theta_prefix_candidate_max_planning_time_,\s*20\.0\s*\);',
+        )
+        self.assertRegex(
+            source,
             r'private_nh\.param\(\s*"change_penalty",\s*'
             r'search_info_\.change_penalty,\s*0\.45f\s*\);',
         )
@@ -183,6 +302,7 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         self.assertTrue(smac["theta_prefix_lattice_suffix_enabled"])
         self.assertFalse(smac["theta_corridor_search_enabled"])
         self.assertEqual(int(smac["theta_max_allowed_cost"]), 10)
+        self.assertFalse(smac["theta_full_footprint_validation_enabled"])
         self.assertAlmostEqual(float(smac["theta_w_traversal_cost"]), 32.0)
         self.assertAlmostEqual(float(smac["theta_w_euc_cost"]), 1.5)
         self.assertAlmostEqual(float(smac["theta_w_heuristic_cost"]), 1.0)
@@ -196,6 +316,16 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         self.assertAlmostEqual(
             float(smac["theta_suffix_candidate_max_planning_time"]), 60.0
         )
+        self.assertAlmostEqual(
+            float(smac["theta_prefix_candidate_max_planning_time"]), 20.0
+        )
+        self.assertAlmostEqual(
+            float(smac["theta_prefix_join_max_heading_error"]), 0.20
+        )
+        self.assertAlmostEqual(
+            float(smac["theta_prefix_join_max_curvature_jump"]), 2.5
+        )
+        self.assertNotIn("theta_prefix_rotation_fallback_enabled", smac)
         self.assertEqual(int(smac["theta_unsafe_segment_lookback_points"]), 30)
         self.assertTrue(smac["state_lattice_smoothing_enabled"])
         self.assertEqual(int(smac["state_lattice_smoother_max_iterations"]), 1000)
@@ -238,6 +368,9 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
             "theta_reference_spacing",
             "theta_reference_smoothing_enabled",
             "theta_suffix_candidate_max_planning_time",
+            "theta_prefix_candidate_max_planning_time",
+            "theta_prefix_join_max_heading_error",
+            "theta_prefix_join_max_curvature_jump",
             "theta_unsafe_segment_lookback_points",
             "state_lattice_smoothing_enabled",
             "state_lattice_smoother_max_iterations",
@@ -264,6 +397,10 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         self.assertIn("findDirectionalPathSegments", smoother_source)
         self.assertIn("updateApproximateOrientations", smoother_source)
         self.assertIn("qualityGateAccepts", smoother_source)
+        self.assertIn(
+            "smoothed path exceeded the configured minimum turning radius",
+            smoother_source,
+        )
 
         for source in (planner_source, validator_source):
             self.assertIn('"state_lattice_smoothing_enabled"', source)
@@ -278,7 +415,9 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
             self.assertIn("terminalAvoidsStationaryYawRepair", source)
 
         # The production integration only passes State-generated paths to the
-        # smoother; the retained Theta prefix is used solely for re-stitching.
+        # smoother: exact-start prefix, terminal suffix, or whole-State path.
+        # The retained Theta middle is used solely for re-stitching.
+        self.assertIn("maybeSmoothStatePath(state_prefix", planner_source)
         self.assertIn("maybeSmoothStatePath(state_suffix", planner_source)
         self.assertIn("maybeSmoothStatePath(plan, search_deadline", planner_source)
         self.assertNotIn("maybeSmoothStatePath(selection.prefix_including_cut", planner_source)
@@ -403,7 +542,12 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         for source in (planner_source, validator_source):
             self.assertIn("short_theta_reference", source)
             self.assertIn("theta_short_route_state_full_", source)
-            self.assertIn("kSuffixPointCountCandidates.front()", source)
+            self.assertIn("kMinimumThetaPosesForComposite", source)
+        helper_header = _read(SUFFIX_HEADER)
+        self.assertIn(
+            "kPrefixJoinIndexCandidates.front() + kSuffixPointCountCandidates.front() + 1u",
+            " ".join(helper_header.split()),
+        )
         self.assertIn("duplicate FULL fallback suppressed", planner_source)
         self.assertIn(
             "SHORT_THETA_ROUTE_STATE_FAILED_FULL_SUPPRESSED",
@@ -418,7 +562,7 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
             validator_source,
         )
 
-    def test_connect_selects_smac_and_state_mppi_without_legacy_theta_repairs(self):
+    def test_connect_selects_smac_and_standard_mppi_without_legacy_theta_repairs(self):
         config = _load_nav_config()
         self.assertTrue(config["ThetaStarPlanner"]["se2_refinement_enabled"])
         self.assertFalse(
@@ -439,7 +583,7 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
                 "coverage_executor",
                 "mbf_connect_controller",
             ),
-            "MPPI_State_Lattice_Controller",
+            "MPPI_Standard_Controller",
         )
         self.assertEqual(
             _node_param(task_launch, "coverage_task_manager", "mbf_planner"),
@@ -447,7 +591,7 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         )
         self.assertEqual(
             _node_param(task_launch, "coverage_task_manager", "mbf_controller"),
-            "MPPI_State_Lattice_Controller",
+            "MPPI_Standard_Controller",
         )
 
         planner_source = _read(PLANNER_SOURCE)
@@ -513,11 +657,11 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         )
         self.assertEqual(
             planner.count("containsKinematicallyContinuousForwardOrRotation("),
-            4,
+            2,
         )
         self.assertEqual(
             validator.count("containsKinematicallyContinuousForwardOrRotation("),
-            4,
+            2,
         )
         self.assertNotIn("containsOnlyForwardOrRotation(", planner)
         self.assertNotIn("containsOnlyForwardOrRotation(", validator)
@@ -529,17 +673,65 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
             "if (!path_found && theta_corridor_search_enabled_", composite_begin
         )
         composite = planner[composite_begin:composite_end]
+        prefix_search = composite.index("const auto prefix_result = runStateSearch(")
+        exact_join = composite.index("canonicalizeStatePrefixJoin(", prefix_search)
+        join_proof = composite.index(
+            "joinIsPositionHeadingCurvatureContinuous(", exact_join
+        )
+        prefix_footprint = composite.index("validateContinuousPath(", join_proof)
+        self.assertLess(prefix_search, exact_join)
+        self.assertLess(exact_join, join_proof)
+        self.assertLess(join_proof, prefix_footprint)
+        self.assertIn("continuous_forward_only{false};", planner)
+        self.assertIn("nav2_smac_planner::GoalHeadingMode::DEFAULT, true", composite)
+        self.assertIn(
+            "goal_x, goal_y, goal_bin, goal_heading_mode_, true", planner
+        )
+        self.assertIn(
+            "goal_x, goal_y, goal_bin, suffix_goal_heading_mode, true", validator
+        )
+        self.assertIn("setTransitionValidator(", planner)
+        for source in (planner, validator):
+            self.assertIn("HeadingSeeds admissible_start_bins;", source)
+            self.assertIn(
+                "seed_error <= theta_prefix_join_max_heading_error", source
+            )
+            self.assertIn(
+                "canonicalizeInitialLatticeMotion(", source
+            )
+            self.assertRegex(
+                source,
+                r"theta_prefix_join_max_heading_error_?,\s*1e-4,",
+            )
+        self.assertNotIn("theta_prefix_rotation_fallback_enabled", planner)
+        self.assertNotIn("using_rotation_fallback", planner)
+        self.assertNotIn("theta_prefix_rotation_fallback_enabled", validator)
+        self.assertNotIn("using_rotation_fallback", validator)
+
+        retained_audit = composite.index("std::string prefix_motion_reason;")
         motion_audit = composite.index(
-            "containsKinematicallyContinuousForwardOrRotation("
+            "containsKinematicallyContinuousForwardOrRotation(", retained_audit
         )
         footprint_proof = composite.index("validateContinuousPath(", motion_audit)
         state_search = composite.index("runStateSearch(", footprint_proof)
         self.assertLess(motion_audit, footprint_proof)
         self.assertLess(footprint_proof, state_search)
 
+        suffix_contract = composite.index(
+            "containsContinuousForwardOnly(\n              state_suffix"
+        )
+        suffix_join = composite.index(
+            "joinIsPositionHeadingCurvatureContinuous(", suffix_contract
+        )
+        suffix_stitch = composite.index(
+            "stitchThetaPrefixAndStateSuffix(", suffix_join
+        )
+        self.assertLess(suffix_contract, suffix_join)
+        self.assertLess(suffix_join, suffix_stitch)
+
         validator_candidate = validator.index(
             "containsKinematicallyContinuousForwardOrRotation(\n"
-            "                cut.prefix_including_cut"
+            "                retained_prefix"
         )
         validator_proof = validator.index(
             "validateContinuousPosePath(", validator_candidate
@@ -557,10 +749,15 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         composite = source[composite_begin:composite_end]
 
         # A failed suffix candidate never publishes or commits its Theta prefix.
+        # With the explicit Theta proof switch disabled, both State-owned pieces
+        # still have to pass the snapshot proof before the composite is committed.
         self.assertNotIn("publishPlan(", composite)
         proof = composite.index("std::string composite_reason;")
         commit = composite.index("plan = std::move(composite);")
         self.assertIn("validateContinuousPath(", composite[proof:commit])
+        self.assertIn("theta_full_footprint_validation_enabled_", composite[proof:commit])
+        self.assertIn("selected_state_prefix", composite[proof:commit])
+        self.assertIn("state_suffix", composite[proof:commit])
         self.assertLess(proof, commit)
 
         # There is one success publication site, after both the immutable
@@ -574,13 +771,37 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
             "std::string validation_reason;", composite_end
         )
         live_snapshot = source.index("auto live_costmap =", planning_proof)
-        live_proof = source.index("if (!validateContinuousPath(", live_snapshot)
+        live_rotation_proof = source.index(
+            "if (!plannedInPlaceRotationsAreSafe(", live_snapshot
+        )
+        live_proof = source.index("!validatePublishCandidate(", live_rotation_proof)
         publish = source.index("publishPlan(plan);", live_proof)
         self.assertLess(first_attempt_clear, retry_loop)
         self.assertLess(retry_loop, retry_clear)
         self.assertLess(planning_proof, live_snapshot)
-        self.assertLess(live_snapshot, live_proof)
+        self.assertLess(live_snapshot, live_rotation_proof)
+        self.assertLess(live_rotation_proof, live_proof)
         self.assertLess(live_proof, publish)
+
+        # State conversion must remove only NodeLattice's representation-only
+        # start seed / first-primitive boundary before any motion audit. Real
+        # rotations remain direction-explicit and only their planned signed
+        # sweep is checked; an unrelated full 360-degree sweep is forbidden.
+        conversion_begin = source.index("const auto coordinatesToPosePlan")
+        conversion_end = source.index("bool path_found = false;", conversion_begin)
+        conversion = source[conversion_begin:conversion_end]
+        self.assertIn("canonicalizeInitialLatticeMotion(", conversion)
+        self.assertNotIn("removeInitialHeadingQuantizationPose", source)
+        self.assertIn("const auto plannedInPlaceRotationsAreSafe", source)
+        self.assertNotIn("kFullRotationSamples", source)
+        self.assertNotIn("allInPlaceRotationDirectionsAreSafe", source)
+
+        validator = _read(VALIDATOR_SOURCE)
+        self.assertIn("canonicalizeConvertedStatePath", validator)
+        self.assertEqual(validator.count("canonicalizeConvertedStatePath("), 3)
+        self.assertIn("const auto plannedInPlaceRotationsAreSafe", validator)
+        self.assertNotIn("kFullRotationSamples", validator)
+        self.assertNotIn("allInPlaceRotationDirectionsAreSafe", validator)
 
     def test_full_fallback_requires_success_and_a_bounded_quantized_terminal(self):
         source = _read(PLANNER_SOURCE)
@@ -606,9 +827,11 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         # State search ends at the nearest lattice heading bin. Conversion must
         # preserve that output and never append or overwrite it with the
         # requested continuous yaw as a same-XY repair.
-        self.assertIn(
-            "goal_x, goal_y, goal_bin, goal_heading_mode_, coarse_search_resolution_);",
+        self.assertRegex(
             source,
+            r"setGoal\(\s*search_goal\.x,\s*search_goal\.y,\s*"
+            r"search_goal\.heading_bin,\s*search_goal\.heading_mode,\s*"
+            r"coarse_search_resolution_\);",
         )
         conversion_begin = source.index("const auto coordinatesToPosePlan")
         conversion_end = source.index("bool path_found = false;", conversion_begin)
@@ -680,7 +903,7 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         composite = source[composite_begin:composite_end]
         self.assertRegex(
             composite,
-            r"selection\.prefix_including_cut,\s*prefix_reason,\s*"
+            r"retained_prefix,\s*prefix_reason,\s*"
             r"&candidate_deadline,\s*&first_unsafe_segment",
         )
         self.assertRegex(
@@ -703,8 +926,10 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         )
         self.assertIn("const double available_after_proof", composite)
 
-        # FULL candidate proof and the two final complete-plan proofs all share
-        # the one wall-clock deadline. Validation cannot extend planning time.
+        # FULL candidate proof and the two final publication proofs all share
+        # the one wall-clock deadline.  The publication helper proves the whole
+        # pure-State path, or only the State-owned pieces when the configured
+        # Theta proof is explicitly disabled.
         self.assertRegex(
             source,
             r"path,\s*overall_deadline,\s*candidate_reason",
@@ -712,7 +937,7 @@ class SmacCompositeSourceContractTest(unittest.TestCase):
         self.assertEqual(
             len(
                 re.findall(
-                    r"plan,\s*validation_reason,\s*&overall_deadline",
+                    r"plan,\s*validation_reason,\s*overall_deadline",
                     source,
                 )
             ),

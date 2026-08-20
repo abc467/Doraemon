@@ -35,7 +35,7 @@ class CommercialHardwareGateTest(unittest.TestCase):
         self.assertNotIn("/home/lb/cartographer_web", source)
         self.assertNotIn("nodes_dense.csv", source)
 
-    def test_vehicle_identity_template_keeps_camera_readiness_non_blocking(self):
+    def test_vehicle_identity_template_is_fail_closed(self):
         config = read_env_defaults("config/runtime.a26022.env")
         serials = [config["RUNTIME_ORBBEC_CAMERA%d_SERIAL_NUMBER" % index] for index in (1, 2, 3)]
         paths = [config["RUNTIME_ORBBEC_CAMERA%d_USB_PORT" % index] for index in (1, 2, 3)]
@@ -43,8 +43,9 @@ class CommercialHardwareGateTest(unittest.TestCase):
         self.assertIn("REPLACE", config["DORAEMON_A_BOX_IFACE"])
         self.assertTrue(all("REPLACE" in value for value in serials + paths))
         self.assertEqual(config.get("RUNTIME_START_DEPTH_CAMERAS"), "true")
-        self.assertEqual(config.get("DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES"), "false")
-        self.assertEqual(config.get("RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS"), "false")
+        self.assertEqual(config.get("DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES"), "true")
+        self.assertEqual(config.get("RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS"), "true")
+        self.assertEqual(config.get("RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE"), "true")
         self.assertEqual(config.get("RUNTIME_ENABLE_DEPTH_LEFT_CAM"), "true")
         self.assertEqual(config.get("RUNTIME_ENABLE_DEPTH_RIGHT_CAM"), "true")
         self.assertEqual(config.get("RUNTIME_ENABLE_DEPTH_UP_CAM"), "true")
@@ -111,10 +112,16 @@ class CommercialHardwareGateTest(unittest.TestCase):
         self.assertIn("normalize_boolean_variable RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS", source)
         self.assertNotIn("runtime_warn_if_optional_topic_missing /gemini_", source)
         self.assertIn("相机缺失或异常不阻塞整机启动", source)
+        verify_start = source.index("verify_depth_camera_chain()")
+        verify_end = source.index("ensure_depth_camera_chain_ready()")
+        verify_source = source[verify_start:verify_end]
         for namespace in ("gemini_cf", "gemini_nj", "gemini_front"):
-            self.assertIn("runtime_wait_for_topic /%s/depth/image_raw" % namespace, source)
-            self.assertIn("runtime_wait_for_topic /%s/depth/points" % namespace, source)
-            self.assertIn("runtime_require_orbbec_serial %s" % namespace, source)
+            self.assertIn("/%s/depth/image_raw" % namespace, verify_source)
+            self.assertIn("/%s/depth/points" % namespace, verify_source)
+            self.assertIn("runtime_require_orbbec_serial %s" % namespace, verify_source)
+        self.assertEqual(
+            verify_source.count("runtime_wait_for_consecutive_topic_samples"), 6
+        )
 
     def test_depth_obstacle_sources_are_independently_wired_and_non_blocking(self):
         source = read_repo_file("scripts/start_runtime.sh")
@@ -164,6 +171,11 @@ DORAEMON_ACTION_TEST_APPROVED=false
 RUNTIME_START_DEPTH_CAMERAS=TRUE
 RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=1
 DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=yes
+RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE=true
+RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING=true
+RUNTIME_ENABLE_DEPTH_LEFT_CAM=true
+RUNTIME_ENABLE_DEPTH_RIGHT_CAM=true
+RUNTIME_ENABLE_DEPTH_UP_CAM=true
 RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER=S1
 RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER=S2
 RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER=S3
@@ -197,11 +209,23 @@ RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER=
 RUNTIME_ORBBEC_CAMERA1_USB_PORT=
 RUNTIME_ORBBEC_CAMERA2_USB_PORT=
 RUNTIME_ORBBEC_CAMERA3_USB_PORT=
-validate_commercial_vehicle_identity
+if validate_commercial_vehicle_identity; then
+  exit 12
+fi
 [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" == false ]]
 [[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == false ]]
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=true
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=true
+RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER=S1
+RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER=S2
+RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER=S3
+RUNTIME_ORBBEC_CAMERA1_USB_PORT=1-1
+RUNTIME_ORBBEC_CAMERA2_USB_PORT=1-2
+RUNTIME_ORBBEC_CAMERA3_USB_PORT=1-3
 RUNTIME_START_DEPTH_CAMERAS=off
-validate_commercial_vehicle_identity
+if validate_commercial_vehicle_identity; then
+  exit 15
+fi
 [[ "${RUNTIME_START_DEPTH_CAMERAS}" == false ]]
 RUNTIME_START_DEPTH_CAMERAS=true
 DORAEMON_NO_ACTION_ACCEPTANCE=false
@@ -228,15 +252,16 @@ fi
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
 
-    def test_boot_preflight_requires_usb_serials_and_topology(self):
+    def test_boot_preflight_requires_serials_and_live_usb3_links(self):
         source = read_repo_file("scripts/wait_robot_boot_ready.sh")
         self.assertIn("DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES", source)
         self.assertIn("validate_unique_camera_identities", source)
         self.assertIn("has_usb_serial", source)
-        self.assertIn("has_usb_topology_path", source)
         self.assertIn("verify_orbbec_sdk_pairs.py", source)
+        self.assertIn("--allow-topology-remap", source)
+        self.assertIn('--min-usb-speed "${ORBBEC_MIN_USB_SPEED}"', source)
         self.assertIn("orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))", source)
-        self.assertIn("Orbbec SDK serial/topology stability gate failed", source)
+        self.assertIn("Orbbec SDK serial identity/USB3 stability gate failed", source)
         self.assertIn("ORBBEC_MIN_USB_SPEED", source)
         self.assertIn('COMMERCIAL_ORBBEC_VENDOR_ID="2bc5"', source)
         self.assertIn('COMMERCIAL_ORBBEC_MIN_USB_SPEED="5000"', source)
@@ -314,7 +339,7 @@ fi
             source,
         )
         self.assertIn(
-            "Orbbec serial/topology/SDK readiness gate disabled",
+            "Orbbec serial/USB3/SDK readiness gate disabled",
             source,
         )
 

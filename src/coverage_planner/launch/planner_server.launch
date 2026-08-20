@@ -76,7 +76,7 @@
   <arg name="manual_drive_require_slam_state" default="false"/>
   <arg name="manual_drive_require_task_state" default="false"/>
   <arg name="manual_drive_require_odometry_state" default="false"/>
-  <arg name="manual_drive_require_combined_status" default="false"/>
+  <arg name="manual_drive_require_combined_status" default="true"/>
   <arg name="manual_drive_linear_mps_limit" default="0.3"/>
   <arg name="manual_drive_angular_radps_limit" default="0.5"/>
   <arg name="manual_drive_watchdog_timeout_ms" default="1000"/>

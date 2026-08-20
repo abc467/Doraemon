@@ -34,6 +34,9 @@ class MissionRun:
     trigger_source: str = ""
     map_id: str = ""
     map_md5: str = ""
+    cleaning_distance_m: float = 0.0
+    cleaning_area_m2: float = 0.0
+    metrics_source: str = ""
     created_ts: float = 0.0
 
 
@@ -62,6 +65,9 @@ def _convert_run(row: MissionRunRecord) -> MissionRun:
         trigger_source=str(row.trigger_source or ""),
         map_id=str(row.map_id or ""),
         map_md5=str(row.map_md5 or ""),
+        cleaning_distance_m=float(row.cleaning_distance_m or 0.0),
+        cleaning_area_m2=float(row.cleaning_area_m2 or 0.0),
+        metrics_source=str(row.metrics_source or ""),
         created_ts=float(row.created_ts or 0.0),
     )
 

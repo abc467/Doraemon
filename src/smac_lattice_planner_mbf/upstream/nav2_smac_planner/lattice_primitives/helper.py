@@ -17,7 +17,11 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import numpy as np
-from numpy.typing import NDArray
+
+try:
+    from numpy.typing import NDArray
+except ImportError:  # NumPy < 1.20 on the ROS Noetic production image.
+    NDArray = Any
 
 
 def normalize_angle(angle: float) -> float:

@@ -1,0 +1,17 @@
+[Unit]
+Description=Doraemon Orbbec USB Preflight
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=doraemon-runtime.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=DORAEMON_ORBBEC_USBFS_MEMORY_MB=128
+ExecStart=/opt/doraemon/current/scripts/configure_orbbec_usb.sh
+RemainAfterExit=yes
+TimeoutStartSec=10
+
+[Install]
+WantedBy=multi-user.target

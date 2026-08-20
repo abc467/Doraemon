@@ -529,8 +529,10 @@ lsusb
 最终插拔一次 USB 设备，确认别名重建。不要只依赖当前 `/dev/ttyUSBN` 顺序。
 
 `[停止条件]` 任一 `REPLACE_*` 未替换、IMU/里程计别名不是本机插拔确认的设备、
-串口权限不符、三台 Orbbec 的序列号与本机 USB3 拓扑未逐台确认，或插拔后身份不能
-稳定重建时停止。不得复制旧主板的 `ID_PATH` 或按 `/dev/ttyUSBN` 顺序猜测。
+串口权限不符、三台 Orbbec 序列号未逐台确认、任一相机没有稳定的 USB3 链路，或
+插拔后身份不能稳定重建时停止。Orbbec 拓扑值用于记录调试时的物理接线；驱动按
+序列号绑定，拓扑变化会告警但不单独阻断启动。不得复制旧主板的串口 `ID_PATH` 或
+按 `/dev/ttyUSBN` 顺序猜测。
 
 ## 10. 阶段 G：后端配置和持久化数据
 
@@ -692,15 +694,13 @@ ROSBRIDGE_ADDRESS=127.0.0.1
 DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
 ```
 
-车辆编号和内部网口的 `REPLACE_*` 是有意保留的停止门。深度相机默认采用非阻塞
-启动模式：驱动存在时仍按序列号启动，但相机缺失、USB 总线拓扑重编号或话题未就绪
-不会阻止 ROS、导航和任务系统启动。需要做相机专项验收时，可显式将
-`RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS` 和
-`DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES` 设为 `true`。严格模式会用目标版本内
-的 Orbbec SDK 验证 `序列号 ↔ 拓扑` 配对、厂商和 SuperSpeed，并要求连续两次
-得到恰好三条、唯一且与本车配置完全相同的配对；空、部分、额外、重复、畸形或
-超时快照都会令严格模式 fail closed。原始 SDK stdout/stderr 不得直接写入
-systemd journal。
+车辆编号和内部网口的 `REPLACE_*` 是有意保留的停止门。商业三相机模式会用目标
+版本内的 Orbbec SDK 连续两次确认恰好三台配置序列号，并核实每台当前实际连接的
+厂商和 SuperSpeed（至少 5000 Mbps）。空、部分、额外、重复、串号不符、USB2
+降速、畸形或超时快照都会 fail closed。`RUNTIME_ORBBEC_CAMERA*_USB_PORT` 是装车
+接线提示；实际拓扑改变但三台序列号和USB3链路连续稳定时只告警，不阻断启动。
+随后仍按左、右、前顺序启动，每台必须连续输出深度图和点云才能启动下一台。
+原始 SDK stdout/stderr 不得直接写入 systemd journal。
 
 保留当前已经验证的底盘方向、轮径、轮距、编码器和停靠参数，除非机械/算法负责人
 有带版本的变更单。不得通过修改源码给单车做参数差异。

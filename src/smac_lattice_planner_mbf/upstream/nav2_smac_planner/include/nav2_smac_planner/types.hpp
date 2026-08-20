@@ -52,6 +52,11 @@ struct SearchInfo
   std::string lattice_filepath;
   bool cache_obstacle_heuristic{false};
   bool allow_reverse_expansion{false};
+  // A hard contract used by forward-only differential-drive deployments.
+  // Nav2's minimum diff control set may rely on rotate-in-place primitives to
+  // leave axis-aligned headings. When stationary transitions are filtered,
+  // each heading instead needs translating left, straight and right controls.
+  bool require_forward_steering_primitives{false};
   bool allow_primitive_interpolation{false};
   bool downsample_obstacle_heuristic{true};
   bool use_quadratic_cost_penalty{false};

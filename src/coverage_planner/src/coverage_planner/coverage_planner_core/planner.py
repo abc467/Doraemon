@@ -6,6 +6,14 @@ from typing import List, Tuple, Callable, Optional, Dict, Any
 
 import fields2cover as f2c
 
+try:
+    from shapely.geometry import LineString, Polygon
+    from shapely.ops import unary_union
+except Exception:  # pragma: no cover - production planning already requires Shapely
+    LineString = None
+    Polygon = None
+    unary_union = None
+
 from coverage_planner.constraints import path_points_outside_effective_regions
 
 from .types import RobotSpec, PlannerParams, PlanResult, BlockPlan, BlockDebug
@@ -13,7 +21,8 @@ from .geom import resample_polyline_uniform, yaw_list_from_pts, polyline_length_
 from .f2c_adapter import (
     build_cells_from_polygons, build_cells_from_regions, build_robot, build_swath_generator, build_objective,
     build_turn_planner, generate_best_swaths, snake_sorted_swaths, recon_snake_polyline,
-    swaths_size, swath_at, swath_endpoints_xyz, cell_outer_ring_xy
+    swaths_size, swath_at, swath_endpoints_xyz, swath_polyline_xy_trimmed,
+    cell_outer_ring_xy
 )
 from .shrink import cell_to_shapely_polygon, long_side_shrink_cells, shapely_to_f2c_cells
 from .site_axis_rectangle import largest_site_axis_rectangle
@@ -22,6 +31,7 @@ from .exec_order import nearest_neighbor_exec_order
 
 
 XY = Tuple[float, float]
+SNAKE_CLEARANCE_NUMERICAL_GUARD_M = 0.002
 
 
 def _bbox_edge_loop_safe_for_cell(cell_geom) -> bool:
@@ -40,10 +50,97 @@ def _bbox_edge_loop_safe_for_cell(cell_geom) -> bool:
     return abs(float(poly.area) - bbox_area) <= max(1e-6, bbox_area * 0.005)
 
 
+def _effective_region_union(effective_regions: Optional[List[Dict[str, Any]]]):
+    """Return the authoritative coverage-free geometry without decomposition seams."""
+
+    if Polygon is None or unary_union is None:
+        return None
+    polygons = []
+    for region in effective_regions or []:
+        outer = list((region or {}).get("outer") or [])
+        if len(outer) < 3:
+            continue
+        try:
+            polygon = Polygon(outer, list((region or {}).get("holes") or []))
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0.0)
+            if not polygon.is_empty:
+                polygons.append(polygon)
+        except Exception:
+            continue
+    return unary_union(polygons) if polygons else None
+
+
+def _apply_snake_only_clearance(
+    candidates: List[Dict[str, Any]],
+    snake_center_region,
+    wall_margin_m: float,
+) -> List[Dict[str, Any]]:
+    """Mark snake-only Cells for filtering against a global safe-centre region.
+
+    Boustrophedon decomposition creates internal Cell seams which are not
+    obstacles. Buffering every Cell independently would leave artificial
+    uncovered strips at those seams. ``snake_center_region`` is therefore made
+    from the authoritative effective-region union, but the Cell geometry is
+    preserved. The generated swaths are filtered later, after turn-end trimming.
+    """
+
+    if snake_center_region is None:
+        return candidates
+
+    constrained: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        if bool(candidate.get("edge_loop_safe")):
+            constrained.append(candidate)
+            continue
+
+        item = dict(candidate)
+        item.update({
+            "edge_source_xy": [],
+            "edge_loop_safe": False,
+            "snake_clearance_enforced": True,
+            "snake_clearance_margin_m": max(0.0, float(wall_margin_m)),
+        })
+        constrained.append(item)
+    return constrained
+
+
+def _path_inside_geometry(path_xy: List[XY], geometry, tolerance_m: float = 1e-6) -> bool:
+    if geometry is None or LineString is None or len(path_xy or []) < 2:
+        return True
+    try:
+        return bool(geometry.buffer(max(0.0, float(tolerance_m))).covers(LineString(path_xy)))
+    except Exception:
+        return False
+
+
+def _filter_swaths_inside_geometry(swaths, geometry, turn_margin_m: float):
+    """Keep only lanes whose actually executed straight part has clearance."""
+
+    if geometry is None or LineString is None:
+        return swaths
+    allowed = geometry.buffer(1e-6)
+    kept = []
+    for index in range(swaths_size(swaths)):
+        swath = swath_at(swaths, index)
+        if swath is None:
+            continue
+        points = swath_polyline_xy_trimmed(swath, max(0.0, float(turn_margin_m)))
+        if len(points) < 2:
+            continue
+        try:
+            if allowed.covers(LineString(points)):
+                kept.append(swath)
+        except Exception:
+            continue
+    return kept
+
+
 def _planning_cell_candidates(
     raw_cell,
     wall_margin_m: float,
     path_step_m: float,
+    snake_center_region=None,
 ) -> List[Dict[str, Any]]:
     """Prepare geometry before swath generation.
 
@@ -64,12 +161,17 @@ def _planning_cell_candidates(
         return []
 
     raw_outer_xy = cell_outer_ring_xy(raw_cell)
-    regular_legacy_cell = (
+    raw_bbox_edge_loop_safe = _bbox_edge_loop_safe_for_cell(raw_cell)
+    shrunken_cell_looks_rectangular = (
         len(legacy_safe_cells) == 1
         and _bbox_edge_loop_safe_for_cell(legacy_safe_cells[0])
     )
+    regular_legacy_cell = (
+        raw_bbox_edge_loop_safe
+        and shrunken_cell_looks_rectangular
+    )
     if wall_margin <= 1e-9 or regular_legacy_cell:
-        return [
+        return _apply_snake_only_clearance([
             {
                 "cell": cell,
                 "edge_source_xy": raw_outer_xy,
@@ -79,7 +181,24 @@ def _planning_cell_candidates(
                 "raw_cell_area_m2": None,
             }
             for cell in legacy_safe_cells
-        ]
+        ], snake_center_region, wall_margin)
+
+    if shrunken_cell_looks_rectangular and not raw_bbox_edge_loop_safe:
+        # A shallow notch / keepout cut-out may be removed by long-side
+        # shrinking, making the candidate look rectangular.  Preserve that
+        # candidate's full snake coverage, but do not replace it with an
+        # inscribed rectangle and never form an edge loop from the raw bbox.
+        return _apply_snake_only_clearance([
+            {
+                "cell": cell,
+                "edge_source_xy": [],
+                "edge_loop_safe": False,
+                "geometry_mode": "concave_raw_cell_snake_only",
+                "site_rect": None,
+                "raw_cell_area_m2": None,
+            }
+            for cell in legacy_safe_cells
+        ], snake_center_region, wall_margin)
 
     raw_poly = cell_to_shapely_polygon(raw_cell)
     if raw_poly is not None and not raw_poly.is_empty:
@@ -110,20 +229,25 @@ def _planning_cell_candidates(
                     }
                 ]
 
-    # Keep the pre-existing behavior only when no usable rectangle can be
-    # extracted (for example, when Shapely is unavailable).  Successful
-    # rectangle extraction never reaches this branch.
-    return [
+    # If no verified inscribed rectangle can be extracted, keep the shrunken
+    # cells for snake coverage but never build a rectangular edge loop from a
+    # concave / holed raw cell's bbox.  That bbox can span straight across a
+    # keepout cut-out even when a long-side shrink happened to make ``cell``
+    # look rectangular.
+    return _apply_snake_only_clearance([
         {
             "cell": cell,
             "edge_source_xy": raw_outer_xy,
-            "edge_loop_safe": _bbox_edge_loop_safe_for_cell(cell),
+            "edge_loop_safe": (
+                raw_bbox_edge_loop_safe
+                and _bbox_edge_loop_safe_for_cell(cell)
+            ),
             "geometry_mode": "legacy_non_rectangular_fallback",
             "site_rect": None,
             "raw_cell_area_m2": float(raw_poly.area) if raw_poly is not None else None,
         }
         for cell in legacy_safe_cells
-    ]
+    ], snake_center_region, wall_margin)
 
 
 def _path_region_violation_message(path_xy: List[XY], effective_regions: Optional[List[Dict[str, Any]]]) -> str:
@@ -181,6 +305,19 @@ def plan_coverage(
 
         wall_margin = max(0.0, float(params.wall_margin_m))
         turn_margin = max(0.0, float(params.turn_margin_m))
+        effective_region_geometry = _effective_region_union(effective_regions)
+        snake_center_region = None
+        if effective_region_geometry is not None and not effective_region_geometry.is_empty:
+            try:
+                # GEOS -> Fields2Cover coordinate conversion can move a Cell
+                # boundary by a fraction of a millimetre.  Keep a 2 mm
+                # numerical guard so the configured clearance remains a true
+                # lower bound after conversion and path resampling.
+                snake_center_region = effective_region_geometry.buffer(
+                    -(wall_margin + SNAKE_CLEARANCE_NUMERICAL_GUARD_M)
+                )
+            except Exception:
+                snake_center_region = None
 
         edge_r = float(params.edge_corner_radius_m) if params.edge_corner_radius_m >= 0.0 else float(R)
         edge_r = max(edge_r, float(R))
@@ -199,6 +336,7 @@ def plan_coverage(
                 raw_cell,
                 wall_margin_m=wall_margin,
                 path_step_m=float(params.path_step_m),
+                snake_center_region=snake_center_region,
             )
             if not planning_cells:
                 continue
@@ -214,9 +352,12 @@ def plan_coverage(
                 # applied its four-side wall margin before swaths are created,
                 # so subtract that pre-applied part instead of counting it a
                 # second time at both short ends.
-                preapplied_turn_margin = (
-                    max(0.0, float(site_rect.wall_margin_m))
-                    if site_rect is not None else 0.0
+                preapplied_turn_margin = max(
+                    0.0,
+                    float(planning_cell.get(
+                        "preapplied_turn_margin_m",
+                        site_rect.wall_margin_m if site_rect is not None else 0.0,
+                    )),
                 )
                 effective_turn_margin = max(
                     0.0,
@@ -224,9 +365,33 @@ def plan_coverage(
                 )
 
                 # 1) swaths
-                swaths_b = generate_best_swaths(sg, obj, r_w, cell_b, mute=params.mute_stderr)
+                # Individual SWIG Swath objects are borrowed from their native
+                # Swaths container. Keep that owner alive while a filtered
+                # Python list is used as the planning view.
+                generated_swaths_b = generate_best_swaths(
+                    sg, obj, r_w, cell_b, mute=params.mute_stderr
+                )
+                nsb_generated = swaths_size(generated_swaths_b)
+                swaths_b = generated_swaths_b
+                if bool(planning_cell.get("snake_clearance_enforced")):
+                    swaths_b = _filter_swaths_inside_geometry(
+                        generated_swaths_b,
+                        snake_center_region,
+                        effective_turn_margin,
+                    )
                 nsb = swaths_size(swaths_b)
                 if nsb <= 0:
+                    if bool(planning_cell.get("snake_clearance_enforced")):
+                        return PlanResult(
+                            False,
+                            "NO_SAFE_SNAKE_SWATHS",
+                            "snake-only Cell has no lane satisfying %.3f m centreline clearance"
+                            % wall_margin,
+                            frame_id,
+                            [],
+                            [],
+                            0.0,
+                        )
                     block_id += 1
                     continue
 
@@ -320,7 +485,12 @@ def plan_coverage(
                         edge_dense=edge_dense,
                         sp=sp
                     )
-                    if bool(params.validate_effective_region_path):
+                    # ``effective_regions`` is the authoritative result of the
+                    # zone/keepout compilation.  Once supplied, final-path
+                    # containment is a fail-closed core invariant rather than
+                    # a tunable debug option.  Keep the PlannerParams field for
+                    # wire/storage compatibility with older plans.
+                    if effective_regions:
                         violation = _path_region_violation_message(final_pts, effective_regions)
                         if violation:
                             snake_violation = _path_region_violation_message(snake_pts_path, effective_regions)
@@ -334,10 +504,28 @@ def plan_coverage(
                             edge_close_gap = 0.0
                             edge_len = 0.0
                 else:
-                    if bool(params.validate_effective_region_path):
+                    if effective_regions:
                         violation = _path_region_violation_message(final_pts, effective_regions)
                         if violation:
                             return PlanResult(False, "PATH_OUTSIDE_EFFECTIVE_REGION", violation, frame_id, [], [], 0.0)
+
+                # A missing/rejected edge loop must never make the outermost
+                # snake lanes the new unsafe boundary pass.  This is a
+                # centreline-clearance invariant, not a full-body trajectory
+                # sweep: the planning keepout buffer plus wall_margin and half
+                # the physical vehicle width define the requested net gap.
+                if edge_loop_skipped and snake_center_region is not None:
+                    if not _path_inside_geometry(final_pts, snake_center_region):
+                        return PlanResult(
+                            False,
+                            "PATH_OUTSIDE_SNAKE_CLEARANCE_REGION",
+                            "snake-only coverage path violates %.3f m centreline clearance"
+                            % wall_margin,
+                            frame_id,
+                            [],
+                            [],
+                            0.0,
+                        )
 
                 # debug data
                 dbg = None
@@ -363,6 +551,8 @@ def plan_coverage(
                         preapplied_turn_margin > float(turn_margin) + 1e-9
                     ),
                     "swaths": nsb,
+                    "swaths_generated": int(nsb_generated),
+                    "swaths_clearance_filtered": int(max(0, nsb_generated - nsb)),
                     "swaths_retained": int(ns_sorted),
                     "swaths_filtered": int(max(0, nsb - ns_sorted)),
                     "snake_raw_pts": len(snake_raw),
@@ -390,6 +580,13 @@ def plan_coverage(
                     })
                 if edge_loop_skipped:
                     stats["edge_loop_skipped"] = edge_loop_skipped
+                if bool(planning_cell.get("snake_clearance_enforced")):
+                    stats.update({
+                        "snake_clearance_enforced": True,
+                        "snake_clearance_margin_m": float(
+                            planning_cell.get("snake_clearance_margin_m") or 0.0
+                        ),
+                    })
 
                 blocks.append(
                     BlockPlan(

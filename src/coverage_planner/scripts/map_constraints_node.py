@@ -109,7 +109,7 @@ class MapConstraintsNode:
             rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.115)
         )
         self.planning_no_go_short_edge_normal_buffer_m = float(
-            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.115)
         )
         self.auto_map_identity_enable = bool(rospy.get_param("~auto_map_identity_enable", True))
         self.map_identity_timeout_s = float(rospy.get_param("~map_identity_timeout_s", 2.0))

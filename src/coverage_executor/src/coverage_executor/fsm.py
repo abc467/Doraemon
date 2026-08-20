@@ -94,8 +94,8 @@ class ExecutorFSM:
         hard_stop_s: float = 0.6,
         connect_skip_dist: float = 0.35,
         connect_skip_yaw_rad: float = 0.25,
-        connect_handoff_dist_m: float = 0.40,
-        connect_handoff_yaw_rad: float = 0.40,
+        connect_handoff_dist_m: float = 0.60,
+        connect_handoff_yaw_rad: float = 0.52,
 
         # Navigation actions must not remain ACTIVE forever.  Total deadlines
         # scale with path length, while the no-progress deadlines are reset by
@@ -501,6 +501,55 @@ class ExecutorFSM:
         p = max(0.0, min(s_done / total, 1.0))
         return float(p), float(p * 100.0)
 
+    def _reset_progress_tracking_locked(self):
+        """Discard progress that must not cross an IDLE -> START boundary.
+
+        The caller holds ``self._lock``.  Run/checkpoint persistence lives in
+        SQLite, so clearing these in-memory presentation fields does not remove
+        resumable task data.
+        """
+        self._plan = None
+        self._exec_index = 0
+        self._block_id = -1
+        self._path_index = 0
+        self._path_s = 0.0
+        self._block_cut_s0 = 0.0
+        self._block_cut_idx0 = 0
+        self._current_block_len_m = 0.0
+        self._plan_total_len_m = 0.0
+        self._prefix_before_m = []
+        self._exec_block_ids = []
+        self._last_progress_0_1 = 0.0
+
+    @staticmethod
+    def _normalize_idle_progress_message(msg):
+        """Make an IDLE heartbeat explicitly own no run or progress."""
+        state = str(getattr(msg, "state", "") or "").strip().upper()
+        if state != "IDLE":
+            return msg
+
+        msg.run_id = ""
+        msg.zone_id = ""
+        msg.plan_id = ""
+        msg.plan_profile = ""
+        msg.sys_profile = ""
+        msg.mode = ""
+        msg.error_code = ""
+        msg.error_msg = ""
+        msg.interlock_active = False
+        msg.interlock_reason = ""
+        msg.v_mps = 0.0
+        msg.w_rps = 0.0
+        msg.exec_index = 0
+        msg.block_id = -1
+        msg.path_index = 0
+        msg.path_s = 0.0
+        msg.block_length_m = 0.0
+        msg.total_length_m = 0.0
+        msg.progress_0_1 = 0.0
+        msg.progress_pct = 0.0
+        return msg
+
 
     def _publish_minimal_progress(self, reason: str = "", lock_busy: bool = False):
         """Publish a minimal RunProgress heartbeat without taking self._lock.
@@ -534,6 +583,7 @@ class ExecutorFSM:
             p01 = float(getattr(self, "_last_progress_0_1", 0.0) or 0.0)
             msg.progress_0_1 = p01
             msg.progress_pct = float(p01 * 100.0)
+            self._normalize_idle_progress_message(msg)
             msg.stamp = rospy.Time.now()
             self._progress_pub.publish(msg)
             if lock_busy:
@@ -670,6 +720,7 @@ class ExecutorFSM:
             msg.total_length_m = float(total_len)
             msg.progress_0_1 = float(p01)
             msg.progress_pct = float(ppct)
+            self._normalize_idle_progress_message(msg)
             msg.stamp = rospy.Time.now()
             self._progress_pub.publish(msg)
 
@@ -1247,6 +1298,7 @@ class ExecutorFSM:
             if s == "IDLE":
                 self._error_code = ""
                 self._error_msg = ""
+                self._reset_progress_tracking_locked()
             elif s.startswith("ERROR"):
                 self._error_code = s
         self._state_pub.publish(String(data=s))
@@ -1626,6 +1678,7 @@ class ExecutorFSM:
                     self._run_id = req_run or uuid.uuid4().hex
                     self._pause_req = False
                     self._cancel_req = False
+                    self._reset_progress_tracking_locked()
                     self._execution_epoch = int(getattr(self, "_execution_epoch", 0)) + 1
                     epoch = int(self._execution_epoch)
                     rospy.loginfo("[EXEC] start zone_id=%s run=%s epoch=%d", self._zone_id, self._run_id, epoch)
@@ -1666,6 +1719,12 @@ class ExecutorFSM:
                     self._run_id = req_run
                     self._pause_req = False
                     self._cancel_req = False
+                    # A resume starts a new execution attempt for the same run.
+                    # Do not keep the previous recoverable failure attached to
+                    # fresh CONNECT/FOLLOW heartbeats; any new failure will set
+                    # its own error summary before publishing a terminal state.
+                    self._error_code = ""
+                    self._error_msg = ""
                     self._execution_epoch = int(getattr(self, "_execution_epoch", 0)) + 1
                     epoch = int(self._execution_epoch)
                     rospy.logwarn("[EXEC] RESUME zone_id=%s run=%s epoch=%d", self._zone_id, self._run_id, epoch)
@@ -1675,6 +1734,30 @@ class ExecutorFSM:
             return
 
         if verb == "pause":
+            with self._lock:
+                active_thread = self._running_thread
+                run_active = bool(active_thread and active_thread.is_alive())
+                current_state = str(self._state or "").strip().upper()
+                if not run_active:
+                    self._pause_req = False
+            if not run_active:
+                # A direct safety publisher may race with TaskManager during
+                # startup.  With no live execution there is nothing to
+                # checkpoint or resume, so PAUSE_REQ would only create a
+                # false, latched paused state for the UI.  Preserve meaningful
+                # terminal states; normalize idle-like terminal states to
+                # canonical IDLE.
+                if current_state in ("IDLE", "DONE", "CANCELED"):
+                    rospy.logwarn("[EXEC] PAUSE while idle -> keep IDLE")
+                    self._stop_pause_hold()
+                    self._publish_state("IDLE")
+                else:
+                    rospy.logwarn(
+                        "[EXEC] reject PAUSE without active execution state=%s",
+                        current_state or "UNKNOWN",
+                    )
+                    self._emit("CMD_REJECTED:pause:NO_ACTIVE_EXECUTION")
+                return
             with self._lock:
                 self._pause_req = True
             rospy.logwarn("[EXEC] PAUSE (async)")
@@ -1987,6 +2070,12 @@ class ExecutorFSM:
                 clean_mode=str(clean_mode or ""),
                 map_id=str(self._runtime_map_id or ""),
                 map_md5=str(self._runtime_map_md5 or ""),
+                cleaning_distance_m=max(0.0, float(plan.total_length_m or 0.0)),
+                cleaning_area_m2=(
+                    max(0.0, float(plan.total_length_m or 0.0))
+                    * max(0.01, float(getattr(plan, "coverage_width_m", 0.6) or 0.6))
+                ),
+                metrics_source="plan_snapshot",
             )
         except Exception as e:
             rospy.logwarn_throttle(2.0, "[EXEC] update_run_execution_context failed: run=%s err=%s", run_id, str(e))

@@ -54,8 +54,8 @@
     <!-- 可选：指定 planner/controller/recovery -->
     <param name="mbf_planner" value="SmacLatticePlanner"/>
     <param name="mbf_controller" value="MPPI_Standard_Controller"/>
-    <!-- 点对点使用与 Smac State Lattice 路径语义一致的专用 MPPI。 -->
-    <param name="mbf_connect_controller" value="MPPI_State_Lattice_Controller"/>
+    <!-- 当前点对点 A/B：Smac 路径也交给 Standard MPPI 跟踪。 -->
+    <param name="mbf_connect_controller" value="MPPI_Standard_Controller"/>
     <param name="mbf_recovery" value=""/>
 
     <param name="water_off_distance" value="6.0"/>
@@ -114,8 +114,8 @@
     <!-- Match the production MBF task tolerance. Once CONNECT has reached
          this SE(2) envelope, FOLLOW owns the remaining path capture; do not
          generate extra short State-Lattice correction goals. -->
-    <param name="connect_handoff_dist_m" value="0.40"/>
-    <param name="connect_handoff_yaw_rad" value="0.40"/>
+    <param name="connect_handoff_dist_m" value="0.60"/>
+    <param name="connect_handoff_yaw_rad" value="0.52"/>
     <!-- 总时限随距离增长；无平移且无转动达到截止时间时取消本次
          MBF goal 并进入现有有界重试，避免任务永久 RUNNING。 -->
     <!-- Initial State-Lattice planning may intentionally use up to 180 s

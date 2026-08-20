@@ -75,6 +75,13 @@ def main():
         "~app_exe_task_contract_param_ns",
         "/coverage_task_manager/contracts/app/exe_task_server",
     )
+    app_cancel_return_home_service_name = rospy.get_param(
+        "~app_cancel_return_home_service_name",
+        "/coverage_task_manager/app/cancel_return_home",
+    )
+    return_home_cancel_timeout_s = rospy.get_param(
+        "~return_home_cancel_timeout_s", 15.0
+    )
     # Map identity injection (system-wide). Does not block if /map not available.
     auto_map_identity_enable = rospy.get_param("~auto_map_identity_enable", True)
     map_topic = rospy.get_param("~map_topic", "/map")
@@ -269,6 +276,8 @@ def main():
         cmd_topic="~cmd",
         app_exe_task_service_name=str(app_exe_task_service_name),
         app_exe_task_contract_param_ns=str(app_exe_task_contract_param_ns),
+        app_cancel_return_home_service_name=str(app_cancel_return_home_service_name),
+        return_home_cancel_timeout_s=float(return_home_cancel_timeout_s),
         battery_topic=battery_topic,
         battery_stale_timeout_s=float(battery_stale_timeout_s),
         auto_charge_enable=bool(auto_charge_enable),

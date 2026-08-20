@@ -103,25 +103,17 @@ class ManualDriveServiceNode:
         require_slam_state = _strict_bool_param("~require_slam_state", False)
         require_task_state = _strict_bool_param("~require_task_state", False)
         require_odometry_state = _strict_bool_param("~require_odometry_state", False)
-        require_combined_status = _strict_bool_param("~require_combined_status", False)
+        require_combined_status = _strict_bool_param("~require_combined_status", True)
         if not enabled:
             raise RuntimeError("disabled manual-drive node must not be started")
         if no_action_acceptance or not action_test_approved:
             raise RuntimeError(
                 "manual drive requires action-capable mode and explicit action-test approval"
             )
-        required_safety_gates = {
-            "require_role": require_role,
-            "require_slam_state": require_slam_state,
-            "require_task_state": require_task_state,
-            "require_odometry_state": require_odometry_state,
-            "require_combined_status": require_combined_status,
-        }
-        disabled_gates = sorted(name for name, value in required_safety_gates.items() if not value)
-        if disabled_gates:
+        if not require_combined_status:
             raise RuntimeError(
-                "manual drive requires all commercial safety gates: %s"
-                % ", ".join(disabled_gates)
+                "manual drive requires the physical platform safety gate: "
+                "require_combined_status=true"
             )
 
         config = ManualDriveConfig(

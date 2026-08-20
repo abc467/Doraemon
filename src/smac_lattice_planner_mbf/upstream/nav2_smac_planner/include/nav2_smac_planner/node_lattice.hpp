@@ -58,6 +58,16 @@ struct LatticeMotionTable
     SearchInfo & search_info);
 
   /**
+   * @brief Validate the stronger forward-only steering lattice contract.
+   *
+   * Every translating primitive must be finite, internally consistent,
+   * forward-kinematic, and respect the metadata minimum turning radius.
+   * Every heading must retain translating left/straight/right controls and
+   * the resulting heading graph must be connected. Throws on violation.
+   */
+  void validateForwardSteeringPrimitives() const;
+
+  /**
    * @brief Get projections of motion models
    * @param node Ptr to NodeLattice
    * @param Reference direction change index

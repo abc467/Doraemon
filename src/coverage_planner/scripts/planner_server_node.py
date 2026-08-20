@@ -106,7 +106,7 @@ class CoveragePlannerActionServer:
             rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.115)
         )
         self.default_no_go_short_edge_normal_buffer_m = float(
-            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.115)
         )
         self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)
 

@@ -17,10 +17,10 @@ periodic_plan_max_join_yaw: 0.35
 controller_frequency: 10.0
 
 # ExePath 对原始 MoveBase requested target 的外层最终残差门槛。
-# State MPPI 的 0.30 m/0.20 rad 跟踪容差与 lattice 量化误差叠加后，
-# 仍分别落在这里的 0.40 m/0.40 rad 以内。
-dist_tolerance: 0.40
-angle_tolerance: 0.40
+# State MPPI 的 0.50 m/0.40 rad 跟踪容差与最坏 lattice 量化误差
+# （约 7.1 cm / 0.10 rad）叠加后，仍落在这里的外层门槛以内。
+dist_tolerance: 0.60
+angle_tolerance: 0.52
 
 # A planner plugin failure is synchronous and normally deterministic for the
 # current costmap. Do not busy-loop thousands of identical calls until

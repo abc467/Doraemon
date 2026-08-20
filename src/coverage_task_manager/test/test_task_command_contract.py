@@ -60,6 +60,9 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._is_dock_supply_owner_phase = lambda: False
         mgr._dock_supply_state = "IDLE"
         mgr._dock_supply_cancel = lambda: None
+        mgr._return_home_cancel_lock = threading.Lock()
+        mgr._return_home_cancel_timeout_s = 15.0
+        mgr._dock_supply_exit_inflight = False
         mgr._auto_charge_recovery_exhausted_running = False
         mgr._charge_clears = []
         mgr._clear_charge_monitor = lambda: mgr._charge_clears.append(True)
@@ -669,6 +672,67 @@ class TaskCommandContractTest(unittest.TestCase):
             mgr._faults,
             [("ERROR_AUTO_RESUME_CONTEXT", "missing active_run_id during auto undock resume")],
         )
+
+    def test_manual_resume_waits_for_matching_executor_ack(self):
+        mgr = self._manager()
+        mgr._mission_state = "PAUSED"
+        mgr._public_state = "PAUSED_RECOVERY"
+        mgr._active_job_id = "job_1"
+        mgr._prepare_runtime_for_execution = lambda **_kwargs: (True, "")
+
+        ok, message = mgr._resume_current_task(run_id="run_alpha")
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual(mgr._phase, "RESUMING")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._published_states, ["RESUMING"])
+        self.assertEqual(mgr._exec_cmds, ["resume run_id=run_alpha"])
+        self.assertEqual(mgr._mission_updates, [])
+
+        # A fresh heartbeat for the same run is the commit point.
+        mgr._executor_state = "CONNECT:block_8"
+        self._set_executor_progress(mgr, "CONNECT:block_8")
+        acknowledged = mgr._complete_auto_resuming_if_executor_running()
+
+        self.assertTrue(acknowledged)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "RUNNING")
+        self.assertEqual(mgr._published_states[-1], "RUNNING")
+        self.assertEqual(
+            mgr._mission_updates,
+            [("run_alpha", "RUNNING", "manual_resume_confirmed:CONNECT:block_8")],
+        )
+        self.assertIn(
+            "MANUAL_RESUME_CONFIRMED:exec_state=CONNECT:block_8",
+            mgr._emit_events,
+        )
+
+    def test_stale_paused_recovery_does_not_steal_manual_resume_phase(self):
+        mgr = self._manager()
+        mgr._phase = "RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._public_state = "RESUMING"
+        mgr._executor_state = "PAUSED_RECOVERY"
+        self._set_executor_progress(mgr, "PAUSED_RECOVERY")
+
+        consumed = mgr._consume_correlated_paused_recovery()
+
+        self.assertFalse(consumed)
+        self.assertEqual(mgr._phase, "RESUMING")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._mission_updates, [])
+        self.assertEqual(mgr._published_states, [])
+
+    def test_continue_is_rejected_while_resume_ack_is_pending(self):
+        mgr = self._manager()
+        mgr._mission_state = "PAUSED"
+        mgr._phase = "RESUMING"
+        mgr._public_state = "RESUMING"
+
+        allowed, message = mgr._ensure_exe_task_allowed(AppExeTaskRequest.CONTINUE)
+
+        self.assertFalse(allowed)
+        self.assertIn("continue already pending", message)
 
     @mock.patch("coverage_task_manager.task_manager.rospy.loginfo")
     def test_arm_auto_relocalizing_sets_phase_and_emits(self, _loginfo):
@@ -1353,6 +1417,123 @@ class TaskCommandContractTest(unittest.TestCase):
         allowed, reason = mgr._manual_undock_allowed()
         self.assertFalse(allowed)
         self.assertEqual(reason, "actuator_debug_active")
+
+    def test_operator_cancel_manual_return_without_task_closes_to_idle(self):
+        mgr = self._manager()
+        mgr._active_run_id = ""
+        mgr._active_job_id = "post_run_repeat_template"
+        mgr._phase = "MANUAL_SUPPLY"
+        mgr._mission_state = "IDLE"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        def cancel_supply():
+            mgr._dock_supply_state = "CANCELED"
+            return True, "cancel requested"
+
+        mgr._dock_supply_cancel = mock.Mock(side_effect=cancel_supply)
+        mgr._wait = lambda _timeout, cond, sleep_s=0.05: bool(cond())
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual((mgr._mission_state, mgr._phase), ("IDLE", "IDLE"))
+        self.assertEqual(mgr._published_states[-1], "IDLE")
+        self.assertEqual(mgr._reset_job_runner_calls, [True])
+        self.assertEqual(mgr._health_clear_calls, [True])
+        mgr.nav.cancel_all.assert_called_once_with()
+        mgr._dock_stage2_nav.cancel_all.assert_called_once_with()
+        mgr._dock_supply_cancel.assert_called_once_with()
+        self.assertEqual(mgr._charge_faults, [])
+        self.assertIn("RETURN_HOME_CANCELED:idle", mgr._emit_events)
+
+    def test_operator_cancel_auto_return_preserves_paused_task_checkpoint(self):
+        mgr = self._manager()
+        mgr._active_run_id = "run_alpha"
+        mgr._active_job_id = "job_alpha"
+        mgr._phase = "AUTO_SUPPLY"
+        mgr._mission_state = "PAUSED"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        def cancel_supply():
+            mgr._dock_supply_state = "CANCELED"
+            return True, "cancel requested"
+
+        mgr._dock_supply_cancel = mock.Mock(side_effect=cancel_supply)
+        mgr._wait = lambda _timeout, cond, sleep_s=0.05: bool(cond())
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual((mgr._mission_state, mgr._phase), ("PAUSED", "IDLE"))
+        self.assertEqual(mgr._active_run_id, "run_alpha")
+        self.assertEqual(mgr._active_job_id, "job_alpha")
+        self.assertEqual(mgr._exec_cmds, [])
+        self.assertIn(
+            ("run_alpha", "PAUSED", "operator_cancel_return_home"),
+            mgr._mission_updates,
+        )
+        self.assertEqual(mgr._published_states[-1], "PAUSED")
+        self.assertEqual(mgr._health_clear_calls, [True])
+        self.assertEqual(mgr._charge_faults, [])
+        self.assertIn("RETURN_HOME_CANCELED:task_preserved", mgr._emit_events)
+
+    def test_operator_cancel_failure_is_reported_as_fault(self):
+        mgr = self._manager()
+        mgr._active_run_id = "run_alpha"
+        mgr._phase = "AUTO_SUPPLY"
+        mgr._mission_state = "PAUSED"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr._dock_supply_cancel = mock.Mock(return_value=(False, "rpc rejected"))
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertFalse(ok)
+        self.assertIn("rpc rejected", message)
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_RETURN_HOME_CANCEL", "dock_supply_cancel_failed:rpc rejected", False)],
+        )
+
+    def test_operator_cancel_safety_close_timeout_is_reported_as_fault(self):
+        mgr = self._manager()
+        mgr._active_run_id = ""
+        mgr._phase = "MANUAL_SUPPLY"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr._return_home_cancel_timeout_s = 2.0
+        mgr._dock_supply_cancel = mock.Mock(return_value=(True, "cancel requested"))
+        mgr._wait = mock.Mock(return_value=False)
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertFalse(ok)
+        self.assertIn("timeout", message)
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_RETURN_HOME_CANCEL_TIMEOUT", "dock_supply_cancel_timeout:2.0s", True)],
+        )
+
+    def test_canceled_supply_is_not_faulted_during_operator_cancel_window(self):
+        mgr = self._manager()
+        mgr._phase = "CANCELING_RETURN_HOME"
+        mgr._dock_supply_state = "CANCELED"
+        mgr._is_dock_supply_owner_phase = lambda: TaskManager._is_dock_supply_owner_phase(mgr)
+
+        handled = mgr._handle_dock_supply_phase()
+
+        self.assertFalse(handled)
+        self.assertEqual(mgr._charge_faults, [])
 
     def test_dock_dispatch_rechecks_calibration_immediately_before_send_goal(self):
         mgr = self._enable_calibration_gate(self._manager())

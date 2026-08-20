@@ -13,21 +13,15 @@ namespace mppi::critics
     nh_.param(param_prefix + "cost_weight", weight_, 10.0f);
 
     nh_.param(param_prefix + "max_path_occupancy_ratio", max_path_occupancy_ratio_, 0.07f);
-    nh_.param(param_prefix + "offset_from_furthest", offset_from_furthest_, 20);
+    nh_.param(param_prefix + "offset_from_furthest", offset_from_furthest_, 6);
     nh_.param(param_prefix + "trajectory_point_step", trajectory_point_step_, 4);
     nh_.param(param_prefix + "threshold_to_consider", threshold_to_consider_, 0.5f);
     nh_.param(param_prefix + "use_path_orientations", use_path_orientations_, false);
-    // This is deliberately controller-scoped rather than critic-scoped so
-    // PathAlign and PathFollow always share one path-blockage definition.
-    nh_.param(
-      "path_occupancy_uses_footprint",
-      path_occupancy_uses_footprint_, false);
 
     ROS_INFO(
         "ReferenceTrajectoryCritic instantiated with %d power and %f weight; "
-        "path occupancy uses %s",
-        power_, weight_, path_occupancy_uses_footprint_ ?
-        "filled footprint" : "official center point");
+        "PathAlign and PathFollow share official center-point path validity",
+        power_, weight_);
   }
 
   void PathAlignCritic::score(CriticData &data)
@@ -42,28 +36,21 @@ namespace mppi::critics
     utils::setPathFurthestPointIfNotSet(data);
     // 仅处理至最远点为止，路径处理器返回的最近路径点索引始终为 0
     const size_t path_segments_count = *data.furthest_reached_path_point;
-    float path_segments_flt = static_cast<float>(path_segments_count);
     // 路径长度不足:如果最远可达路径点数量太少（小于offset_from_furthest_），则跳过评分
     if (path_segments_count < offset_from_furthest_)
     {
       return;
     }
 
-    // 当动态障碍物阻塞局部路径时跳过评分
-    utils::setPathCostsIfNotSet(
-      data, costmap_ros_, path_occupancy_uses_footprint_);
+    // Keep the official MPPI division of responsibility: PathAlign and
+    // PathFollow share center-point path validity. Candidate-trajectory body
+    // collision checking remains the responsibility of CostCritic.
+    utils::setPathCostsIfNotSet(data, costmap_ros_);
     std::vector<bool> &path_pts_valid = *data.path_pts_valid;
-    float invalid_ctr = 0.0f;
-    for (size_t i = 0; i < path_segments_count; i++)
+    if (utils::pathInvalidRatioExceeded(
+        path_pts_valid, path_segments_count, max_path_occupancy_ratio_))
     {
-      if (!path_pts_valid[i])
-      {
-        invalid_ctr += 1.0f;
-      }
-      if (invalid_ctr / path_segments_flt > max_path_occupancy_ratio_ && invalid_ctr > 2.0f)
-      {
-        return;
-      }
+      return;
     }
 
     const size_t batch_size = data.trajectories.x.rows();

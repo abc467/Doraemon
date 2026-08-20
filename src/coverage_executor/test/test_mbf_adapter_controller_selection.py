@@ -31,14 +31,14 @@ class MBFAdapterControllerSelectionTest(unittest.TestCase):
         adapter = mbf_adapter.MBFAdapter.__new__(mbf_adapter.MBFAdapter)
         adapter.planner = "SmacLatticePlanner"
         adapter.controller = "MPPI_Standard_Controller"
-        adapter.connect_controller = "MPPI_State_Lattice_Controller"
+        adapter.connect_controller = "MPPI_Standard_Controller"
         adapter.recovery = ""
         adapter._mb = _FakeClient()
         adapter._last_connect_result = None
         return adapter
 
     @mock.patch.object(mbf_adapter, "MoveBaseGoal", _FakeMoveBaseGoal)
-    def test_point_to_point_defaults_to_state_lattice_controller(self):
+    def test_point_to_point_uses_configured_standard_controller(self):
         adapter = self._adapter()
         adapter.send_connect(SimpleNamespace())
         self.assertEqual(
@@ -47,7 +47,7 @@ class MBFAdapterControllerSelectionTest(unittest.TestCase):
         )
         self.assertEqual(
             adapter._mb.goals[-1].controller,
-            "MPPI_State_Lattice_Controller",
+            "MPPI_Standard_Controller",
         )
 
     @mock.patch.object(mbf_adapter, "MoveBaseGoal", _FakeMoveBaseGoal)

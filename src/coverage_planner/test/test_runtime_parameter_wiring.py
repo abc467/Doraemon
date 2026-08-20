@@ -314,9 +314,10 @@ class RuntimeParameterWiringTest(unittest.TestCase):
         )
         self.assertAlmostEqual(
             float(defaults["default_no_go_short_edge_normal_buffer_m"]),
-            0.40,
+            0.115,
             places=9,
         )
+        self.assertIs(planner["validate_effective_region_path"], True)
         self.assertAlmostEqual(float(costmap["footprint_padding"]), 0.0, places=9)
         self.assertAlmostEqual(float(defaults["robot"]["cov_width"]), 0.59, places=9)
         self.assertAlmostEqual(

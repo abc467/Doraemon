@@ -112,6 +112,36 @@ class PlannerKeepoutPathSafetyTest(unittest.TestCase):
         ]
         self.assertFalse(offenders[:8], offenders[:8])
 
+    def test_effective_region_guard_cannot_be_disabled_by_legacy_parameter(self):
+        outer = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
+        effective = [{"outer": outer, "holes": []}]
+        result = plan_coverage(
+            frame_id="map",
+            outer=outer,
+            holes=[],
+            robot_spec=RobotSpec(0.59, 0.65, 0.32, 0.30),
+            params=PlannerParams(
+                path_step_m=0.05,
+                turn_step_m=0.05,
+                wall_margin_m=0.38,
+                turn_margin_m=1.20,
+                edge_corner_radius_m=0.40,
+                mute_stderr=True,
+                # Old persisted plans may still carry false.  Supplying
+                # effective_regions must nevertheless keep the guard active.
+                validate_effective_region_path=False,
+            ),
+            effective_regions=effective,
+        )
+
+        self.assertTrue(result.ok, result.error_message)
+        all_points = [
+            point
+            for block in (result.blocks or [])
+            for point in (block.path_xy or [])
+        ]
+        self.assertFalse(path_points_outside_effective_regions(all_points, effective))
+
 
 if __name__ == "__main__":
     unittest.main()

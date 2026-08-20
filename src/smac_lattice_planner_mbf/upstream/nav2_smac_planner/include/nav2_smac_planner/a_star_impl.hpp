@@ -153,6 +153,19 @@ void AStarAlgorithm<NodeT>::clearAdditionalHeuristic()
 }
 
 template<typename NodeT>
+void AStarAlgorithm<NodeT>::setTransitionValidator(
+  TransitionValidator validator)
+{
+  _transition_validator = std::move(validator);
+}
+
+template<typename NodeT>
+void AStarAlgorithm<NodeT>::clearTransitionValidator()
+{
+  setTransitionValidator(TransitionValidator());
+}
+
+template<typename NodeT>
 void AStarAlgorithm<NodeT>::setGoalTransitionValidator(
   GoalTransitionValidator validator)
 {
@@ -554,6 +567,15 @@ SearchResult AStarAlgorithm<NodeT>::createPathDetailed(
       neighbor_iterator != neighbors.end(); ++neighbor_iterator)
     {
       neighbor = *neighbor_iterator;
+
+      // Apply an optional scoped motion-set restriction before the node is
+      // queued or visited. A rejected edge must not claim the destination
+      // state, because another admissible primitive may still reach it.
+      if (_transition_validator &&
+        !_transition_validator(current_node->pose, neighbor->pose))
+      {
+        continue;
+      }
 
       // A goal state can have several geometrically different incoming
       // primitives. Apply an optional policy before queueing/visiting it so a

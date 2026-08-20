@@ -24,7 +24,8 @@ default_no_go_buffer_m: 0.05
 # 0.115 + 0.38 - 0.65 / 2 = 0.17 m。
 default_no_go_long_edge_normal_buffer_m: 0.115
 # 矩形禁行区短边的法向外扩距离，不是沿短边方向延长，单位米。
-default_no_go_short_edge_normal_buffer_m: 0.40
+# 与长边法向保持一致；叠加 wall_margin 后，0.65 m 宽车体的直线净距为 0.17 m。
+default_no_go_short_edge_normal_buffer_m: 0.115
 robot:
   # Fields2Cover 使用的覆盖条带宽度；由 0.54 m 增加 0.05 m，当前相邻内部
   # 清扫直线中心间距为 0.59 m；它不是路径点间距。
@@ -51,8 +52,9 @@ planner:
   line_w: 0.05
   # 是否抑制 Fields2Cover 原生调用输出的 stderr 噪声。
   mute_stderr: true
-  # 是否要求生成后的路径中心点全部留在有效清扫区域内；新底盘调试阶段先关闭。
-  validate_effective_region_path: false
+  # 生成后的路径中心点必须全部留在有效清扫区域内。核心规划器在收到
+  # effective_regions 时也会强制执行该复核，不能通过参数关闭。
+  validate_effective_region_path: true
   # 生成覆盖路径前，路径中心相对墙体 / 边界的收缩安全距离，单位米。
   # 狭窄区域如果无法满足该安全边距，应规划失败，而不是自动降低安全距离。
   wall_margin_m: 0.38

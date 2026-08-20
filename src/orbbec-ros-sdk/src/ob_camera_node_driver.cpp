@@ -19,11 +19,11 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
-#include <semaphore.h>
+#include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/shm.h>
 #include <ros/package.h>
 #include <regex>
-#include <sys/mman.h>
 #include <iostream>
 #include <string>
 
@@ -81,6 +81,10 @@ OBCameraNodeDriver::~OBCameraNodeDriver() {
   if (query_thread_ && query_thread_->joinable()) {
     query_thread_->join();
   }
+  if (orb_device_lock_shm_fd_ >= 0) {
+    close(orb_device_lock_shm_fd_);
+    orb_device_lock_shm_fd_ = -1;
+  }
 }
 
 void OBCameraNodeDriver::init() {
@@ -89,32 +93,15 @@ void OBCameraNodeDriver::init() {
   auto ob_log_level = obLogSeverityFromString(log_level);
   ctx_->setLoggerToConsole(ob_log_level);
 
-  orb_device_lock_shm_fd_ = shm_open(ORB_DEFAULT_LOCK_NAME.c_str(), O_CREAT | O_RDWR, 0666);
+  // The upstream process-shared pthread mutex is initialized independently by
+  // every camera process. That has an initialization race and a dead owner can
+  // permanently block all remaining cameras. An advisory lock on the shared
+  // memory file is kernel-owned and is always released when a wedged camera is
+  // terminated by the runtime supervisor.
+  orb_device_lock_shm_fd_ =
+      shm_open(ORB_DEFAULT_LOCK_NAME.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0660);
   if (orb_device_lock_shm_fd_ < 0) {
-    ROS_ERROR_STREAM("Failed to open shared memory " << ORB_DEFAULT_LOCK_NAME);
-    return;
-  }
-  int ret = ftruncate(orb_device_lock_shm_fd_, sizeof(pthread_mutex_t));
-  if (ret < 0) {
-    ROS_ERROR_STREAM("Failed to truncate shared memory " << ORB_DEFAULT_LOCK_NAME);
-    close(orb_device_lock_shm_fd_);
-    return;
-  }
-  orb_device_lock_shm_addr_ =
-      static_cast<uint8_t *>(mmap(NULL, sizeof(pthread_mutex_t), PROT_READ | PROT_WRITE, MAP_SHARED,
-                                  orb_device_lock_shm_fd_, 0));
-  if (orb_device_lock_shm_addr_ == MAP_FAILED) {
-    ROS_ERROR_STREAM("Failed to map shared memory " << ORB_DEFAULT_LOCK_NAME);
-    close(orb_device_lock_shm_fd_);
-    return;
-  }
-  pthread_mutexattr_init(&orb_device_lock_attr_);
-  pthread_mutexattr_setpshared(&orb_device_lock_attr_, PTHREAD_PROCESS_SHARED);
-  orb_device_lock_ = (pthread_mutex_t *)orb_device_lock_shm_addr_;
-  if (pthread_mutex_init(orb_device_lock_, &orb_device_lock_attr_) != 0) {
-    ROS_ERROR_STREAM("Failed to initialize shared mutex " << ORB_DEFAULT_LOCK_NAME);
-    munmap(orb_device_lock_shm_addr_, sizeof(pthread_mutex_t));
-    close(orb_device_lock_shm_fd_);
+    ROS_ERROR_STREAM("Failed to open inter-process device lock " << ORB_DEFAULT_LOCK_NAME);
     return;
   }
 
@@ -326,7 +313,7 @@ void OBCameraNodeDriver::deviceConnectCallback(const std::shared_ptr<ob::DeviceL
     if (has_orb_openni_device) {
       ROS_INFO_STREAM("deviceConnectCallback : Before process lock lock");
       for (; try_lock_count < max_try_lock_count; try_lock_count++) {
-        if (pthread_mutex_trylock(orb_device_lock_) == 0) {
+        if (flock(orb_device_lock_shm_fd_, LOCK_EX | LOCK_NB) == 0) {
           ROS_INFO_STREAM("deviceConnectCallback : acquire orb_device_lock_ lock");
           is_orb_device_lock_locked = true;
           break;
@@ -348,7 +335,7 @@ void OBCameraNodeDriver::deviceConnectCallback(const std::shared_ptr<ob::DeviceL
 
     std::shared_ptr<int> lock_guard(nullptr, [&](int *) {
       if (is_orb_device_lock_locked) {
-        pthread_mutex_unlock(orb_device_lock_);
+        flock(orb_device_lock_shm_fd_, LOCK_UN);
         ROS_INFO_STREAM("deviceConnectCallback : release orb_device_lock_ unlock");
       }
     });
@@ -370,7 +357,7 @@ void OBCameraNodeDriver::deviceConnectCallback(const std::shared_ptr<ob::DeviceL
     auto pid = device->getDeviceInfo()->pid();
     ROS_INFO_STREAM("deviceConnectCallback : current device pid: " << pid);
     if ((!isOpenNIDevice(pid)) && (is_orb_device_lock_locked)) {
-      pthread_mutex_unlock(orb_device_lock_);
+      flock(orb_device_lock_shm_fd_, LOCK_UN);
       is_orb_device_lock_locked = false;
       ROS_INFO_STREAM(
           "deviceConnectCallback : not openni device, direct release orb_device_lock_ unlock");

@@ -90,6 +90,8 @@
   <arg name="readiness_timeout_s" default="3.0"/>
   <arg name="app_exe_task_service_name" default="/coverage_task_manager/app/exe_task_server"/>
   <arg name="app_exe_task_contract_param_ns" default="/coverage_task_manager/contracts/app/exe_task_server"/>
+  <arg name="app_cancel_return_home_service_name" default="/coverage_task_manager/app/cancel_return_home"/>
+  <arg name="return_home_cancel_timeout_s" default="15.0"/>
   <arg name="app_clean_task_service_name" default="/database_server/app/clean_task_service"/>
   <arg name="app_clean_task_contract_param_ns" default="/database_server/contracts/app/clean_task_service"/>
   <arg name="app_clean_schedule_service_name" default="/database_server/app/clean_schedule_service"/>
@@ -236,6 +238,8 @@
     <arg name="readiness_timeout_s" value="$(arg readiness_timeout_s)"/>
     <arg name="app_exe_task_service_name" value="$(arg app_exe_task_service_name)"/>
     <arg name="app_exe_task_contract_param_ns" value="$(arg app_exe_task_contract_param_ns)"/>
+    <arg name="app_cancel_return_home_service_name" value="$(arg app_cancel_return_home_service_name)"/>
+    <arg name="return_home_cancel_timeout_s" value="$(arg return_home_cancel_timeout_s)"/>
     <arg name="app_clean_task_service_name" value="$(arg app_clean_task_service_name)"/>
     <arg name="app_clean_task_contract_param_ns" value="$(arg app_clean_task_contract_param_ns)"/>
     <arg name="app_clean_schedule_service_name" value="$(arg app_clean_schedule_service_name)"/>

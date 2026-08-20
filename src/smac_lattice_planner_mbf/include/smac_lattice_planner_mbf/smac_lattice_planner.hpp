@@ -95,6 +95,7 @@ private:
   int start_heading_seed_span_{1};
   bool theta_corridor_search_enabled_{false};
   bool theta_prefix_lattice_suffix_enabled_{true};
+  bool theta_full_footprint_validation_enabled_{true};
   bool state_lattice_smoothing_enabled_{false};
   StateLatticeSmootherParams state_lattice_smoother_params_;
   int theta_max_allowed_cost_{26};
@@ -104,6 +105,9 @@ private:
   double theta_reference_spacing_{0.05};
   bool theta_reference_smoothing_enabled_{true};
   double theta_suffix_candidate_max_planning_time_{60.0};
+  double theta_prefix_candidate_max_planning_time_{20.0};
+  double theta_prefix_join_max_heading_error_{0.20};
+  double theta_prefix_join_max_curvature_jump_{2.5};
   int theta_unsafe_segment_lookback_points_{30};
   double coarse_route_max_planning_time_{5.0};
   double corridor_level_max_planning_time_{10.0};

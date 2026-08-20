@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -516,12 +517,12 @@ struct Pose2D
 /**
  * @brief Test one reference-path pose against the local costmap.
  *
- * The default center-point mode intentionally preserves upstream Nav2 MPPI
- * behavior. The optional filled-footprint mode is for large non-circular
- * robots: it rejects a path pose when the robot body at that SE(2) pose covers
- * a real lethal obstacle, unknown space, or the map boundary. Soft inflated
- * costs inside the polygon remain valid to avoid inflating the robot twice;
- * the reference point itself retains the upstream INSCRIBED rejection.
+ * Center-point mode preserves upstream Nav2 MPPI behavior. Filled-footprint
+ * mode extends the same validity concept to a large non-circular robot: it
+ * rejects a path pose when the body at that SE(2) pose covers a real lethal
+ * obstacle, unknown space, or the map boundary. Soft inflated costs inside
+ * the polygon remain valid to avoid inflating the robot twice; the reference
+ * point itself retains the upstream INSCRIBED rejection.
  */
 inline bool isPathPoseValid(
   const costmap_2d::Costmap2D & costmap,
@@ -580,26 +581,74 @@ inline bool isPathPoseValid(
 }
 
 /**
- * @brief evaluate path costs 评估参考路径点是否有效
- * @param data Data to use
+ * @brief Evaluate every reference-path pose without mutating CriticData.
  */
-inline void findPathCosts(
-  CriticData & data,
+inline std::vector<bool> evaluatePathValidity(
+  const CriticData & data,
   std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros,
-  bool use_filled_footprint = false)
+  bool use_filled_footprint)
 {
+  const size_t path_pose_count = data.path.x.size();
+  if (path_pose_count < 2u) {
+    return {};
+  }
+
   auto * costmap = costmap_ros->getCostmap();
-  const size_t path_segments_count = data.path.x.size() - 1;
-  data.path_pts_valid = std::vector<bool>(path_segments_count, false);
+  std::vector<bool> validity(path_pose_count, false);
   const bool tracking_unknown = costmap_ros->getLayeredCostmap()->isTrackingUnknown();
   const auto footprint = use_filled_footprint ?
     costmap_ros->getRobotFootprint() : std::vector<geometry_msgs::Point>();
   base_local_planner::FootprintHelper footprint_helper;
-  for (unsigned int idx = 0; idx < path_segments_count; idx++) {
-    (*data.path_pts_valid)[idx] = isPathPoseValid(
+  for (size_t idx = 0u; idx < path_pose_count; ++idx) {
+    validity[idx] = isPathPoseValid(
       *costmap, footprint, footprint_helper,
       data.path.x(idx), data.path.y(idx), data.path.yaws(idx),
       use_filled_footprint, tracking_unknown);
+  }
+  return validity;
+}
+
+/**
+ * @brief Populate the single path-validity cache shared by PathAlign and
+ * PathFollow.
+ *
+ * Match upstream Nav2 MPPI: PathAlign and PathFollow share one center-point
+ * validity cache. Full-body candidate collision checking belongs to CostCritic;
+ * applying it here as well makes reference-path availability depend on robot
+ * footprint overlap with soft costs or the rolling-window boundary.
+ */
+inline void findPathCosts(
+  CriticData & data,
+  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros)
+{
+  if (data.path.x.size() < 2u) {
+    data.path_pts_valid = std::vector<bool>();
+    return;
+  }
+
+  const size_t path_segments_count = data.path.x.size() - 1u;
+  auto * costmap = costmap_ros->getCostmap();
+  const bool tracking_unknown = costmap_ros->getLayeredCostmap()->isTrackingUnknown();
+  data.path_pts_valid = std::vector<bool>(path_segments_count, false);
+
+  unsigned int map_x = 0u;
+  unsigned int map_y = 0u;
+  for (size_t index = 0u; index < path_segments_count; ++index) {
+    if (!costmap->worldToMap(data.path.x(index), data.path.y(index), map_x, map_y)) {
+      continue;
+    }
+
+    const unsigned char cost = costmap->getCost(map_x, map_y);
+    if (cost == costmap_2d::LETHAL_OBSTACLE ||
+      cost == costmap_2d::INSCRIBED_INFLATED_OBSTACLE)
+    {
+      continue;
+    }
+    if (cost == costmap_2d::NO_INFORMATION) {
+      (*data.path_pts_valid)[index] = tracking_unknown;
+      continue;
+    }
+    (*data.path_pts_valid)[index] = true;
   }
 }
 
@@ -609,12 +658,66 @@ inline void findPathCosts(
  */
 inline void setPathCostsIfNotSet(
   CriticData & data,
-  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros,
-  bool use_filled_footprint = false)
+  std::shared_ptr<costmap_2d::Costmap2DROS> costmap_ros)
 {
   if (!data.path_pts_valid) {
-    findPathCosts(data, costmap_ros, use_filled_footprint);
+    findPathCosts(data, costmap_ros);
   }
+}
+
+/**
+ * @brief Select the PathFollow target with upstream forward-search semantics.
+ *
+ * Invalid reference points are skipped when possible ("drive past it, not
+ * through it"), but PathFollow never disappears merely because the remaining
+ * local reference points are invalid. It retains the final available target;
+ * CostCritic remains responsible for keeping candidate trajectories collision
+ * free. This preserves forward progress without weakening collision checking.
+ */
+inline size_t pathFollowTargetIndex(
+  const std::vector<bool> & validity,
+  size_t start_index,
+  size_t path_last_index)
+{
+  size_t target_index = std::min(start_index, path_last_index);
+  while (target_index + 1u < path_last_index) {
+    if (target_index < validity.size() && validity[target_index]) {
+      break;
+    }
+    ++target_index;
+  }
+  return target_index;
+}
+
+/**
+ * @brief Return true when invalid path poses exceed the PathAlign gate.
+ *
+ * Preserve upstream's noise guard: at least three poses must be invalid in
+ * addition to exceeding the configured ratio.
+ */
+inline bool pathInvalidRatioExceeded(
+  const std::vector<bool> & validity,
+  size_t path_segments_count,
+  float max_invalid_ratio)
+{
+  path_segments_count = std::min(path_segments_count, validity.size());
+  if (path_segments_count == 0u) {
+    return false;
+  }
+
+  size_t invalid_count = 0u;
+  for (size_t index = 0u; index < path_segments_count; ++index) {
+    if (!validity[index]) {
+      ++invalid_count;
+    }
+    if (invalid_count > 2u &&
+      static_cast<float>(invalid_count) /
+      static_cast<float>(path_segments_count) > max_invalid_ratio)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**

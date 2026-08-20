@@ -28,6 +28,7 @@ class LoadedPlan:
     exec_order: List[int]
     blocks: List[LoadedBlock]
     total_length_m: float
+    coverage_width_m: float = 0.6
     map_id: str = ""
     map_md5: str = ""
     planner_version: str = ""
@@ -121,6 +122,11 @@ class PlanLoader:
         exec_order = [int(x) for x in exec_order]
         frame_id = meta.get("frame_id") or "map"
         plan_profile_name_loaded = meta.get("plan_profile_name") or "cover_standard"
+        robot_spec = meta.get("robot_json") if isinstance(meta.get("robot_json"), dict) else {}
+        try:
+            coverage_width_m = max(0.01, float(robot_spec.get("cov_width", 0.6) or 0.6))
+        except (TypeError, ValueError):
+            coverage_width_m = 0.6
 
         blocks: List[LoadedBlock] = []
         block_map: Dict[int, LoadedBlock] = {}
@@ -162,6 +168,7 @@ class PlanLoader:
             exec_order=exec_order,
             blocks=blocks,
             total_length_m=float(meta["total_length_m"]),
+            coverage_width_m=float(coverage_width_m),
             map_id=str(meta.get("map_id") or ""),
             map_md5=str(meta.get("map_md5") or ""),
             planner_version=str(meta.get("planner_version") or ""),

@@ -110,7 +110,7 @@ class RectZonePlannerNode:
             rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.115)
         )
         self.default_no_go_short_edge_normal_buffer_m = float(
-            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.115)
         )
         self.site_confirm_service_name = str(
             rospy.get_param("~site_confirm_service_name", "~site/confirm_rect_plan")

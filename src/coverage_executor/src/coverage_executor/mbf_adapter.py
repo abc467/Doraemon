@@ -79,8 +79,8 @@ class MBFAdapter:
         if hasattr(g, "planner") and self.planner:
             g.planner = self.planner
         # Every point-to-point action, including charge approach and undock,
-        # defaults to the dedicated State Lattice controller.  The coverage
-        # controller is only a fallback for legacy launch files.
+        # uses the explicitly configured connect controller. The coverage
+        # controller remains the fallback for legacy launch files.
         selected_controller = (
             (self.connect_controller or self.controller)
             if controller is None

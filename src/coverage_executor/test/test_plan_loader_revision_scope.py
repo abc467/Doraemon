@@ -34,6 +34,7 @@ class _FakeStore:
             "constraint_version": "constraint_v1",
             "blocks": 1,
             "total_length_m": 3.5,
+            "robot_json": {"cov_width": 0.59},
             "map_id": "map_demo",
             "map_md5": "md5_demo",
             "planner_version": "planner_v1",
@@ -107,6 +108,7 @@ class PlanLoaderRevisionScopeTest(unittest.TestCase):
 
         self.assertEqual(plan.plan_id, "plan_001")
         self.assertEqual(plan.map_revision_id, "rev_demo_01")
+        self.assertAlmostEqual(plan.coverage_width_m, 0.59)
         self.assertEqual(
             self.loader.store.latest_calls[-1],
             ("zone_a", "cover_standard", None, "demo_map", "rev_demo_01"),

@@ -259,6 +259,19 @@ TEST(PathOccupancy, OfficialCenterModeDoesNotInspectFootprintInterior)
     false, false));
 }
 
+TEST(PathOccupancy, EmptyPathProducesEmptyValidityWithoutUnderflow)
+{
+  mppi::models::State state;
+  mppi::models::Trajectories trajectories;
+  mppi::models::Path path;
+  geometry_msgs::Pose goal;
+  Eigen::ArrayXf costs;
+  float model_dt = 0.1f;
+  mppi::CriticData data{state, trajectories, path, goal, costs, model_dt};
+
+  EXPECT_TRUE(mppi::utils::evaluatePathValidity(data, nullptr, false).empty());
+}
+
 TEST(PathOccupancy, FilledFootprintRejectsOffCenterLethalObstacle)
 {
   costmap_2d::Costmap2D costmap(100, 100, 0.05, 0.0, 0.0, 0u);
@@ -300,6 +313,61 @@ TEST(PathOccupancy, FilledFootprintRejectsUnknownAndMapBoundary)
   EXPECT_FALSE(mppi::utils::isPathPoseValid(
     costmap, squareFootprint(0.20), 1.92f, 1.0f, 0.0f,
     true, true));
+
+  // The reference center is inside free space, so the official shared
+  // PathAlign/PathFollow cache keeps it valid even though the rectangular
+  // footprint extends beyond this synthetic rolling-window boundary.
+  EXPECT_TRUE(mppi::utils::isPathPoseValid(
+    costmap, squareFootprint(0.20), 1.92f, 1.0f, 0.0f,
+    false, true));
+}
+
+TEST(PathOccupancy, SharedValidityCoordinatesAlignAndFollow)
+{
+  std::vector<bool> shared_validity(100u, true);
+  shared_validity[10] = false;
+  shared_validity[11] = false;
+  shared_validity[12] = false;
+  shared_validity[13] = false;
+
+  EXPECT_TRUE(mppi::utils::pathInvalidRatioExceeded(
+    shared_validity, shared_validity.size(), 0.03f));
+
+  EXPECT_EQ(
+    mppi::utils::pathFollowTargetIndex(
+      shared_validity, 10u, shared_validity.size()),
+    14u);
+}
+
+TEST(PathOccupancy, PathFollowRetainsForwardPullWhenNoValidTargetRemains)
+{
+  const std::vector<bool> shared_validity{true, true, false, false};
+  EXPECT_EQ(
+    mppi::utils::pathFollowTargetIndex(
+      shared_validity, 2u, shared_validity.size()),
+    3u);
+}
+
+TEST(PathOccupancy, PathFollowClampsRequestedTargetToPathEnd)
+{
+  const std::vector<bool> shared_validity{true, true, true, true};
+  EXPECT_EQ(
+    mppi::utils::pathFollowTargetIndex(
+      shared_validity, 20u, shared_validity.size()),
+    shared_validity.size());
+}
+
+TEST(PathOccupancy, PathAlignGateKeepsUpstreamThreePoseNoiseGuard)
+{
+  std::vector<bool> validity(20u, true);
+  validity[0] = false;
+  validity[1] = false;
+  EXPECT_FALSE(mppi::utils::pathInvalidRatioExceeded(
+    validity, validity.size(), 0.03f));
+
+  validity[2] = false;
+  EXPECT_TRUE(mppi::utils::pathInvalidRatioExceeded(
+    validity, validity.size(), 0.03f));
 }
 
 TEST(OfficialPathWindow, KeepsOnlyOneTerminalPredecessor)

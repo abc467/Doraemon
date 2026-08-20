@@ -120,7 +120,11 @@ TEST(StateLatticeSmoother, OfficialDefaultsImproveZigzagAtomically)
   FixtureData fixture;
   StateLatticeSmootherParams params;
   params.tolerance = 1e-8;
-  StateLatticeSmoother smoother(params, 0.4);
+  params.max_curvature_regression_ratio = 10.0;
+  // This synthetic high-frequency zigzag isolates Nav2's numerical smoothing
+  // behavior; use a permissive model radius here. Production-radius behavior
+  // is covered separately by the F-R-F and hard-radius contract tests.
+  StateLatticeSmoother smoother(params, 0.1);
   const PosePath raw = makePath(true);
   const auto result = smoother.smooth(
     raw, fixture.costmap, fixture.checker, false,
@@ -171,6 +175,28 @@ TEST(StateLatticeSmoother, StraightPathKeepsRawWhenThereIsNoQualityGain)
     EXPECT_DOUBLE_EQ(result.path[index].pose.position.x, raw[index].pose.position.x);
     EXPECT_DOUBLE_EQ(result.path[index].pose.position.y, raw[index].pose.position.y);
   }
+}
+
+TEST(StateLatticeSmoother, RejectsCandidateBelowConfiguredTurningRadiusAtomically)
+{
+  FixtureData fixture;
+  StateLatticeSmootherParams params;
+  params.tolerance = 1e-8;
+  params.minimum_curvature_improvement = 0.0;
+  // The same zigzag has an admissible smoothing result for the production
+  // 0.40 m model, but cannot satisfy a deliberately large 10 m radius.
+  StateLatticeSmoother smoother(params, 10.0);
+  const PosePath raw = makePath(true);
+  const auto result = smoother.smooth(
+    raw, fixture.costmap, fixture.checker, false,
+    StateLatticeSmoother::Clock::now() + std::chrono::seconds(2));
+
+  EXPECT_FALSE(result.accepted);
+  EXPECT_NE(result.reason.find("minimum turning radius"), std::string::npos) << result.reason;
+  EXPECT_FALSE(result.rejected_candidate_path.empty());
+  ASSERT_EQ(result.path.size(), raw.size());
+  EXPECT_DOUBLE_EQ(result.path[20].pose.position.x, raw[20].pose.position.x);
+  EXPECT_DOUBLE_EQ(result.path[20].pose.position.y, raw[20].pose.position.y);
 }
 
 TEST(StateLatticeSmoother, MaterialBackToBackTurnsCountAsOneDirectionChange)
@@ -255,7 +281,8 @@ TEST(StateLatticeSmoother, CandidateCollisionIsAtomicAndKeepsRawPath)
   free_fixture.checker.setFootprint({}, true, 0.0);
   StateLatticeSmootherParams params;
   params.tolerance = 1e-8;
-  StateLatticeSmoother smoother(params, 0.4);
+  params.max_curvature_regression_ratio = 10.0;
+  StateLatticeSmoother smoother(params, 0.1);
   const PosePath raw = makePath(true);
   const auto free_result = smoother.smooth(
     raw, free_fixture.costmap, free_fixture.checker, false,

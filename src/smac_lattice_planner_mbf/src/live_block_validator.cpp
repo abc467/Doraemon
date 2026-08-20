@@ -577,7 +577,7 @@ int main(int argc, char ** argv)
   std::string plan_id;
   std::string costmap_topic = "/move_base_flex/global_costmap/costmap";
   std::string lattice_filepath = ros::package::getPath("smac_lattice_planner_mbf") +
-    "/config/diff_5cm_0p40m_32bins.json";
+    "/config/diff_5cm_0p40m_32bins_forward.json";
   double max_planning_time = 180.0;
   bool theta_corridor_search_enabled = false;
   double coarse_route_max_planning_time = 5.0;
@@ -586,6 +586,7 @@ int main(int argc, char ** argv)
   double final_validation_reserve_time = 5.0;
   double corridor_route_progress_weight = 1.0;
   bool theta_prefix_lattice_suffix_enabled = true;
+  bool theta_full_footprint_validation_enabled = false;
   bool state_lattice_smoothing_enabled = false;
   smac_lattice_planner_mbf::StateLatticeSmootherParams smoother_params;
   int theta_max_allowed_cost = 10;
@@ -595,6 +596,9 @@ int main(int argc, char ** argv)
   double theta_reference_spacing = 0.05;
   bool theta_reference_smoothing_enabled = true;
   double theta_suffix_candidate_max_planning_time = 60.0;
+  double theta_prefix_candidate_max_planning_time = 20.0;
+  double theta_prefix_join_max_heading_error = 0.20;
+  double theta_prefix_join_max_curvature_jump = 2.5;
   int theta_unsafe_segment_lookback_points = 30;
   std::string suffix_goal_heading_mode_name = "DEFAULT";
   int diagnostic_min_suffix_cut_points = 0;
@@ -651,6 +655,10 @@ int main(int argc, char ** argv)
   private_nh.param(
     "theta_prefix_lattice_suffix_enabled",
     theta_prefix_lattice_suffix_enabled, theta_prefix_lattice_suffix_enabled);
+  private_nh.param(
+    "theta_full_footprint_validation_enabled",
+    theta_full_footprint_validation_enabled,
+    theta_full_footprint_validation_enabled);
   private_nh.param(
     "state_lattice_smoothing_enabled",
     state_lattice_smoothing_enabled, state_lattice_smoothing_enabled);
@@ -709,6 +717,18 @@ int main(int argc, char ** argv)
     "theta_suffix_candidate_max_planning_time",
     theta_suffix_candidate_max_planning_time,
     theta_suffix_candidate_max_planning_time);
+  private_nh.param(
+    "theta_prefix_candidate_max_planning_time",
+    theta_prefix_candidate_max_planning_time,
+    theta_prefix_candidate_max_planning_time);
+  private_nh.param(
+    "theta_prefix_join_max_heading_error",
+    theta_prefix_join_max_heading_error,
+    theta_prefix_join_max_heading_error);
+  private_nh.param(
+    "theta_prefix_join_max_curvature_jump",
+    theta_prefix_join_max_curvature_jump,
+    theta_prefix_join_max_curvature_jump);
   private_nh.param(
     "theta_unsafe_segment_lookback_points",
     theta_unsafe_segment_lookback_points,
@@ -926,12 +946,22 @@ int main(int argc, char ** argv)
     // retaining rotate-in-place as a necessary-space fallback.
     search_info.rotation_penalty = static_cast<float>(rotation_penalty);
     search_info.allow_reverse_expansion = allow_reverse_expansion;
+    search_info.require_forward_steering_primitives = true;
     search_info.prefer_forward_analytic_expansion = true;
     search_info.downsample_obstacle_heuristic = downsample_obstacle_heuristic;
     search_info.analytic_expansion_ratio = 3.5f;
     search_info.analytic_expansion_max_length =
       static_cast<float>(analytic_expansion_max_length_m / costmap->getResolution());
     search_info.analytic_expansion_max_cost = 200.0f;
+
+    // Keep the diagnostic runner subject to the same complete primitive-table
+    // contract as the production plugin.  A malformed table must fail before
+    // any connection is reported as representative of production behavior.
+    if (search_info.require_forward_steering_primitives) {
+      nav2_smac_planner::LatticeMotionTable validation_table;
+      unsigned int validation_size_x = costmap->getSizeInCellsX();
+      validation_table.initMotionModel(validation_size_x, search_info);
+    }
 
     nav2_smac_planner::GridCollisionChecker checker(costmap.get(), 72u);
     checker.setFootprint(robotFootprint(), false, 0.0);
@@ -944,6 +974,19 @@ int main(int argc, char ** argv)
     planner.initialize(
       allow_unknown, max_iterations, 1000, terminal_checking_interval,
       max_planning_time, 401.0, 32u);
+
+    const auto canonicalizeConvertedStatePath = [&] (
+        smac_lattice_planner_mbf::theta_state_suffix::PosePath & state_path)
+      {
+        const double bin_width = 2.0 * M_PI / metadata.number_of_headings;
+        const double largest_seed_quantization =
+          (0.5 + static_cast<double>(start_heading_seed_span)) * bin_width + 1e-3;
+        return smac_lattice_planner_mbf::theta_state_suffix::
+          canonicalizeInitialLatticeMotion(
+            state_path, largest_seed_quantization,
+            theta_prefix_join_max_heading_error, 1e-4,
+            0.1 * bin_width + 1e-3);
+      };
 
     int failures = 0;
     int tested_connections = 0;
@@ -1072,6 +1115,49 @@ int main(int argc, char ** argv)
             return true;
           };
 
+        const auto plannedInPlaceRotationsAreSafe = [&] (
+            const costmap_2d::Costmap2D & proof_costmap,
+            nav2_smac_planner::GridCollisionChecker & proof_checker,
+            const smac_lattice_planner_mbf::theta_state_suffix::PosePath & candidate,
+            const SteadyClock::time_point & proof_deadline,
+            std::string & reason)
+          {
+            constexpr double kMaxEncodedRotationStep = M_PI / 8.0 + 1e-6;
+            for (std::size_t index = 0u; index + 1u < candidate.size(); ++index) {
+              const auto & first = candidate[index];
+              const auto & second = candidate[index + 1u];
+              const double translation = std::hypot(
+                second.pose.position.x - first.pose.position.x,
+                second.pose.position.y - first.pose.position.y);
+              const double yaw_change = std::abs(angles::shortest_angular_distance(
+                  tf::getYaw(first.pose.orientation),
+                  tf::getYaw(second.pose.orientation)));
+              if (translation > 1e-4 || yaw_change <= 1e-6) {
+                continue;
+              }
+              if (yaw_change > kMaxEncodedRotationStep) {
+                reason = "in-place rotation at path edge " + std::to_string(index) +
+                  " is not direction-explicit (yaw step=" + std::to_string(yaw_change) +
+                  " rad); subdivide the planned rotation";
+                return false;
+              }
+
+              const smac_lattice_planner_mbf::theta_state_suffix::PosePath
+                planned_rotation{first, second};
+              std::string sweep_reason;
+              if (!validateContinuousPosePath(
+                  proof_costmap, proof_checker, planned_rotation, allow_unknown,
+                  sweep_reason, &proof_deadline))
+              {
+                reason = "planned signed in-place rotation at path edge " +
+                  std::to_string(index) + " is unsafe: " + sweep_reason;
+                return false;
+              }
+            }
+            reason.clear();
+            return true;
+          };
+
         planner.setCollisionChecker(&checker);
         const unsigned int goal_bin =
           planner.getContext()->motion_table.getClosestAngularBin(next.entry_yaw);
@@ -1197,14 +1283,27 @@ int main(int argc, char ** argv)
           }
         }
 
+        struct StateSearchGoal
+        {
+          float x{0.0f};
+          float y{0.0f};
+          unsigned int heading_bin{0u};
+          nav2_smac_planner::GoalHeadingMode heading_mode{
+            nav2_smac_planner::GoalHeadingMode::DEFAULT};
+          bool continuous_forward_only{false};
+        };
+        const StateSearchGoal final_search_goal{
+          goal_x, goal_y, goal_bin, suffix_goal_heading_mode, true};
+
         auto runStateSearch = [&] (
             float segment_start_x,
             float segment_start_y,
+            double segment_start_yaw,
             const HeadingSeeds & segment_start_bins,
+            const StateSearchGoal & search_goal,
             const smac_lattice_planner_mbf::CenterCorridorMask * domain,
             const smac_lattice_planner_mbf::RouteProgressField * route_progress,
             double time_limit,
-            nav2_smac_planner::GoalHeadingMode goal_heading_mode,
             float search_tolerance,
             nav2_smac_planner::NodeLattice::CoordinateVector & output,
             int & level_iterations,
@@ -1220,6 +1319,27 @@ int main(int argc, char ** argv)
             const auto state_started = SteadyClock::now();
             nav2_smac_planner::SearchResult result;
             try {
+              HeadingSeeds admissible_start_bins;
+              const HeadingSeeds * active_start_bins = &segment_start_bins;
+              if (search_goal.continuous_forward_only) {
+                planner.setTransitionValidator(
+                  [](const nav2_smac_planner::NodeLattice::Coordinates & from,
+                    const nav2_smac_planner::NodeLattice::Coordinates & to) {
+                    return std::hypot(to.x - from.x, to.y - from.y) > 1e-4f;
+                  });
+                for (const auto & seed : segment_start_bins) {
+                  const double seed_yaw =
+                    planner.getContext()->motion_table.getAngleFromBin(seed.first);
+                  const double seed_error = std::abs(
+                    angles::shortest_angular_distance(segment_start_yaw, seed_yaw));
+                  if (seed_error <= theta_prefix_join_max_heading_error + 1e-9) {
+                    admissible_start_bins.push_back(seed);
+                  }
+                }
+                active_start_bins = &admissible_start_bins;
+              } else {
+                planner.clearTransitionValidator();
+              }
               planner.setGoalTransitionValidator(
                 [](const nav2_smac_planner::NodeLattice::Coordinates & from,
                   const nav2_smac_planner::NodeLattice::Coordinates & to) {
@@ -1260,25 +1380,31 @@ int main(int argc, char ** argv)
               } else {
                 planner.clearAdditionalHeuristic();
               }
-              planner.setStart(
-                segment_start_x, segment_start_y,
-                segment_start_bins.front().first, segment_start_bins.front().second);
-              for (std::size_t seed = 1; seed < segment_start_bins.size(); ++seed) {
-                planner.addStart(
+              if (!active_start_bins->empty()) {
+                planner.setStart(
                   segment_start_x, segment_start_y,
-                  segment_start_bins[seed].first, segment_start_bins[seed].second);
+                  active_start_bins->front().first, active_start_bins->front().second);
+                for (std::size_t seed = 1; seed < active_start_bins->size(); ++seed) {
+                  planner.addStart(
+                    segment_start_x, segment_start_y,
+                    (*active_start_bins)[seed].first, (*active_start_bins)[seed].second);
+                }
+                planner.setGoal(
+                  search_goal.x, search_goal.y, search_goal.heading_bin,
+                  search_goal.heading_mode, 1);
+                result = planner.createPathDetailed(
+                  output, level_iterations, search_tolerance, []() {return false;});
               }
-              planner.setGoal(goal_x, goal_y, goal_bin, goal_heading_mode, 1);
-              result = planner.createPathDetailed(
-                output, level_iterations, search_tolerance, []() {return false;});
             } catch (...) {
               planner.clearCenterDomain();
               planner.clearAdditionalHeuristic();
+              planner.clearTransitionValidator();
               planner.clearGoalTransitionValidator();
               throw;
             }
             planner.clearCenterDomain();
             planner.clearAdditionalHeuristic();
+            planner.clearTransitionValidator();
             planner.clearGoalTransitionValidator();
             attempt_seconds = elapsedSeconds(state_started);
             search_seconds += attempt_seconds;
@@ -1290,6 +1416,8 @@ int main(int argc, char ** argv)
         bool suppress_full_state_fallback = false;
         smac_lattice_planner_mbf::theta_state_suffix::PosePath composite_path;
         smac_lattice_planner_mbf::theta_state_suffix::PosePath fallback_pose_path;
+        std::vector<smac_lattice_planner_mbf::theta_state_suffix::PosePath>
+          selected_state_proof_paths;
         nav2_smac_planner::NodeLattice::CoordinateVector selected_state_path;
         std::size_t selected_cut_points = 0u;
         std::size_t selected_cut_index = 0u;
@@ -1323,19 +1451,151 @@ int main(int argc, char ** argv)
           auto theta_reference = makeThetaReference(
             coarse_route.routes.front(), previous, next, frame);
           const bool short_theta_reference =
-            theta_reference.size() <=
+            theta_reference.size() <
             smac_lattice_planner_mbf::theta_state_suffix::
-            kSuffixPointCountCandidates.front();
+            kMinimumThetaPosesForComposite;
+          smac_lattice_planner_mbf::theta_state_suffix::PosePath selected_state_prefix;
+          std::size_t selected_prefix_join_index = 0u;
+          bool state_prefix_available = false;
           if (!short_theta_reference) {
-            std::string initial_alignment_reason;
-            if (!smac_lattice_planner_mbf::theta_state_suffix::
-              ensureExplicitInitialTangentRotation(
-                theta_reference, initial_alignment_reason))
-            {
-              std::cout << "COMPOSITE_DISABLED " << previous.id << "->" << next.id
-                        << " reason=" << std::quoted(initial_alignment_reason)
+            const auto prefix_candidates =
+              smac_lattice_planner_mbf::theta_state_suffix::
+              makeThetaPrefixJoinCandidates(theta_reference);
+            for (const auto & prefix_selection : prefix_candidates) {
+              if (prefix_selection.reaches_theta_goal ||
+                prefix_selection.theta_from_join.size() < 3u)
+              {
+                break;
+              }
+              const double available = std::chrono::duration<double>(
+                corridor_deadline - SteadyClock::now()).count();
+              if (available < 0.05) {
+                break;
+              }
+              const auto prefix_deadline = std::min(
+                corridor_deadline,
+                SteadyClock::now() + toClockDuration(std::min(
+                  theta_prefix_candidate_max_planning_time, available)));
+              float join_x = 0.0f;
+              float join_y = 0.0f;
+              if (!worldToMapContinuous(
+                  *costmap, prefix_selection.join.pose.position.x,
+                  prefix_selection.join.pose.position.y, join_x, join_y))
+              {
+                continue;
+              }
+              const double join_yaw = tf::getYaw(prefix_selection.join.pose.orientation);
+              const unsigned int join_bin =
+                planner.getContext()->motion_table.getClosestAngularBin(join_yaw);
+              const StateSearchGoal prefix_goal{
+                join_x, join_y, join_bin,
+                nav2_smac_planner::GoalHeadingMode::DEFAULT, true};
+              const double prefix_time = std::chrono::duration<double>(
+                prefix_deadline - SteadyClock::now()).count();
+              if (prefix_time < 0.05) {
+                continue;
+              }
+              int prefix_iterations = 0;
+              double prefix_seconds = 0.0;
+              const auto prefix_result = runStateSearch(
+                start_x, start_y, previous.exit_yaw, safe_start_bins, prefix_goal,
+                nullptr, nullptr, prefix_time, 0.0f,
+                path, prefix_iterations, prefix_seconds);
+              iterations += prefix_iterations;
+              std::string prefix_reason;
+              const bool exact_prefix =
+                prefix_result.termination == nav2_smac_planner::SearchTermination::SUCCESS &&
+                prefix_result.hasPath() && validateContinuousPath(
+                  checker, path, start_x, start_y, previous.exit_yaw,
+                  allow_unknown, prefix_reason, &prefix_deadline);
+              if (!exact_prefix) {
+                std::cout << "STATE_PREFIX_ATTEMPT " << previous.id << "->" << next.id
+                          << " join_index=" << prefix_selection.join_index
+                          << " success=false seconds=" << prefix_seconds
+                          << " expansions=" << prefix_iterations
+                          << " reason=" << std::quoted(prefix_reason) << std::endl;
+                continue;
+              }
+
+              smac_lattice_planner_mbf::theta_state_suffix::PosePath state_prefix;
+              if (!coordinatesToPosePath(
+                  path, *costmap, theta_reference.front(), frame, state_prefix))
+              {
+                continue;
+              }
+              canonicalizeConvertedStatePath(state_prefix);
+              if (state_prefix.size() < 3u) {
+                continue;
+              }
+              const double terminal_position_error = std::hypot(
+                state_prefix.back().pose.position.x -
+                prefix_selection.join.pose.position.x,
+                state_prefix.back().pose.position.y -
+                prefix_selection.join.pose.position.y);
+              const double terminal_yaw_error = std::abs(
+                angles::shortest_angular_distance(
+                  tf::getYaw(state_prefix.back().pose.orientation), join_yaw));
+              if (terminal_position_error >
+                std::sqrt(2.0) * costmap->getResolution() + 1e-3 ||
+                terminal_yaw_error > M_PI / metadata.number_of_headings + 0.002)
+              {
+                continue;
+              }
+              auto canonical_join = prefix_selection.join;
+              canonical_join.header.stamp = state_prefix.back().header.stamp;
+              state_prefix.back() = canonical_join;
+              if (!smac_lattice_planner_mbf::theta_state_suffix::
+                containsContinuousForwardOnly(
+                  state_prefix, prefix_reason, 1e-4, 1e-6,
+                  theta_prefix_join_max_heading_error) ||
+                !smac_lattice_planner_mbf::theta_state_suffix::
+                joinIsPositionHeadingCurvatureContinuous(
+                  state_prefix, prefix_selection.theta_from_join, prefix_reason,
+                  1e-6, 1e-6, theta_prefix_join_max_heading_error,
+                  theta_prefix_join_max_curvature_jump) ||
+                !validateContinuousPosePath(
+                  *costmap, checker, state_prefix, allow_unknown,
+                  prefix_reason, &prefix_deadline))
+              {
+                std::cout << "STATE_PREFIX_ATTEMPT " << previous.id << "->" << next.id
+                          << " join_index=" << prefix_selection.join_index
+                          << " success=false seconds=" << prefix_seconds
+                          << " expansions=" << prefix_iterations
+                          << " reason=" << std::quoted(prefix_reason) << std::endl;
+                continue;
+              }
+              const auto raw_state_prefix = state_prefix;
+              const std::string prefix_mode = "state_prefix_theta_join_" +
+                std::to_string(prefix_selection.join_index) + "pt";
+              if (maybeSmoothStatePath(state_prefix, prefix_deadline, prefix_mode) &&
+                (!smac_lattice_planner_mbf::theta_state_suffix::
+                containsContinuousForwardOnly(
+                  state_prefix, prefix_reason, 1e-4, 1e-6,
+                  theta_prefix_join_max_heading_error) ||
+                !smac_lattice_planner_mbf::theta_state_suffix::
+                joinIsPositionHeadingCurvatureContinuous(
+                  state_prefix, prefix_selection.theta_from_join, prefix_reason,
+                  1e-6, 1e-6, theta_prefix_join_max_heading_error,
+                  theta_prefix_join_max_curvature_jump)))
+              {
+                state_prefix = raw_state_prefix;
+              }
+              selected_state_prefix = std::move(state_prefix);
+              selected_prefix_join_index = prefix_selection.join_index;
+              state_prefix_available = true;
+              std::cout << "STATE_PREFIX_ATTEMPT " << previous.id << "->" << next.id
+                        << " join_index=" << selected_prefix_join_index
+                        << " success=true poses=" << selected_state_prefix.size()
+                        << " seconds=" << prefix_seconds
+                        << " expansions=" << prefix_iterations << std::endl;
+              break;
+            }
+
+            if (!state_prefix_available) {
+              std::cout << "STATE_PREFIX_FALLBACK " << previous.id << "->" << next.id
+                        << " mode=forward_only_full_state"
+                        << " reason=\"all forward joins failed; in-place fallback disabled\""
                         << std::endl;
-              theta_reference.clear();
             }
           }
           std::vector<smac_lattice_planner_mbf::theta_state_suffix::ThetaPrefixCut>
@@ -1344,7 +1604,7 @@ int main(int argc, char ** argv)
             suffix_candidates.push_back(
               smac_lattice_planner_mbf::theta_state_suffix::selectThetaPrefixCut(
                 theta_reference, theta_reference.size()));
-          } else if (!theta_reference.empty()) {
+          } else if (state_prefix_available) {
             suffix_candidates = smac_lattice_planner_mbf::theta_state_suffix::
               makeThetaPrefixCutCandidates(theta_reference);
           }
@@ -1357,6 +1617,28 @@ int main(int argc, char ** argv)
             candidate_index < suffix_candidates.size(); ++candidate_index)
           {
             const auto cut = suffix_candidates[candidate_index];
+            if (state_prefix_available && cut.cut_index < selected_prefix_join_index) {
+              break;
+            }
+            smac_lattice_planner_mbf::theta_state_suffix::PosePath retained_prefix;
+            if (state_prefix_available) {
+              smac_lattice_planner_mbf::theta_state_suffix::PosePath theta_middle(
+                theta_reference.begin() + selected_prefix_join_index,
+                theta_reference.begin() + cut.cut_index + 1u);
+              try {
+                retained_prefix = smac_lattice_planner_mbf::theta_state_suffix::
+                  stitchThetaPrefixAndStateSuffix(
+                  selected_state_prefix, theta_middle, 1e-6, 1e-6);
+              } catch (const std::exception & error) {
+                std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
+                          << " cut_index=" << cut.cut_index
+                          << " full_continuous_footprint=false reason="
+                          << std::quoted(error.what()) << std::endl;
+                continue;
+              }
+            } else {
+              retained_prefix = cut.prefix_including_cut;
+            }
             const bool cut_is_adaptive =
               adaptive_unsafe_segment_fallback_requested &&
               cut.cut_index == adaptive_cut_index;
@@ -1398,12 +1680,12 @@ int main(int argc, char ** argv)
             const bool prefix_kinematically_continuous =
               smac_lattice_planner_mbf::theta_state_suffix::
               containsKinematicallyContinuousForwardOrRotation(
-                cut.prefix_including_cut, prefix_motion_reason);
+                retained_prefix, prefix_motion_reason);
             if (!prefix_kinematically_continuous) {
               std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
                         << " cut_points=" << cut.effective_suffix_point_count
                         << " cut_index=" << cut.cut_index
-                        << " theta_prefix_poses=" << cut.prefix_including_cut.size()
+                        << " theta_prefix_poses=" << retained_prefix.size()
                         << " prefix_kinematically_continuous=false"
                         << " prefix_safe=false suffix_started=false"
                         << " suffix_seconds=0.000000 suffix_expansions=0"
@@ -1414,25 +1696,34 @@ int main(int argc, char ** argv)
 
             std::string prefix_reason;
             std::size_t first_unsafe_segment = std::numeric_limits<std::size_t>::max();
-            const bool prefix_safe = validateContinuousPosePath(
-              *costmap, checker, cut.prefix_including_cut,
+            const bool prefix_safe = !theta_full_footprint_validation_enabled ||
+              validateContinuousPosePath(
+              *costmap, checker, retained_prefix,
               allow_unknown, prefix_reason, &candidate_deadline,
               &first_unsafe_segment);
             if (!prefix_safe) {
               std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
                         << " cut_points=" << cut.effective_suffix_point_count
                         << " cut_index=" << cut.cut_index
-                        << " theta_prefix_poses=" << cut.prefix_including_cut.size()
+                        << " theta_prefix_poses=" << retained_prefix.size()
                         << " prefix_safe=false suffix_started=false"
                         << " suffix_seconds=0.000000 suffix_expansions=0"
                         << " full_continuous_footprint=false"
                         << " reason=" << std::quoted(prefix_reason) << std::endl;
               if (first_unsafe_segment != std::numeric_limits<std::size_t>::max()) {
                 adaptive_unsafe_segment_fallback_requested = true;
+                std::size_t theta_unsafe_segment = first_unsafe_segment;
+                if (state_prefix_available) {
+                  if (first_unsafe_segment + 1u < selected_state_prefix.size()) {
+                    continue;
+                  }
+                  theta_unsafe_segment = selected_prefix_join_index +
+                    (first_unsafe_segment - (selected_state_prefix.size() - 1u));
+                }
                 const auto adaptive =
                   smac_lattice_planner_mbf::theta_state_suffix::
                   selectThetaPrefixCutBeforeUnsafeSegment(
-                  theta_reference, first_unsafe_segment,
+                  theta_reference, theta_unsafe_segment,
                   static_cast<std::size_t>(theta_unsafe_segment_lookback_points));
                 suffix_candidates.resize(candidate_index + 1u);
                 if (adaptive.cut_index < cut.cut_index) {
@@ -1441,7 +1732,7 @@ int main(int argc, char ** argv)
                   suffix_candidates.push_back(adaptive);
                   std::cout << "COMPOSITE_ADAPTIVE_FALLBACK "
                             << previous.id << "->" << next.id
-                            << " unsafe_segment=" << first_unsafe_segment
+                            << " unsafe_segment=" << theta_unsafe_segment
                             << " lookback_points=" << theta_unsafe_segment_lookback_points
                             << " cut_index=" << adaptive.cut_index
                             << " suffix_poses=" << adaptive.effective_suffix_point_count
@@ -1449,7 +1740,7 @@ int main(int argc, char ** argv)
                 } else {
                   std::cout << "COMPOSITE_ADAPTIVE_FALLBACK "
                             << previous.id << "->" << next.id
-                            << " unsafe_segment=" << first_unsafe_segment
+                            << " unsafe_segment=" << theta_unsafe_segment
                             << " lookback_points=" << theta_unsafe_segment_lookback_points
                             << " cut_index=0 suffix_poses=0"
                             << " status=whole_route_state_suppressed"
@@ -1477,7 +1768,7 @@ int main(int argc, char ** argv)
               std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
                         << " cut_points=" << cut.effective_suffix_point_count
                         << " cut_index=" << cut.cut_index
-                        << " theta_prefix_poses=" << cut.prefix_including_cut.size()
+                        << " theta_prefix_poses=" << retained_prefix.size()
                         << " prefix_safe=true suffix_started=false"
                         << " suffix_seconds=0.000000 suffix_expansions=0"
                         << " full_continuous_footprint=false"
@@ -1523,12 +1814,11 @@ int main(int argc, char ** argv)
               break;
             }
             const auto result = runStateSearch(
-              suffix_start_x, suffix_start_y, suffix_start_bins,
-              suffix_local_domain, nullptr,
+              suffix_start_x, suffix_start_y, suffix_start_yaw, suffix_start_bins,
+              final_search_goal, suffix_local_domain, nullptr,
               (cut_is_adaptive || cut_is_short_route_all_state) ?
               available_after_proof :
               std::min(theta_suffix_candidate_max_planning_time, available_after_proof),
-              suffix_goal_heading_mode,
               0.0f, path, suffix_iterations, suffix_seconds);
             ++state_suffix_attempts;
             state_suffix_total_seconds += suffix_seconds;
@@ -1546,7 +1836,7 @@ int main(int argc, char ** argv)
               std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
                         << " cut_points=" << cut.effective_suffix_point_count
                         << " cut_index=" << cut.cut_index
-                        << " theta_prefix_poses=" << cut.prefix_including_cut.size()
+                        << " theta_prefix_poses=" << retained_prefix.size()
                         << " prefix_safe=true suffix_started=true"
                         << " suffix_goal_heading_mode=" << suffix_goal_heading_mode_name
                         << " analytic_expansion_max_length_m=" <<
@@ -1615,10 +1905,12 @@ int main(int argc, char ** argv)
                         << " reason=\"empty converted State suffix\"" << std::endl;
               continue;
             }
+            canonicalizeConvertedStatePath(state_suffix);
             std::string state_contract_reason;
             if (!smac_lattice_planner_mbf::theta_state_suffix::
-              containsKinematicallyContinuousForwardOrRotation(
-                state_suffix, state_contract_reason) ||
+              containsContinuousForwardOnly(
+                state_suffix, state_contract_reason, 1e-4, 1e-6,
+                theta_prefix_join_max_heading_error) ||
               !smac_lattice_planner_mbf::theta_state_suffix::
               terminalAvoidsStationaryYawRepair(state_suffix, state_contract_reason))
             {
@@ -1633,12 +1925,34 @@ int main(int argc, char ** argv)
               continue;
             }
 
+            const bool has_theta_suffix_join = cut.cut_index > 0u;
+            if (has_theta_suffix_join) {
+              std::string state_join_reason;
+              if (!smac_lattice_planner_mbf::theta_state_suffix::
+                joinIsPositionHeadingCurvatureContinuous(
+                  retained_prefix, state_suffix, state_join_reason,
+                  1e-6, 1e-6, theta_prefix_join_max_heading_error,
+                  theta_prefix_join_max_curvature_jump))
+              {
+                std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
+                          << " cut_points=" << cut.effective_suffix_point_count
+                          << " cut_index=" << cut.cut_index
+                          << " prefix_safe=true suffix_started=true"
+                          << " suffix_termination=" << searchTerminationName(result.termination)
+                          << " suffix_seconds=" << suffix_seconds
+                          << " suffix_expansions=" << suffix_iterations
+                          << " full_continuous_footprint=false"
+                          << " reason=" << std::quoted(state_join_reason) << std::endl;
+                continue;
+              }
+            }
+
             smac_lattice_planner_mbf::theta_state_suffix::PosePath candidate;
             try {
               candidate =
                 smac_lattice_planner_mbf::theta_state_suffix::
                 stitchThetaPrefixAndStateSuffix(
-                cut.prefix_including_cut, state_suffix, 1e-6, 1e-6);
+                retained_prefix, state_suffix, 1e-6, 1e-6);
             } catch (const std::exception & error) {
               std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
                         << " cut_points=" << cut.effective_suffix_point_count
@@ -1654,14 +1968,28 @@ int main(int argc, char ** argv)
 
             std::string composite_reason;
             const auto composite_validation_started = SteadyClock::now();
-            const bool composite_safe = validateContinuousPosePath(
-              *costmap, checker, candidate, allow_unknown, composite_reason,
-              &candidate_deadline);
+            bool composite_safe = true;
+            if (theta_full_footprint_validation_enabled) {
+              composite_safe = validateContinuousPosePath(
+                *costmap, checker, candidate, allow_unknown, composite_reason,
+                &candidate_deadline);
+            } else {
+              if (state_prefix_available) {
+                composite_safe = validateContinuousPosePath(
+                  *costmap, checker, selected_state_prefix, allow_unknown,
+                  composite_reason, &candidate_deadline);
+              }
+              if (composite_safe) {
+                composite_safe = validateContinuousPosePath(
+                  *costmap, checker, state_suffix, allow_unknown,
+                  composite_reason, &candidate_deadline);
+              }
+            }
             validation_seconds += elapsedSeconds(composite_validation_started);
             std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
                       << " cut_points=" << cut.effective_suffix_point_count
                       << " cut_index=" << cut.cut_index
-                      << " theta_prefix_poses=" << cut.prefix_including_cut.size()
+                      << " theta_prefix_poses=" << retained_prefix.size()
                       << " state_suffix_poses=" << state_suffix.size()
                       << " prefix_safe=true suffix_started=true"
                       << " suffix_goal_heading_mode=" << suffix_goal_heading_mode_name
@@ -1682,7 +2010,9 @@ int main(int argc, char ** argv)
                       << " lattice_goal_yaw_error_rad=" << lattice_goal_yaw_error
                       << " terminal_append_kind=" << terminal_append_kind
                       << " mppi_terminal_phase=" << mppi_terminal_phase
-                      << " full_continuous_footprint="
+                      << " theta_full_footprint_validation="
+                      << (theta_full_footprint_validation_enabled ? "enabled" : "disabled")
+                      << " enabled_footprint_proofs="
                       << (composite_safe ? "true" : "false");
             if (!composite_safe) {
               std::cout << " reason=" << std::quoted(composite_reason);
@@ -1706,14 +2036,31 @@ int main(int argc, char ** argv)
                 state_suffix, candidate_deadline, smoothing_mode))
             {
               try {
+                if (has_theta_suffix_join) {
+                  std::string smoothed_join_reason;
+                  if (!smac_lattice_planner_mbf::theta_state_suffix::
+                    joinIsPositionHeadingCurvatureContinuous(
+                      retained_prefix, state_suffix, smoothed_join_reason,
+                      1e-6, 1e-6, theta_prefix_join_max_heading_error,
+                      theta_prefix_join_max_curvature_jump))
+                  {
+                    throw std::runtime_error(
+                            "smoothed Theta/State join rejected: " +
+                            smoothed_join_reason);
+                  }
+                }
                 auto smoothed_candidate =
                   smac_lattice_planner_mbf::theta_state_suffix::
                   stitchThetaPrefixAndStateSuffix(
-                    cut.prefix_including_cut, state_suffix, 1e-6, 1e-6);
+                    retained_prefix, state_suffix, 1e-6, 1e-6);
                 std::string smoothed_reason;
                 const auto smoothed_validation_started = SteadyClock::now();
-                const bool smoothed_safe = validateContinuousPosePath(
+                const bool smoothed_safe = theta_full_footprint_validation_enabled ?
+                  validateContinuousPosePath(
                   *costmap, checker, smoothed_candidate, allow_unknown,
+                  smoothed_reason, &candidate_deadline) :
+                  validateContinuousPosePath(
+                  *costmap, checker, state_suffix, allow_unknown,
                   smoothed_reason, &candidate_deadline);
                 validation_seconds += elapsedSeconds(smoothed_validation_started);
                 if (smoothed_safe) {
@@ -1736,13 +2083,32 @@ int main(int argc, char ** argv)
               }
             }
 
+            std::string ambiguous_rotation_reason;
+            if (!plannedInPlaceRotationsAreSafe(
+                *costmap, checker, candidate, candidate_deadline,
+                ambiguous_rotation_reason))
+            {
+              std::cout << "COMPOSITE_ATTEMPT " << previous.id << "->" << next.id
+                        << " cut_points=" << cut.effective_suffix_point_count
+                        << " cut_index=" << cut.cut_index
+                        << " full_continuous_footprint=false"
+                        << " reason=" << std::quoted(ambiguous_rotation_reason)
+                        << std::endl;
+              continue;
+            }
+
             success = true;
             composite_success = true;
             composite_path = std::move(candidate);
+            selected_state_proof_paths.clear();
+            if (state_prefix_available) {
+              selected_state_proof_paths.push_back(selected_state_prefix);
+            }
+            selected_state_proof_paths.push_back(state_suffix);
             selected_state_path = path;
             selected_cut_points = cut.effective_suffix_point_count;
             selected_cut_index = cut.cut_index;
-            selected_theta_prefix_poses = cut.prefix_including_cut.size();
+            selected_theta_prefix_poses = retained_prefix.size();
             selected_state_suffix_poses = state_suffix.size();
             selected_state_quality = summarizePosePathQuality(state_suffix);
             selected_state_suffix_seconds = suffix_seconds;
@@ -1791,10 +2157,10 @@ int main(int argc, char ** argv)
             int level_iterations = 0;
             double level_seconds = 0.0;
             const auto result = runStateSearch(
-              start_x, start_y, safe_start_bins,
+              start_x, start_y, previous.exit_yaw, safe_start_bins,
+              final_search_goal,
               &mask, &coarse_route.routes.front().route_progress,
               std::min(corridor_level_max_planning_time, available),
-              nav2_smac_planner::GoalHeadingMode::DEFAULT,
               2.0f, path, level_iterations, level_seconds);
             iterations += level_iterations;
             exact_termination = result.termination;
@@ -1819,9 +2185,8 @@ int main(int argc, char ** argv)
             int full_iterations = 0;
             double full_seconds = 0.0;
             const auto result = runStateSearch(
-              start_x, start_y, safe_start_bins,
-              nullptr, nullptr, available,
-              nav2_smac_planner::GoalHeadingMode::DEFAULT,
+              start_x, start_y, previous.exit_yaw, safe_start_bins,
+              final_search_goal, nullptr, nullptr, available,
               static_cast<float>(full_search_tolerance),
               path, full_iterations, full_seconds);
             iterations += full_iterations;
@@ -1847,9 +2212,22 @@ int main(int argc, char ** argv)
         if (success) {
           const auto validation_started = SteadyClock::now();
           if (composite_success) {
-            continuously_safe = validateContinuousPosePath(
-              *costmap, checker, composite_path, allow_unknown, validation_reason,
-              &overall_deadline);
+            continuously_safe = true;
+            if (theta_full_footprint_validation_enabled) {
+              continuously_safe = validateContinuousPosePath(
+                *costmap, checker, composite_path, allow_unknown, validation_reason,
+                &overall_deadline);
+            } else {
+              for (const auto & state_path : selected_state_proof_paths) {
+                if (!validateContinuousPosePath(
+                    *costmap, checker, state_path, allow_unknown, validation_reason,
+                    &overall_deadline))
+                {
+                  continuously_safe = false;
+                  break;
+                }
+              }
+            }
           } else {
             const std::string frame = message->header.frame_id.empty() ? "map" :
               message->header.frame_id;
@@ -1862,11 +2240,15 @@ int main(int argc, char ** argv)
             continuously_safe = coordinatesToPosePath(
               path, *costmap, exact_start, frame, fallback_pose_path);
             if (continuously_safe) {
+              canonicalizeConvertedStatePath(fallback_pose_path);
+            }
+            if (continuously_safe) {
               std::string state_contract_reason;
               continuously_safe =
                 smac_lattice_planner_mbf::theta_state_suffix::
-                containsKinematicallyContinuousForwardOrRotation(
-                  fallback_pose_path, state_contract_reason) &&
+                containsContinuousForwardOnly(
+                  fallback_pose_path, state_contract_reason, 1e-4, 1e-6,
+                  theta_prefix_join_max_heading_error) &&
                 smac_lattice_planner_mbf::theta_state_suffix::
                 terminalAvoidsStationaryYawRepair(
                   fallback_pose_path, state_contract_reason);
@@ -1893,6 +2275,11 @@ int main(int argc, char ** argv)
             if (continuously_safe) {
               (void)maybeSmoothStatePath(
                 fallback_pose_path, search_deadline, search_mode);
+            }
+            if (continuously_safe) {
+              continuously_safe = plannedInPlaceRotationsAreSafe(
+                *costmap, checker, fallback_pose_path, overall_deadline,
+                validation_reason);
             }
             if (continuously_safe) {
               continuously_safe = validateContinuousPosePath(
@@ -1954,9 +2341,26 @@ int main(int argc, char ** argv)
             std::string fresh_reason;
             const auto & validated_path = composite_success ?
               composite_path : fallback_pose_path;
-            fresh_snapshot_safe = validateContinuousPosePath(
-              *fresh_costmap, fresh_checker, validated_path, allow_unknown, fresh_reason,
-              &overall_deadline);
+            fresh_snapshot_safe = plannedInPlaceRotationsAreSafe(
+              *fresh_costmap, fresh_checker, validated_path, overall_deadline,
+              fresh_reason);
+            if (fresh_snapshot_safe && composite_success &&
+              !theta_full_footprint_validation_enabled)
+            {
+              for (const auto & state_path : selected_state_proof_paths) {
+                if (!validateContinuousPosePath(
+                    *fresh_costmap, fresh_checker, state_path, allow_unknown,
+                    fresh_reason, &overall_deadline))
+                {
+                  fresh_snapshot_safe = false;
+                  break;
+                }
+              }
+            } else if (fresh_snapshot_safe) {
+              fresh_snapshot_safe = validateContinuousPosePath(
+                *fresh_costmap, fresh_checker, validated_path, allow_unknown,
+                fresh_reason, &overall_deadline);
+            }
             continuously_safe = fresh_snapshot_safe;
             if (!fresh_snapshot_safe) {
               validation_reason = "fresh snapshot: " + fresh_reason;
@@ -2046,7 +2450,9 @@ int main(int argc, char ** argv)
                     << " fresh_snapshot_footprint=" <<
               (fresh_snapshot_checked ? (fresh_snapshot_safe ? "pass" : "fail") : "not_checked")
                     << " fresh_snapshot_stamp_delta=" << fresh_snapshot_stamp_delta
-                    << " full_continuous_footprint=pass"
+                    << " theta_full_footprint_validation=" <<
+              (theta_full_footprint_validation_enabled ? "enabled" : "disabled")
+                    << " enabled_footprint_proofs=pass"
                     << " coarse_seconds=" << coarse_seconds
                     << " search_seconds=" << search_seconds
                     << " validation_seconds=" << validation_seconds

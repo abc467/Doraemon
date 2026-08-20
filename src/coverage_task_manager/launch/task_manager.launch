@@ -41,6 +41,8 @@
   <arg name="readiness_timeout_s" default="3.0"/>
   <arg name="app_exe_task_service_name" default="/coverage_task_manager/app/exe_task_server"/>
   <arg name="app_exe_task_contract_param_ns" default="/coverage_task_manager/contracts/app/exe_task_server"/>
+  <arg name="app_cancel_return_home_service_name" default="/coverage_task_manager/app/cancel_return_home"/>
+  <arg name="return_home_cancel_timeout_s" default="15.0"/>
   <arg name="app_clean_task_service_name" default="/database_server/app/clean_task_service"/>
   <arg name="app_clean_task_contract_param_ns" default="/database_server/contracts/app/clean_task_service"/>
   <arg name="app_clean_schedule_service_name" default="/database_server/app/clean_schedule_service"/>
@@ -168,6 +170,8 @@
     <param name="require_mcore_bridge_for_readiness" value="$(arg require_mcore_bridge_for_readiness)"/>
     <param name="app_exe_task_service_name" value="$(arg app_exe_task_service_name)"/>
     <param name="app_exe_task_contract_param_ns" value="$(arg app_exe_task_contract_param_ns)"/>
+    <param name="app_cancel_return_home_service_name" value="$(arg app_cancel_return_home_service_name)"/>
+    <param name="return_home_cancel_timeout_s" value="$(arg return_home_cancel_timeout_s)"/>
     <param name="task_persist_enable" value="true"/>
     <param name="task_restore_enable" value="$(arg task_restore_enable)"/>
     <param name="task_state_max_age_s" value="604800"/>
@@ -231,8 +235,8 @@
     <param name="mbf_move_base_action" value="/move_base_flex/move_base"/>
     <param name="mbf_exe_path_action" value="/move_base_flex/exe_path"/>
     <param name="mbf_planner" value="SmacLatticePlanner"/>
-    <!-- 回桩第一阶段与离桩使用 State Lattice 全局路径及其专用 MPPI。 -->
-    <param name="mbf_controller" value="MPPI_State_Lattice_Controller"/>
+    <!-- 当前点对点 A/B：回桩第一阶段与离桩也使用 Standard MPPI。 -->
+    <param name="mbf_controller" value="MPPI_Standard_Controller"/>
     <param name="mbf_recovery" value=""/>
 
     <!-- health monitor / watchdog -->

@@ -77,6 +77,8 @@ public:
   typedef std::function<bool (float, float)> CenterDomainCallback;
   typedef std::function<float (float, float)> AdditionalHeuristicCallback;
   typedef std::function<bool (const Coordinates &, const Coordinates &)>
+    TransitionValidator;
+  typedef std::function<bool (const Coordinates &, const Coordinates &)>
     GoalTransitionValidator;
   typedef GoalManager<NodeT> GoalManagerT;
   using NodeContext = typename NodeT::NodeContext;
@@ -178,6 +180,18 @@ public:
 
   /** @brief Restore official A* heuristic behavior with no additional guide. */
   void clearAdditionalHeuristic();
+
+  /**
+   * @brief Optionally reject any discrete graph transition before queueing it.
+   *
+   * The default empty callback preserves upstream behavior. This is useful
+   * for a scoped search whose admissible motion set is narrower than the
+   * configured lattice, without changing the shared primitive file.
+   */
+  void setTransitionValidator(TransitionValidator validator);
+
+  /** @brief Restore the configured lattice's complete transition set. */
+  void clearTransitionValidator();
 
   /**
    * @brief Optionally validate a discrete transition before it may enter a goal node.
@@ -411,6 +425,7 @@ protected:
   std::shared_ptr<NodeContext> _shared_ctx;
   CenterDomainCallback _center_domain;
   AdditionalHeuristicCallback _additional_heuristic;
+  TransitionValidator _transition_validator;
   GoalTransitionValidator _goal_transition_validator;
 };
 

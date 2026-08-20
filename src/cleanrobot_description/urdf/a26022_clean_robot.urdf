@@ -316,15 +316,16 @@
   </joint>
   <link
     name="gemini_cf_link" />
-  <!-- Calibrated from the observed floor plane.
-       Roll/pitch/height follow the corrected 2026-06-19 serial mapping;
-       yaw stays with the CAD left-side mounting direction. -->
+  <!-- Recalibrated on 2026-08-18 from the currently installed camera and a
+       stationary, empty-floor multi-frame fit.  The fitted floor is mapped to
+       z=-0.08 m in base_link while retaining the measured horizontal mount
+       position. -->
   <joint
     name="gemini_cf_mount"
     type="fixed">
     <origin
-      xyz="-0.13292 0.32478 0.910841616448"
-      rpy="-1.10771564304 0.70386486547 0.807282164799" />
+      xyz="-0.13292 0.32478 0.834894653381"
+      rpy="-1.01965089 0.78006446 0.86685493" />
     <parent
       link="base_link" />
     <child
@@ -385,15 +386,16 @@
   </joint>
   <link
     name="gemini_nj_link" />
-  <!-- Calibrated from the observed floor plane.
-       Roll/pitch/height follow the corrected 2026-06-19 serial mapping;
-       yaw stays with the CAD right-side mounting direction. -->
+  <!-- Recalibrated on 2026-08-18 after a cold boot restored a stable right
+       depth stream.  A three-frame empty-floor fit removes the residual
+       4.33-degree tilt from the provisional mirrored calibration and maps the
+       floor to z=-0.08 m in base_link. -->
   <joint
     name="gemini_nj_mount"
     type="fixed">
     <origin
-      xyz="-0.13292 -0.32478 0.949244255794"
-      rpy="1.10708972437 0.665196470572 -0.814678120843" />
+      xyz="-0.13292 -0.32478 0.882211096476"
+      rpy="1.04693284 0.70714258 -0.84837366" />
     <parent
       link="base_link" />
     <child

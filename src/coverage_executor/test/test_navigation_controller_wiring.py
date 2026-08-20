@@ -53,12 +53,14 @@ class NavigationControllerWiringTest(unittest.TestCase):
         self.assertEqual(int(standard["time_steps"]), 50)
         self.assertAlmostEqual(float(standard["model_dt"]), 0.10)
         self.assertAlmostEqual(float(standard["controller_frequency"]), 10.0)
-        self.assertEqual(int(standard["batch_size"]), 2000)
+        self.assertEqual(int(standard["batch_size"]), 1800)
         self.assertTrue(standard["publish_critic_stats"])
         self.assertEqual(int(standard["critic_stats_publish_period"]), 10)
-        self.assertTrue(standard["path_occupancy_uses_footprint"])
+        self.assertNotIn("path_occupancy_uses_footprint", standard)
         self.assertAlmostEqual(float(standard["vx_std"]), 0.15)
-        self.assertAlmostEqual(float(standard["vx_max"]), 0.38)
+        self.assertAlmostEqual(float(standard["wz_std"]), 0.30)
+        self.assertAlmostEqual(float(standard["vx_max"]), 0.36)
+        self.assertAlmostEqual(float(standard["wz_max"]), 0.60)
         self.assertAlmostEqual(float(standard["prune_distance"]), 2.50)
         self.assertAlmostEqual(
             float(standard["max_robot_pose_search_dist"]), 2.50
@@ -71,12 +73,12 @@ class NavigationControllerWiringTest(unittest.TestCase):
             float(standard["vx_max"])
             * float(standard["time_steps"])
             * float(standard["model_dt"]),
-            1.90,
+            1.80,
         )
         predicted_pose_count = int(standard["time_steps"]) * int(
             standard["batch_size"]
         )
-        self.assertEqual(predicted_pose_count, 100000)
+        self.assertEqual(predicted_pose_count, 90000)
         self.assertLessEqual(predicted_pose_count, 108000)
         maximum_travel = (
             float(standard["vx_max"])
@@ -102,37 +104,66 @@ class NavigationControllerWiringTest(unittest.TestCase):
             float(local_costmap["width"]), float(local_costmap["height"])
         ) / 2.0
         self.assertLess(maximum_travel + footprint_radius, local_half_width)
-        self.assertAlmostEqual(float(standard["temperature"]), 0.25)
+        self.assertAlmostEqual(float(standard["temperature"]), 0.30)
         path_align = standard["PathAlignCritic"]
-        self.assertAlmostEqual(float(path_align["cost_weight"]), 8.0)
-        self.assertEqual(int(path_align["offset_from_furthest"]), 20)
+        self.assertAlmostEqual(float(path_align["cost_weight"]), 6.0)
+        self.assertEqual(int(path_align["offset_from_furthest"]), 6)
         self.assertAlmostEqual(
-            float(path_align["max_path_occupancy_ratio"]), 0.03
+            float(path_align["max_path_occupancy_ratio"]), 0.07
         )
         self.assertEqual(int(path_align["trajectory_point_step"]), 4)
         self.assertTrue(path_align["use_path_orientations"])
+        self.assertNotIn("use_footprint_for_path_alignment_gate", path_align)
         self.assertAlmostEqual(
-            float(standard["CostCritic"]["cost_weight"]), 8.0
+            float(standard["CostCritic"]["cost_weight"]), 12.0
         )
+        self.assertTrue(standard["CostCritic"]["allow_unknown"])
         self.assertTrue(standard["CostCritic"]["consider_footprint"])
         self.assertEqual(
             int(standard["CostCritic"]["trajectory_point_step"]), 1
         )
         path_angle = standard["PathAngleCritic"]
+        self.assertNotIn("vx_min", path_angle)
         self.assertEqual(int(path_angle["offset_from_furthest"]), 4)
         self.assertAlmostEqual(float(path_angle["cost_weight"]), 2.2)
         self.assertAlmostEqual(float(path_angle["max_angle_to_furthest"]), 0.8)
-        self.assertEqual(
-            int(standard["PathFollowCritic"]["offset_from_furthest"]), 6
-        )
+        path_follow = standard["PathFollowCritic"]
+        self.assertEqual(int(path_follow["offset_from_furthest"]), 6)
+        self.assertAlmostEqual(float(path_follow["cost_weight"]), 7.0)
 
         state = config["MPPI_State_Lattice_Controller"]
-        self.assertFalse(state.get("path_occupancy_uses_footprint", False))
+        self.assertNotIn("path_occupancy_uses_footprint", state)
+        self.assertNotIn(
+            "use_footprint_for_path_alignment_gate", state["PathAlignCritic"]
+        )
         self.assertEqual(int(state["time_steps"]), 60)
         self.assertEqual(int(state["batch_size"]), 1800)
         self.assertAlmostEqual(float(state["max_robot_pose_search_dist"]), 3.0)
 
-    def test_only_standard_and_state_mppi_are_registered_without_yaml_inheritance(self):
+    def test_path_align_and_follow_share_official_center_point_validity(self):
+        utils = _read("mppi_controller/include/mppi_controller/tools/utils.hpp")
+        path_align = _read("mppi_controller/src/critics/path_align_critic.cpp")
+        path_follow = _read("mppi_controller/src/critics/path_follow_critic.cpp")
+        align_header = _read(
+            "mppi_controller/include/mppi_controller/critics/path_align_critic.hpp"
+        )
+
+        self.assertIn("inline void findPathCosts(", utils)
+        self.assertIn("data.path_pts_valid = std::vector<bool>", utils)
+        self.assertIn("pathFollowTargetIndex", utils)
+        self.assertIn("pathFollowTargetIndex", path_follow)
+        self.assertIn("setPathCostsIfNotSet(data, costmap_ros_)", path_align)
+        self.assertIn("setPathCostsIfNotSet(data, costmap_ros_)", path_follow)
+        self.assertNotIn("path_occupancy_uses_footprint_", path_align)
+        self.assertNotIn("path_occupancy_uses_footprint_", path_follow)
+        self.assertNotIn("path_occupancy_uses_footprint_", align_header)
+        self.assertNotIn("firstValidPathPointAtOrAfter", path_follow)
+        self.assertNotIn("std::nullopt", utils)
+        self.assertNotIn("evaluatePathValidity(\n        data", path_align)
+        self.assertNotIn("use_footprint_for_path_alignment_gate", path_align)
+        self.assertNotIn("use_footprint_for_path_alignment_gate", align_header)
+
+    def test_only_standard_mppi_is_registered_without_yaml_inheritance(self):
         config = _nav_config()
         registered = {
             item["name"]
@@ -141,12 +172,18 @@ class NavigationControllerWiringTest(unittest.TestCase):
         }
         self.assertEqual(
             registered,
-            {"MPPI_Standard_Controller", "MPPI_State_Lattice_Controller"},
+            {"MPPI_Standard_Controller"},
         )
+        self.assertNotIn("MPPI_State_Lattice_Controller", registered)
 
         yaml_source = _read("cleanrobot/config/nav/mbf_nav.yaml")
         self.assertNotIn("<<:", yaml_source)
         self.assertNotIn("&mppi_", yaml_source)
+        self.assertNotIn("MPPI_Clean_Controller", yaml_source)
+        self.assertNotIn("MPPI_Heavy_Clean_Controller", yaml_source)
+
+        for controller_name in registered:
+            self.assertNotIn("vx_min", config[controller_name]["PathAngleCritic"])
 
         launch_source = _read("cleanrobot/launch/mbf_nav.launch")
         self.assertNotIn("enable_mppi_ab_controllers", launch_source)
@@ -209,7 +246,7 @@ class NavigationControllerWiringTest(unittest.TestCase):
             },
         )
 
-    def test_point_to_point_uses_smac_and_state_mppi(self):
+    def test_point_to_point_uses_smac_and_standard_mppi(self):
         executor_launch = os.path.join(EXECUTOR_DIR, "launch", "executor.launch")
         task_launch = os.path.join(
             SOURCE_DIR, "coverage_task_manager", "launch", "task_manager.launch"
@@ -220,7 +257,7 @@ class NavigationControllerWiringTest(unittest.TestCase):
         )
         self.assertEqual(
             _node_param(executor_launch, "coverage_executor", "mbf_connect_controller"),
-            "MPPI_State_Lattice_Controller",
+            "MPPI_Standard_Controller",
         )
         self.assertEqual(
             _node_param(task_launch, "coverage_task_manager", "mbf_planner"),
@@ -228,34 +265,52 @@ class NavigationControllerWiringTest(unittest.TestCase):
         )
 
     def test_connect_handoff_uses_the_production_mbf_tolerance(self):
+        config = _nav_config()
+        standard = config["MPPI_Standard_Controller"]
+        with open(
+            os.path.join(SOURCE_DIR, "cleanrobot", "config", "nav", "mbf_timing.yaml"),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            mbf_timing = yaml.safe_load(handle)
+
+        self.assertAlmostEqual(float(standard["goal_tolerance"]), 0.60)
+        self.assertAlmostEqual(float(standard["angle_tolerance"]), 0.40)
+        self.assertAlmostEqual(float(mbf_timing["dist_tolerance"]), 0.60)
+        self.assertAlmostEqual(float(mbf_timing["angle_tolerance"]), 0.52)
+
+        # Standard must never be looser than MBF's requested-target gate. Smac
+        # endpoint quantization is handled by that independent gate: it may
+        # reject a miss, but it cannot report a false CONNECT success.
+        self.assertLessEqual(
+            float(standard["goal_tolerance"]),
+            float(mbf_timing["dist_tolerance"]),
+        )
+        self.assertLessEqual(
+            float(standard["angle_tolerance"]),
+            float(mbf_timing["angle_tolerance"]),
+        )
+
         executor_launch = os.path.join(EXECUTOR_DIR, "launch", "executor.launch")
-        self.assertAlmostEqual(
-            float(
-                _node_param(
-                    executor_launch, "coverage_executor", "connect_handoff_dist_m"
-                )
-            ),
-            0.40,
+        executor_dist = float(
+            _node_param(executor_launch, "coverage_executor", "connect_handoff_dist_m")
         )
-        self.assertAlmostEqual(
-            float(
-                _node_param(
-                    executor_launch, "coverage_executor", "connect_handoff_yaw_rad"
-                )
-            ),
-            0.40,
+        executor_yaw = float(
+            _node_param(executor_launch, "coverage_executor", "connect_handoff_yaw_rad")
         )
+        self.assertAlmostEqual(executor_dist, float(mbf_timing["dist_tolerance"]))
+        self.assertAlmostEqual(executor_yaw, float(mbf_timing["angle_tolerance"]))
 
         node_source = _read("coverage_executor/scripts/executor_node.py")
         fsm_source = _read("coverage_executor/src/coverage_executor/fsm.py")
         self.assertIn(
-            'get_param("~connect_handoff_dist_m", 0.40)', node_source
+            'get_param("~connect_handoff_dist_m", 0.60)', node_source
         )
         self.assertIn(
-            'get_param("~connect_handoff_yaw_rad", 0.40)', node_source
+            'get_param("~connect_handoff_yaw_rad", 0.52)', node_source
         )
-        self.assertIn("connect_handoff_dist_m: float = 0.40", fsm_source)
-        self.assertIn("connect_handoff_yaw_rad: float = 0.40", fsm_source)
+        self.assertIn("connect_handoff_dist_m: float = 0.60", fsm_source)
+        self.assertIn("connect_handoff_yaw_rad: float = 0.52", fsm_source)
 
     def test_state_planner_and_controller_policy(self):
         config = _nav_config()

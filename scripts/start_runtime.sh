@@ -161,8 +161,18 @@ RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER="${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER:-}"
 RUNTIME_ORBBEC_CAMERA1_USB_PORT="${RUNTIME_ORBBEC_CAMERA1_USB_PORT:-}"
 RUNTIME_ORBBEC_CAMERA2_USB_PORT="${RUNTIME_ORBBEC_CAMERA2_USB_PORT:-}"
 RUNTIME_ORBBEC_CAMERA3_USB_PORT="${RUNTIME_ORBBEC_CAMERA3_USB_PORT:-}"
-RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-false}"
-DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-false}"
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS="${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS:-true}"
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES="${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES:-true}"
+RUNTIME_DEPTH_CAMERA_READY_SAMPLES="${RUNTIME_DEPTH_CAMERA_READY_SAMPLES:-3}"
+RUNTIME_DEPTH_CAMERA_READY_TIMEOUT="${RUNTIME_DEPTH_CAMERA_READY_TIMEOUT:-30}"
+RUNTIME_DEPTH_CAMERA_INTER_START_DELAY="${RUNTIME_DEPTH_CAMERA_INTER_START_DELAY:-2}"
+RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE="${RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE:-true}"
+RUNTIME_DEPTH_CAMERA_STALE_TIMEOUT="${RUNTIME_DEPTH_CAMERA_STALE_TIMEOUT:-3.0}"
+RUNTIME_DEPTH_CAMERA_RECOVERY_COOLDOWN="${RUNTIME_DEPTH_CAMERA_RECOVERY_COOLDOWN:-60.0}"
+# Internal transaction state, intentionally not configurable: a boot may
+# restart the whole camera chain at most once, regardless of whether the first
+# failure happens during sequential launch or during the later hard gate.
+DEPTH_CAMERA_STARTUP_RECOVERY_USED=0
 RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING="${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING:-${DEFAULT_RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING}}"
 RUNTIME_ENABLE_DEPTH_LEFT_CAM="${RUNTIME_ENABLE_DEPTH_LEFT_CAM:-true}"
 RUNTIME_ENABLE_DEPTH_RIGHT_CAM="${RUNTIME_ENABLE_DEPTH_RIGHT_CAM:-true}"
@@ -233,7 +243,7 @@ MANUAL_DRIVE_REQUIRE_ROLE="${MANUAL_DRIVE_REQUIRE_ROLE:-false}"
 MANUAL_DRIVE_REQUIRE_SLAM_STATE="${MANUAL_DRIVE_REQUIRE_SLAM_STATE:-false}"
 MANUAL_DRIVE_REQUIRE_TASK_STATE="${MANUAL_DRIVE_REQUIRE_TASK_STATE:-false}"
 MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE="${MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE:-false}"
-MANUAL_DRIVE_REQUIRE_COMBINED_STATUS="${MANUAL_DRIVE_REQUIRE_COMBINED_STATUS:-false}"
+MANUAL_DRIVE_REQUIRE_COMBINED_STATUS="${MANUAL_DRIVE_REQUIRE_COMBINED_STATUS:-true}"
 MANUAL_DRIVE_PUBLISH_HZ="${MANUAL_DRIVE_PUBLISH_HZ:-20.0}"
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE="${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE:-${MANUAL_DRIVE_REQUIRE_ROLE}}"
 FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE="${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE:-${MANUAL_DRIVE_REQUIRE_SLAM_STATE}}"
@@ -460,6 +470,10 @@ runtime_is_unit_sign() {
   '
 }
 
+runtime_is_positive_integer() {
+  [[ "${1:-}" =~ ^[1-9][0-9]*$ ]]
+}
+
 runtime_value_is_placeholder() {
   commercial_value_is_placeholder "${1:-}"
 }
@@ -489,6 +503,7 @@ validate_commercial_vehicle_identity() {
   normalize_boolean_variable RUNTIME_START_DEPTH_CAMERAS
   normalize_boolean_variable RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS
   normalize_boolean_variable DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES
+  normalize_boolean_variable RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE
   normalize_boolean_variable RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING
   normalize_boolean_variable RUNTIME_ENABLE_DEPTH_LEFT_CAM
   normalize_boolean_variable RUNTIME_ENABLE_DEPTH_RIGHT_CAM
@@ -504,6 +519,25 @@ validate_commercial_vehicle_identity() {
   normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE
   normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE
   normalize_boolean_variable FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS
+  local camera_sequence_number_name
+  for camera_sequence_number_name in \
+    RUNTIME_DEPTH_CAMERA_READY_SAMPLES \
+    RUNTIME_DEPTH_CAMERA_READY_TIMEOUT \
+    RUNTIME_DEPTH_CAMERA_INTER_START_DELAY; do
+    if ! runtime_is_positive_integer "${!camera_sequence_number_name:-}"; then
+      echo "[ERROR] ${camera_sequence_number_name} must be a positive integer" >&2
+      return 1
+    fi
+  done
+  local camera_watchdog_number_name
+  for camera_watchdog_number_name in \
+    RUNTIME_DEPTH_CAMERA_STALE_TIMEOUT \
+    RUNTIME_DEPTH_CAMERA_RECOVERY_COOLDOWN; do
+    if ! runtime_is_positive_finite_number "${!camera_watchdog_number_name:-}"; then
+      echo "[ERROR] ${camera_watchdog_number_name} must be finite and > 0" >&2
+      return 1
+    fi
+  done
   if [[ "${DORAEMON_NO_ACTION_ACCEPTANCE}" == "true" ]]; then
     if [[ "${DORAEMON_ACTION_TEST_APPROVED}" != "false" ]]; then
       echo "[ERROR] no-action acceptance requires DORAEMON_ACTION_TEST_APPROVED=false" >&2
@@ -557,28 +591,48 @@ validate_commercial_vehicle_identity() {
         FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ROLE \
         FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_SLAM_STATE \
         FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_TASK_STATE \
-        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE \
-        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS; do
-        if [[ "${!manual_drive_gate_name}" != "true" ]]; then
-          echo "[ERROR] action-capable manual drive requires ${manual_drive_gate_name}=true" >&2
+        FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_ODOMETRY_STATE; do
+        if [[ "${!manual_drive_gate_name}" != "false" ]]; then
+          echo "[ERROR] remote-control manual drive requires ${manual_drive_gate_name}=false" >&2
           return 1
         fi
       done
+      if [[ "${FRONTEND_BACKEND_MANUAL_DRIVE_REQUIRE_COMBINED_STATUS}" != "true" ]]; then
+        echo "[ERROR] manual drive requires live platform/E-stop status" >&2
+        return 1
+      fi
     fi
   fi
 
-  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" == "true" && \
-        "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == "true" ]]; then
-    if ! commercial_validate_required_orbbec_identities \
-      "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" \
-      "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" \
-      "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" \
-      "${RUNTIME_ORBBEC_CAMERA1_USB_PORT}" \
-      "${RUNTIME_ORBBEC_CAMERA2_USB_PORT}" \
-      "${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"; then
-      echo "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique" >&2
-      return 1
-    fi
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "true" ]]; then
+    echo "[ERROR] this commercial vehicle requires all three Orbbec cameras" >&2
+    return 1
+  fi
+  if ! commercial_validate_required_orbbec_identities \
+    "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" \
+    "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" \
+    "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" \
+    "${RUNTIME_ORBBEC_CAMERA1_USB_PORT}" \
+    "${RUNTIME_ORBBEC_CAMERA2_USB_PORT}" \
+    "${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"; then
+    echo "[ERROR] Orbbec serials/topologies must be explicit, valid, and unique" >&2
+    return 1
+  fi
+  if [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" != "true" ||
+        "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" != "true" ||
+        "${RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE}" != "true" ||
+        "${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING}" != "true" ||
+        "${RUNTIME_ENABLE_DEPTH_LEFT_CAM}" != "true" ||
+        "${RUNTIME_ENABLE_DEPTH_RIGHT_CAM}" != "true" ||
+        "${RUNTIME_ENABLE_DEPTH_UP_CAM}" != "true" ]]; then
+    echo "[ERROR] commercial Orbbec runtime requires all topic, identity, watchdog, and obstacle gates" >&2
+    return 1
+  fi
+  local usbfs_memory_mb=""
+  usbfs_memory_mb="$(cat /sys/module/usbcore/parameters/usbfs_memory_mb 2>/dev/null || true)"
+  if [[ ! "${usbfs_memory_mb}" =~ ^[0-9]+$ ]] || (( usbfs_memory_mb < 128 )); then
+    echo "[ERROR] commercial Orbbec runtime requires usbfs_memory_mb>=128; actual=${usbfs_memory_mb:-missing}" >&2
+    return 1
   fi
 
   local extra_args=()
@@ -874,7 +928,7 @@ log_effective_runtime_parameters() {
 
   runtime_log_status "station bridge: ${STATION_SERVER_IP}:${STATION_SERVER_PORT}"
   runtime_log_status "no-action acceptance: ${DORAEMON_NO_ACTION_ACCEPTANCE} action_test_approved=${DORAEMON_ACTION_TEST_APPROVED} manual_drive=${ENABLE_MANUAL_DRIVE_SERVICE} mcore_sender=${START_MCORE_VELOCITY_SENDER} cmd_vel=${MCORE_ENABLE_CMD_VEL} station_bridge=${START_STATION_BRIDGE} dock_supply=${START_DOCK_SUPPLY_MANAGER} docking_stack=${START_DOCKING_STACK} task_auto_charge=${TASK_AUTO_CHARGE_ENABLE} monitor=${AUTO_CHARGE_MONITOR_ENABLE} gateway_auto_start=${RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE}"
-  runtime_log_status "Orbbec: start=${RUNTIME_START_DEPTH_CAMERAS} require_topics=${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS} require_identities=${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES} obstacle_tracking=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} obstacle_sources(left=${RUNTIME_ENABLE_DEPTH_LEFT_CAM} right=${RUNTIME_ENABLE_DEPTH_RIGHT_CAM} front=${RUNTIME_ENABLE_DEPTH_UP_CAM}) left=${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA1_USB_PORT} right=${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA2_USB_PORT} front=${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"
+  runtime_log_status "Orbbec: start=${RUNTIME_START_DEPTH_CAMERAS} require_topics=${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS} require_identities=${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES} watchdog=${RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE}(stale=${RUNTIME_DEPTH_CAMERA_STALE_TIMEOUT}s cooldown=${RUNTIME_DEPTH_CAMERA_RECOVERY_COOLDOWN}s) obstacle_tracking=${RUNTIME_ENABLE_DEPTH_OBSTACLE_TRACKING} obstacle_sources(left=${RUNTIME_ENABLE_DEPTH_LEFT_CAM} right=${RUNTIME_ENABLE_DEPTH_RIGHT_CAM} front=${RUNTIME_ENABLE_DEPTH_UP_CAM}) left=${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA1_USB_PORT} right=${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA2_USB_PORT} front=${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}@${RUNTIME_ORBBEC_CAMERA3_USB_PORT}"
   runtime_log_status "dock tuning: target=${DOCK_TARGET_DIST} xy_tolerance=${DOCK_XY_TOLERANCE} yaw_tolerance=${DOCK_YAW_TOLERANCE} threshold=${dock_threshold} score_thresh=${DOCK_POSE_SCORE_THRESH}"
   runtime_log_status "auto charge: task=${TASK_AUTO_CHARGE_ENABLE} executor=${EXECUTOR_AUTO_CHARGE_ENABLE} low=${AUTO_CHARGE_LOW_SOC} resume=${AUTO_CHARGE_RESUME_SOC} rearm=${AUTO_CHARGE_REARM_SOC} target=${AUTO_CHARGE_TARGET_SOC}"
   runtime_log_status "dock supply: post_charge_drain=${DOCK_SUPPLY_ENABLE_DRAIN} refill=${DOCK_SUPPLY_ENABLE_REFILL} drain_timeout_s=${DOCK_SUPPLY_DRAIN_TIMEOUT_S} clean_stop_above=${DOCK_SUPPLY_TARGET_CLEAN_LEVEL}% refill_timeout_s=${DOCK_SUPPLY_REFILL_TIMEOUT_S} refill_settle_s=${DOCK_SUPPLY_REFILL_SETTLE_S} combined_status_wait_s=${DOCK_SUPPLY_COMBINED_STATUS_WAIT_S} combined_status_stale_s=${DOCK_SUPPLY_COMBINED_STATUS_STALE_TIMEOUT_S}"
@@ -934,6 +988,200 @@ build_backend_production_acceptance_cmd() {
   append_shell_words cmd_ref "${BACKEND_PRODUCTION_ACCEPTANCE_EXTRA_ARGS}"
 }
 
+runtime_wait_for_consecutive_topic_samples() {
+  local topic_name="$1"
+  local camera_label="$2"
+  local message_filter="$3"
+
+  runtime_log_status "等待${camera_label}连续${RUNTIME_DEPTH_CAMERA_READY_SAMPLES}帧有效数据: ${topic_name}"
+  if ! timeout "${RUNTIME_DEPTH_CAMERA_READY_TIMEOUT}" \
+      rostopic echo -n "${RUNTIME_DEPTH_CAMERA_READY_SAMPLES}" \
+      --filter "${message_filter}" "${topic_name}" \
+      >/dev/null 2>&1; then
+    runtime_log_status "[ERROR] ${camera_label}未在${RUNTIME_DEPTH_CAMERA_READY_TIMEOUT}s内输出连续有效数据，停止后续相机启动"
+    return 1
+  fi
+  runtime_log_status "[OK] ${camera_label}连续有效数据已就绪: ${topic_name}"
+}
+
+verify_depth_camera_chain() {
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "true" ]]; then
+    runtime_log_status "[INFO] skip Orbbec chain verification: RUNTIME_START_DEPTH_CAMERAS=${RUNTIME_START_DEPTH_CAMERAS}"
+    return 0
+  fi
+  if [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" != "true" ]]; then
+    runtime_log_status "[WARN] 跳过深度相机话题就绪检查；相机缺失或异常不阻塞整机启动"
+    return 0
+  fi
+
+  runtime_log_status "检查三台奥比中光深度相机（商业启动硬门）"
+  runtime_wait_for_consecutive_topic_samples \
+    /gemini_cf/depth/image_raw "左相机深度图" \
+    'm.width > 0 and m.height > 0 and len(m.data) > 0 and any(m.data)' || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    /gemini_nj/depth/image_raw "右相机深度图" \
+    'm.width > 0 and m.height > 0 and len(m.data) > 0 and any(m.data)' || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    /gemini_front/depth/image_raw "前相机深度图" \
+    'm.width > 0 and m.height > 0 and len(m.data) > 0 and any(m.data)' || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    /gemini_cf/depth/points "左相机点云" \
+    'm.width > 0 and m.height > 0 and m.point_step > 0 and len(m.data) > 0' || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    /gemini_nj/depth/points "右相机点云" \
+    'm.width > 0 and m.height > 0 and m.point_step > 0 and len(m.data) > 0' || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    /gemini_front/depth/points "前相机点云" \
+    'm.width > 0 and m.height > 0 and m.point_step > 0 and len(m.data) > 0' || return 1
+
+  if [[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == "true" ]]; then
+    runtime_require_orbbec_serial gemini_cf "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" || return 1
+    runtime_require_orbbec_serial gemini_nj "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" || return 1
+    runtime_require_orbbec_serial gemini_front "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" || return 1
+  else
+    runtime_log_status "[SKIP] 深度相机身份复核已关闭"
+  fi
+  runtime_log_status "[OK] 三台深度相机连续图像、点云与身份均就绪"
+}
+
+ensure_depth_camera_chain_ready() {
+  if verify_depth_camera_chain; then
+    return 0
+  fi
+
+  # Startup owns the camera chain until this gate passes.  The runtime
+  # watchdog is deliberately not running yet, so there can be no competing
+  # kill/relaunch operation while this one bounded recovery is in progress.
+  runtime_log_status "[WARN] Orbbec商业启动硬门未通过；主启动流程将串行重启完整相机链一次"
+  if ! recover_depth_camera_chain_once_during_startup; then
+    return 1
+  fi
+  if ! verify_depth_camera_chain; then
+    runtime_log_status "[ERROR] Orbbec相机链重启后仍未通过商业启动硬门"
+    return 1
+  fi
+  runtime_log_status "[OK] Orbbec启动期相机链已经一次有界恢复后就绪"
+}
+
+recover_depth_camera_chain_once_during_startup() {
+  if (( DEPTH_CAMERA_STARTUP_RECOVERY_USED != 0 )); then
+    runtime_log_status "[ERROR] Orbbec启动期唯一一次相机链恢复已使用，拒绝再次重启"
+    return 1
+  fi
+  DEPTH_CAMERA_STARTUP_RECOVERY_USED=1
+  if ! DORAEMON_ORBBEC_RECOVERY_CONTEXT=startup \
+      "${REPO_ROOT}/scripts/restart_orbbec_camera_chain.sh"; then
+    runtime_log_status "[ERROR] Orbbec启动期唯一一次相机链恢复失败"
+    return 1
+  fi
+}
+
+start_depth_camera_window() {
+  local window_name="$1"
+  local camera_label="$2"
+  local camera_name="$3"
+  local serial_number="$4"
+  local usb_port="$5"
+  local connection_delay="$6"
+  local point_topic="$7"
+  local enable_color="$8"
+  local depth_format="$9"
+  local enable_soft_filter="${10}"
+  local depth_topic="/${camera_name}/depth/image_raw"
+
+  local camera_cmd_words=(
+    exec
+    roslaunch
+    cleanrobot
+    orbbec_single_depth_ground.launch
+    camera_name:="${camera_name}"
+    bind_by_usb_port:=false
+    serial_number:="${serial_number}"
+    usb_port:="${usb_port}"
+    device_num:=3
+    connection_delay:="${connection_delay}"
+    enable_color:="${enable_color}"
+    depth_format:="${depth_format}"
+    enable_soft_filter:="${enable_soft_filter}"
+  )
+
+  runtime_log_status "启动${camera_label}: name=${camera_name} serial=${serial_number}"
+  runtime_tmux_window "${TMUX_SESSION}" "${window_name}" "$(join_shell_words camera_cmd_words)" || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    "${depth_topic}" "${camera_label}深度图" \
+    'm.width > 0 and m.height > 0 and len(m.data) > 0 and any(m.data)' || return 1
+  runtime_wait_for_consecutive_topic_samples \
+    "${point_topic}" "${camera_label}点云" \
+    'm.width > 0 and m.height > 0 and m.point_step > 0 and len(m.data) > 0' || return 1
+  if [[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == "true" ]]; then
+    runtime_require_orbbec_serial "${camera_name}" "${serial_number}" || return 1
+  fi
+}
+
+start_depth_cameras_sequentially() {
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "true" ]]; then
+    runtime_log_status "[INFO] skip sequential Orbbec startup: RUNTIME_START_DEPTH_CAMERAS=${RUNTIME_START_DEPTH_CAMERAS}"
+    return 0
+  fi
+
+  runtime_log_status "顺序启动三台Orbbec相机: 左 -> 右 -> 前"
+  # The two legacy Gemini Max side cameras can keep publishing timestamped
+  # depth frames while the SDK soft filter turns most or all samples into zero,
+  # even on independent motherboard USB3 ports. Keep their SDK filter disabled;
+  # downstream ground/noise filtering remains active. Raw depth and point-cloud
+  # hard gates still reject empty or all-zero camera output.
+  start_depth_camera_window depth_left 左相机 gemini_cf \
+    "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}" "${RUNTIME_ORBBEC_CAMERA1_USB_PORT}" \
+    800 /gemini_cf/depth/points false Y11 false || return 1
+  runtime_log_status "左相机稳定等待${RUNTIME_DEPTH_CAMERA_INTER_START_DELAY}s后启动右相机"
+  sleep "${RUNTIME_DEPTH_CAMERA_INTER_START_DELAY}"
+
+  start_depth_camera_window depth_right 右相机 gemini_nj \
+    "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}" "${RUNTIME_ORBBEC_CAMERA2_USB_PORT}" \
+    1800 /gemini_nj/depth/points false Y11 false || return 1
+  runtime_log_status "右相机稳定等待${RUNTIME_DEPTH_CAMERA_INTER_START_DELAY}s后启动前相机"
+  sleep "${RUNTIME_DEPTH_CAMERA_INTER_START_DELAY}"
+
+  start_depth_camera_window depth_front 前相机 gemini_front \
+    "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}" "${RUNTIME_ORBBEC_CAMERA3_USB_PORT}" \
+    2800 /gemini_front/depth/points true Y16 true || return 1
+  runtime_log_status "[OK] 三台Orbbec相机已按左、右、前顺序启动"
+}
+
+start_depth_cameras_with_startup_recovery() {
+  if start_depth_cameras_sequentially; then
+    return 0
+  fi
+  runtime_log_status "[WARN] Orbbec初始顺序启动失败；尝试启动期唯一一次完整链恢复"
+  recover_depth_camera_chain_once_during_startup
+}
+
+start_depth_camera_watchdog() {
+  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" != "true" ||
+        "${RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE}" != "true" ]]; then
+    runtime_log_status "[INFO] skip Orbbec watchdog"
+    return 0
+  fi
+  local watchdog_cmd_words=(
+    exec rosrun cleanrobot orbbec_camera_watchdog_node.py
+    _stale_timeout:="${RUNTIME_DEPTH_CAMERA_STALE_TIMEOUT}"
+    _recovery_cooldown:="${RUNTIME_DEPTH_CAMERA_RECOVERY_COOLDOWN}"
+    _recovery_script:="${REPO_ROOT}/scripts/restart_orbbec_camera_chain.sh"
+  )
+  runtime_tmux_window "${TMUX_SESSION}" depth_watchdog "$(join_shell_words watchdog_cmd_words)"
+  runtime_log_status "[OK] Orbbec运行监控已启动"
+}
+
+finalize_depth_camera_supervision() {
+  # This function is called only from successful startup exits, after every
+  # other blocking gate for that exit has passed.  Until this point startup is
+  # the sole owner of camera launch/recovery; afterwards the watchdog is the
+  # sole owner.  The watchdog's own startup grace covers the few milliseconds
+  # before the top-level startup transaction commits.
+  ensure_depth_camera_chain_ready
+  start_depth_camera_watchdog
+}
+
 start_runtime_session() {
   runtime_log_status "start tmux session ${TMUX_SESSION}"
 
@@ -984,7 +1232,9 @@ start_runtime_session() {
   # Append protected commercial identity arguments last. The validator rejects
   # duplicates in RUNTIME_BASE_EXTRA_ARGS; this final ordering is defense in depth.
   base_cmd_words+=(
-    start_depth_cameras:="${RUNTIME_START_DEPTH_CAMERAS}"
+    # Production camera drivers are launched one-by-one below. Keeping them
+    # out of the base roslaunch prevents concurrent selectDevice() calls.
+    start_depth_cameras:=false
     camera1_bind_by_usb_port:=false
     camera2_bind_by_usb_port:=false
     camera3_bind_by_usb_port:=false
@@ -1001,6 +1251,8 @@ start_runtime_session() {
 
   tmux new-session -d -s "${TMUX_SESSION}" -n base \
     "bash -lc 'source \"${DORAEMON_ROS_SETUP}\"; source \"${DORAEMON_WORKSPACE_SETUP}\"; export ROS_MASTER_URI=${ROS_MASTER_URI}; export ROS_IP=127.0.0.1; unset ROS_HOSTNAME; ${base_cmd}'"
+
+  start_depth_cameras_with_startup_recovery
 
   if [[ "${START_WHEELTEC_BASE}" == "true" ]]; then
     local wheeltec_cmd_words=(
@@ -1225,6 +1477,7 @@ map_revision_id: '${active_revision}'" | tee "${RESTART_LOCALIZATION_OUT}"
 }
 
 handle_degraded_startup_without_active_map() {
+  finalize_depth_camera_supervision
   runtime_log_status "[WARN] no active map found; skip restart_localization and readiness gate"
   runtime_log_status "[WARN] system is service-ready only; task readiness stays unavailable until a map is activated and localization is completed"
   runtime_log_status "[OK] runtime started in degraded boot mode"
@@ -1242,6 +1495,7 @@ handle_service_ready_without_startup_relocalization() {
   local active_map="${1:-}"
   local active_revision="${2:-}"
 
+  finalize_depth_camera_supervision
   runtime_log_status "[WARN] startup active-map relocalization disabled: STARTUP_RELOCALIZE_ENABLE=${STARTUP_RELOCALIZE_ENABLE}"
   runtime_log_status "[WARN] skip old active map relocalization: active_map=${active_map:-missing} active_revision=${active_revision:-missing}"
   runtime_log_status "[WARN] system is service-ready only; create/activate a map and localize before starting coverage tasks"
@@ -1369,30 +1623,6 @@ main() {
   fi
   runtime_wait_for_topic "${WAIT_FOR_ODOM_TOPIC}" 40
 
-  if [[ "${RUNTIME_START_DEPTH_CAMERAS}" == "true" ]]; then
-    if [[ "${RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS}" == "true" ]]; then
-      runtime_log_status "检查三台奥比中光深度相机（商业启动硬门）"
-      runtime_wait_for_topic /gemini_cf/depth/image_raw 30 5
-      runtime_wait_for_topic /gemini_nj/depth/image_raw 30 5
-      runtime_wait_for_topic /gemini_front/depth/image_raw 30 5
-      runtime_wait_for_topic /gemini_cf/depth/points 30 5
-      runtime_wait_for_topic /gemini_nj/depth/points 30 5
-      runtime_wait_for_topic /gemini_front/depth/points 30 5
-      if [[ "${DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES}" == "true" ]]; then
-        runtime_require_orbbec_serial gemini_cf "${RUNTIME_ORBBEC_CAMERA1_SERIAL_NUMBER}"
-        runtime_require_orbbec_serial gemini_nj "${RUNTIME_ORBBEC_CAMERA2_SERIAL_NUMBER}"
-        runtime_require_orbbec_serial gemini_front "${RUNTIME_ORBBEC_CAMERA3_SERIAL_NUMBER}"
-      else
-        runtime_log_status "[SKIP] 深度相机身份复核已关闭"
-      fi
-      runtime_log_status "[OK] 三台深度相机图像与点云均就绪"
-    else
-      runtime_log_status "[WARN] 跳过深度相机话题就绪检查；相机缺失或异常不阻塞整机启动"
-    fi
-  else
-    runtime_log_status "[INFO] skip depth camera checks: RUNTIME_START_DEPTH_CAMERAS=${RUNTIME_START_DEPTH_CAMERAS}"
-  fi
-
   runtime_log_status "等待核心服务"
   runtime_wait_for_service /clean_robot_server/app/map_server 30
   runtime_wait_for_service /database_server/app/profile_catalog_service 30
@@ -1465,6 +1695,7 @@ main() {
     if [[ "${REQUIRE_TASK_READINESS_ON_STARTUP}" == "1" ]]; then
       return "${readiness_rc}"
     fi
+    finalize_depth_camera_supervision
     runtime_log_status "[WARN] 任务 readiness 暂未满足（本次不阻塞启动）"
     runtime_log_status "[WARN] system is service-ready only; task readiness stays unavailable until map/localization/safety gates are satisfied"
     runtime_log_status "[OK] runtime started in service-ready mode"
@@ -1480,6 +1711,7 @@ main() {
   fi
 
   run_post_ready_acceptance_if_enabled
+  finalize_depth_camera_supervision
 
   runtime_log_status "[OK] runtime ready"
   runtime_log_status "tmux session: ${TMUX_SESSION}"
