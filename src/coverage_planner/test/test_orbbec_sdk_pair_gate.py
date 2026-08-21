@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import subprocess
+import tempfile
 import unittest
 
 
@@ -54,7 +55,12 @@ def attempt(stdout, returncode=0, stderr=""):
     return GATE.AttemptResult(returncode, stdout, stderr)
 
 
-def run_gate(outcomes, timeout_seconds=10.0):
+def run_gate(
+    outcomes,
+    timeout_seconds=10.0,
+    require_expected_topologies=True,
+    topology_validator=None,
+):
     clock = FakeClock()
     runner = SequenceRunner(outcomes)
     logs = []
@@ -66,6 +72,8 @@ def run_gate(outcomes, timeout_seconds=10.0):
         monotonic=clock.monotonic,
         sleeper=clock.sleep,
         logger=logs.append,
+        require_expected_topologies=require_expected_topologies,
+        topology_validator=topology_validator,
     )
     return result, runner, logs
 
@@ -200,6 +208,72 @@ class OrbbecSdkPairGateTest(unittest.TestCase):
                         logger=None,
                     )
 
+    def test_serial_mode_accepts_stable_usb3_topology_remap(self):
+        remapped = snapshot("LEFT|2-3.4.2", "RIGHT|2-3.1.2", "FRONT|4-2")
+        result, runner, logs = run_gate(
+            [attempt(remapped), attempt(remapped)],
+            require_expected_topologies=False,
+            topology_validator=lambda _topology: True,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(2, len(runner.calls))
+        self.assertEqual("serial-match-usb3-topology-remap", result.last_status)
+        self.assertIn("differs from commissioned hints", "\n".join(logs))
+
+    def test_serial_mode_requires_two_identical_observed_mappings(self):
+        mapping_a = snapshot("LEFT|2-3.4.2", "RIGHT|2-3.1.2", "FRONT|4-2")
+        mapping_b = snapshot("LEFT|4-2.4.2", "RIGHT|4-2.1.2", "FRONT|2-3")
+        result, runner, _ = run_gate(
+            [attempt(mapping_a), attempt(mapping_b), attempt(mapping_a), attempt(mapping_a)],
+            require_expected_topologies=False,
+            topology_validator=lambda _topology: True,
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(4, len(runner.calls))
+
+    def test_serial_mode_rejects_usb2_or_missing_topology(self):
+        remapped = snapshot("LEFT|2-3.4.2", "RIGHT|2-3.1.2", "FRONT|4-2")
+        result, _, logs = run_gate(
+            [attempt(remapped), attempt(remapped)],
+            timeout_seconds=2.0,
+            require_expected_topologies=False,
+            topology_validator=lambda topology: topology != "2-3.4.2",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual("usb3-topology-invalid", result.last_status)
+        self.assertIn("last_status=usb3-topology-invalid", logs[-1])
+
+    def test_serial_mode_still_requires_exact_three_serials(self):
+        wrong_serial = snapshot("LEFT|2-3.4.2", "RIGHT|2-3.1.2", "OTHER|4-2")
+        result, _, _ = run_gate(
+            [attempt(wrong_serial), attempt(wrong_serial)],
+            timeout_seconds=2.0,
+            require_expected_topologies=False,
+            topology_validator=lambda _topology: True,
+        )
+        self.assertFalse(result.success)
+        self.assertEqual("serial-set-mismatch", result.last_status)
+
+    def test_live_usb3_topology_validation_checks_vendor_and_speed(self):
+        with tempfile.TemporaryDirectory() as root:
+            device = os.path.join(root, "2-3.4.2")
+            os.makedirs(device)
+            with open(os.path.join(device, "idVendor"), "w", encoding="ascii") as handle:
+                handle.write("2bc5\n")
+            with open(os.path.join(device, "speed"), "w", encoding="ascii") as handle:
+                handle.write("5000\n")
+            self.assertTrue(GATE.validate_usb3_topology("2-3.4.2", root))
+
+            with open(os.path.join(device, "speed"), "w", encoding="ascii") as handle:
+                handle.write("480\n")
+            self.assertFalse(GATE.validate_usb3_topology("2-3.4.2", root))
+
+            with open(os.path.join(device, "speed"), "w", encoding="ascii") as handle:
+                handle.write("5000\n")
+            with open(os.path.join(device, "idVendor"), "w", encoding="ascii") as handle:
+                handle.write("ffff\n")
+            self.assertFalse(GATE.validate_usb3_topology("2-3.4.2", root))
+
     def test_producer_and_boot_script_enforce_versioned_fixed_contract(self):
         with open(
             os.path.join(REPO_ROOT, "src", "orbbec-ros-sdk", "src", "list_devices_node.cpp"),
@@ -226,6 +300,8 @@ class OrbbecSdkPairGateTest(unittest.TestCase):
         )
         self.assertIn('python3 "${SCRIPT_DIR}/verify_orbbec_sdk_pairs.py"', boot_gate)
         self.assertIn("orbbec_remaining_sec=$((TIMEOUT_SEC - $(elapsed_sec)))", boot_gate)
+        self.assertIn("--allow-topology-remap", boot_gate)
+        self.assertIn('--min-usb-speed "${ORBBEC_MIN_USB_SPEED}"', boot_gate)
         self.assertNotIn("DORAEMON_ORBBEC_LIST_DEVICES_BINARY", boot_gate)
         self.assertNotIn('"${orbbec_binary}" 2>&1', boot_gate)
 

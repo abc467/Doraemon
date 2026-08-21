@@ -543,6 +543,51 @@ class TaskManagerReadinessTest(unittest.TestCase):
             "workflow=IDLE phase=idle task_running=true task_ready=false busy=false manual_assist=false",
         )
 
+    def test_terminal_dock_fault_is_attributed_to_task_manager_not_slam_runtime(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            mission_state="IDLE",
+            phase="IDLE",
+            public_state="ERROR_DOCK",
+            executor_state="IDLE",
+            slam_task_ready=False,
+            slam_task_running=True,
+            slam_blocking_reason=(
+                "task manager busy: mission=IDLE phase=IDLE public=ERROR_DOCK"
+            ),
+        )
+        with mock.patch(
+            "coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param
+        ), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch(
+            "coverage_task_manager.task_manager.time.time", return_value=self.now
+        ):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        self.assertFalse(readiness.overall_ready)
+        self.assertFalse(readiness.can_start_task)
+        self.assertIn(
+            "task manager fault: mission=IDLE phase=IDLE public=ERROR_DOCK",
+            list(readiness.blocking_reasons),
+        )
+        self.assertNotIn(
+            "task manager busy: mission=IDLE phase=IDLE public=ERROR_DOCK",
+            list(readiness.blocking_reasons),
+        )
+        slam_check = next(item for item in readiness.checks if item.key == "slam_runtime")
+        self.assertTrue(slam_check.ok)
+        self.assertEqual(slam_check.level, "OK")
+        self.assertEqual(
+            slam_check.summary,
+            "runtime healthy; blocked by task manager state; "
+            "workflow=IDLE phase=idle task_running=true task_ready=false busy=false manual_assist=false",
+        )
+        task_check = next(item for item in readiness.checks if item.key == "task_manager")
+        self.assertFalse(task_check.ok)
+        self.assertEqual(task_check.level, "ERROR")
+
     def test_active_task_does_not_mask_real_slam_runtime_blockers(self):
         cases = (
             {
@@ -675,6 +720,31 @@ class TaskManagerReadinessTest(unittest.TestCase):
         slam_check = next(item for item in readiness.checks if item.key == "slam_runtime")
         self.assertFalse(slam_check.ok)
         self.assertEqual(slam_check.level, "ERROR")
+
+    def test_matching_revision_accepts_different_runtime_grid_hash(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+        )
+        mgr._runtime_map_snapshot = lambda refresh=False: {
+            "map_name": "site_live_saved_20260412_2122",
+            "revision_id": "rev_site_01",
+            "map_id": "runtime_grid_id",
+            "map_md5": "runtime_grid_md5",
+        }
+        with mock.patch(
+            "coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param
+        ), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch(
+            "coverage_task_manager.task_manager.time.time", return_value=self.now
+        ):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        runtime_check = next(item for item in readiness.checks if item.key == "runtime_map")
+        self.assertTrue(runtime_check.ok, msg=runtime_check.summary)
+        self.assertEqual(runtime_check.level, "OK")
+        self.assertNotIn("runtime map_id", list(readiness.blocking_reasons))
 
     def test_active_task_stale_slam_state_remains_blocking(self):
         mgr, get_param, fake_now = self._build_manager(

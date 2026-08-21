@@ -41,6 +41,18 @@ target_link_libraries(coverage_constraints_nav
   ${catkin_LIBRARIES}
 )
 
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_constraint_identity
+    test/test_constraint_identity.cpp
+  )
+  if(TARGET test_constraint_identity)
+    target_link_libraries(test_constraint_identity
+      coverage_constraints_nav
+      ${catkin_LIBRARIES}
+    )
+  endif()
+endif()
+
 install(TARGETS coverage_constraints_nav
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}

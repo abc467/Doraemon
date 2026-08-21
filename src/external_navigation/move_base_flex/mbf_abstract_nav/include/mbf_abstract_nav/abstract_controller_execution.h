@@ -116,7 +116,25 @@ namespace mbf_abstract_nav
       const std::vector<geometry_msgs::PoseStamped> &plan,
       bool tolerance_from_action = false,
       double action_dist_tolerance = 1.0,
-      double action_angle_tolerance = 3.1415);
+      double action_angle_tolerance = 3.1415,
+      const mbf_abstract_core::PlanExecutionContext &context =
+          mbf_abstract_core::PlanExecutionContext());
+
+    /**
+     * Install a continuous plan update only while the controller execution is
+     * still active.  The state check and plan handoff are serialized with a
+     * terminal state transition so an update cannot be accepted into an
+     * already-finished concurrency slot.
+     */
+    bool trySetNewPlanWhileActive(
+      const std::vector<geometry_msgs::PoseStamped> &plan,
+      bool tolerance_from_action,
+      double action_dist_tolerance,
+      double action_angle_tolerance,
+      const mbf_abstract_core::PlanExecutionContext &context);
+
+    /** Return the epoch currently owned by this controller execution. */
+    std::uint64_t getPlanExecutionEpoch() const;
 
     /**
      * @brief Cancel the controller execution. Normally called upon aborting the navigation.
@@ -146,6 +164,7 @@ namespace mbf_abstract_nav
       ARRIVED_GOAL, ///< The robot arrived the goal.
       CANCELED,     ///< The controller has been canceled.
       STOPPED,      ///< The controller has been stopped!
+      MAP_ERROR,    ///< The safety input (normally the costmap) stayed unavailable.
       INTERNAL_ERROR///< An internal error occurred.
     };
 
@@ -269,11 +288,18 @@ namespace mbf_abstract_nav
      */
     void publishZeroVelocity();
 
+    enum class GoalCheckResult
+    {
+      NOT_REACHED,
+      REACHED,
+      REQUESTED_GOAL_MISSED
+    };
+
     /**
-     * @brief Checks whether the goal has been reached in the range of tolerance or not
-     * @return true if the goal has been reached, false otherwise
+     * Check both the controller path endpoint and, when supplied by MoveBase,
+     * the original requested target which may differ from plan.back().
      */
-    bool reachedGoalCheck();
+    GoalCheckResult reachedGoalCheck();
 
     /**
      * @brief Computes the robot pose;
@@ -300,7 +326,7 @@ namespace mbf_abstract_nav
     mutable boost::mutex lct_mtx_;
 
     //! true, if a new plan is available. See hasNewPlan()!
-    bool new_plan_;
+    bool new_plan_{false};
 
     /**
      * @brief Returns true if a new plan is available, false otherwise! A new plan is set by another thread!
@@ -312,13 +338,17 @@ namespace mbf_abstract_nav
      * @brief Gets the new available plan. This method is thread safe.
      * @return The plan
      */
-    std::vector<geometry_msgs::PoseStamped> getNewPlan();
+    std::vector<geometry_msgs::PoseStamped> getNewPlan(
+        mbf_abstract_core::PlanExecutionContext &context);
 
     //! the last calculated velocity command
     geometry_msgs::TwistStamped vel_cmd_stamped_;
 
     //! the last set plan which is currently processed by the controller
     std::vector<geometry_msgs::PoseStamped> plan_;
+
+    //! Ownership metadata paired atomically with plan_.
+    mbf_abstract_core::PlanExecutionContext plan_execution_context_;
 
     //! the loop_rate which corresponds with the controller frequency.
     ros::Rate loop_rate_;
@@ -335,11 +365,26 @@ namespace mbf_abstract_nav
     //! time before a timeout used for tf requests
     double tf_timeout_;
 
+    //! Maximum continuous duration for which safetyCheck() may reject motion.
+    ros::WallDuration safety_check_patience_;
+
+    //! Required uninterrupted healthy time before motion resumes after a fault.
+    ros::WallDuration safety_check_recovery_hold_;
+
+    //! Start of the current safety-fault episode.
+    ros::WallTime safety_check_failure_start_;
+
+    //! Start of an uninterrupted healthy interval within a fault episode.
+    ros::WallTime safety_check_recovery_start_;
+
+    //! Latched until the safety input has remained healthy for the hold time.
+    bool safety_check_fault_active_{false};
+
     //! dynamic reconfigure config mutex, thread safe param reading and writing
-    boost::mutex configuration_mutex_;
+    mutable boost::mutex configuration_mutex_;
 
     //! main controller loop variable, true if the controller is running, false otherwise
-    bool moving_;
+    std::atomic<bool> moving_;
 
     //! whether move base flex should check for the goal tolerance or not.
     bool mbf_tolerance_check_;

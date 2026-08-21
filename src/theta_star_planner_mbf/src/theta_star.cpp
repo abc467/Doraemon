@@ -70,7 +70,10 @@ bool ThetaStar::generatePath(std::vector<coordsW> & raw_path)
     queue_.pop();
   }
 
-  if (queue_.empty()) {
+  // The goal may have been the last queued node. In that case popping it
+  // makes queue_ empty before the loop condition can observe isGoal() again;
+  // success is determined by curr_data, not by whether unrelated work remains.
+  if (!isGoal(*curr_data)) {
     raw_path.clear();
     return false;
   }
@@ -87,6 +90,14 @@ void ThetaStar::resetParent(tree_node * curr_data)
   curr_data->is_in_queue = false;
   const tree_node * curr_par = curr_data->parent_id;
   const tree_node * maybe_par = curr_par->parent_id;
+
+  // Line-of-sight shortcuts use the normal clearance threshold.  Keep the
+  // short monotonic start-escape chain explicit until it reaches that band.
+  if (!isSafe(curr_data->x, curr_data->y) ||
+      !isSafe(curr_par->x, curr_par->y) ||
+      !isSafe(maybe_par->x, maybe_par->y)) {
+    return;
+  }
 
   if (losCheck(curr_data->x, curr_data->y, maybe_par->x, maybe_par->y, los_cost)) {
     g_cost = maybe_par->g +
@@ -110,11 +121,27 @@ void ThetaStar::setNeighbors(const tree_node * curr_data)
     mx = curr_data->x + moves[i].x;
     my = curr_data->y + moves[i].y;
 
-    if (withinLimits(mx, my)) {
-      if (!isSafe(mx, my)) {
-        continue;
-      }
-    } else {
+    if (!withinLimits(mx, my)) {
+      continue;
+    }
+
+    const bool start_escape = isStartEscapeTransition(
+      curr_data->x, curr_data->y, mx, my);
+    if (!isSafe(mx, my) && !start_escape) {
+      continue;
+    }
+
+    // Use four-connected moves while leaving the high soft-cost start band.
+    // This prevents a diagonal from slipping between two harder side cells.
+    if (start_escape && i >= 4) {
+      continue;
+    }
+
+    // Validate the whole edge, not only its destination.  In particular this
+    // prevents an 8-connected diagonal step from cutting between blocked
+    // orthogonal neighbours.
+    if (!start_escape &&
+        !isLineSafe(curr_data->x, curr_data->y, mx, my)) {
       continue;
     }
 
@@ -149,6 +176,24 @@ void ThetaStar::setNeighbors(const tree_node * curr_data)
   }
 }
 
+bool ThetaStar::isStartEscapeTransition(
+  int current_x, int current_y, int next_x, int next_y) const
+{
+  if (isSafe(current_x, current_y)) {
+    return false;
+  }
+  const unsigned char current_cost = costmap_->getCost(current_x, current_y);
+  const unsigned char next_cost = costmap_->getCost(next_x, next_y);
+  if (current_cost == UNKNOWN_COST || next_cost == UNKNOWN_COST) {
+    return allow_unknown_ && next_cost == current_cost;
+  }
+  if (current_cost >= costmap_2d::INSCRIBED_INFLATED_OBSTACLE ||
+      next_cost >= costmap_2d::INSCRIBED_INFLATED_OBSTACLE) {
+    return false;
+  }
+  return next_cost <= current_cost;
+}
+
 void ThetaStar::backtrace(std::vector<coordsW> & raw_points, const tree_node * curr_n) const
 {
   std::vector<coordsW> path_rev;
@@ -173,56 +218,107 @@ bool ThetaStar::losCheck(
   const int & x0, const int & y0, const int & x1, const int & y1,
   double & sl_cost) const
 {
-  sl_cost = 0;
+  return isLineSafe(x0, y0, x1, y1, &sl_cost);
+}
 
-  int cx, cy;
-  int dy = abs(y1 - y0), dx = abs(x1 - x0), f = 0;
-  int sx, sy;
-  sx = x1 > x0 ? 1 : -1;
-  sy = y1 > y0 ? 1 : -1;
+bool ThetaStar::isLineSafe(
+  int x0, int y0, int x1, int y1,
+  double * traversal_cost,
+  coordsM * blocked_cell,
+  unsigned char * blocked_cost) const
+{
+  if (traversal_cost != nullptr) {
+    *traversal_cost = 0.0;
+  }
 
-  int u_x = (sx - 1) / 2;
-  int u_y = (sy - 1) / 2;
-  cx = x0;
-  cy = y0;
+  auto reject = [&](int x, int y, unsigned char cost) {
+      if (blocked_cell != nullptr) {
+        *blocked_cell = {x, y};
+      }
+      if (blocked_cost != nullptr) {
+        *blocked_cost = cost;
+      }
+      return false;
+    };
 
-  if (dx >= dy) {
-    while (cx != x1) {
-      f += dy;
-      if (f >= dx) {
-        if (!isSafe(cx + u_x, cy + u_y, sl_cost)) {
+  auto visit = [&](int x, int y, bool add_traversal_cost) {
+      if (x < 0 || y < 0 ||
+          x >= static_cast<int>(costmap_->getSizeInCellsX()) ||
+          y >= static_cast<int>(costmap_->getSizeInCellsY())) {
+        return reject(x, y, static_cast<unsigned char>(UNKNOWN_COST));
+      }
+
+      const unsigned char raw_cost = costmap_->getCost(x, y);
+      if (raw_cost == UNKNOWN_COST) {
+        if (!allow_unknown_) {
+          return reject(x, y, raw_cost);
+        }
+        if (add_traversal_cost && traversal_cost != nullptr) {
+          const double unknown_cost = OBS_COST - 1;
+          *traversal_cost +=
+            w_traversal_cost_ * unknown_cost * unknown_cost / LETHAL_COST / LETHAL_COST;
+        }
+        return true;
+      }
+
+      if (static_cast<int>(raw_cost) > max_allowed_cost_) {
+        return reject(x, y, raw_cost);
+      }
+
+      if (add_traversal_cost && traversal_cost != nullptr) {
+        const double scaled_cost = getCost(x, y);
+        *traversal_cost +=
+          w_traversal_cost_ * scaled_cost * scaled_cost / LETHAL_COST / LETHAL_COST;
+      }
+      return true;
+    };
+
+  int x = x0;
+  int y = y0;
+  if (!visit(x, y, false)) {
+    return false;
+  }
+
+  const int nx = std::abs(x1 - x0);
+  const int ny = std::abs(y1 - y0);
+  const int step_x = (x1 > x0) - (x1 < x0);
+  const int step_y = (y1 > y0) - (y1 < y0);
+  int ix = 0;
+  int iy = 0;
+
+  // Integer grid traversal between cell centres.  At an exact corner crossing
+  // visit both side cells before the diagonal cell (supercover semantics).
+  while (ix < nx || iy < ny) {
+    const std::int64_t lhs = static_cast<std::int64_t>(1 + 2 * ix) * ny;
+    const std::int64_t rhs = static_cast<std::int64_t>(1 + 2 * iy) * nx;
+
+    if (lhs == rhs) {
+      if (ix < nx && iy < ny) {
+        if (!visit(x + step_x, y, true) || !visit(x, y + step_y, true)) {
           return false;
         }
-        cy += sy;
-        f -= dx;
       }
-      if (f != 0 && !isSafe(cx + u_x, cy + u_y, sl_cost)) {
-        return false;
+      if (ix < nx) {
+        x += step_x;
+        ++ix;
       }
-      if (dy == 0 && !isSafe(cx + u_x, cy, sl_cost) && !isSafe(cx + u_x, cy - 1, sl_cost)) {
-        return false;
+      if (iy < ny) {
+        y += step_y;
+        ++iy;
       }
-      cx += sx;
+    } else if (lhs < rhs) {
+      x += step_x;
+      ++ix;
+    } else {
+      y += step_y;
+      ++iy;
     }
-  } else {
-    while (cy != y1) {
-      f = f + dx;
-      if (f >= dy) {
-        if (!isSafe(cx + u_x, cy + u_y, sl_cost)) {
-          return false;
-        }
-        cx += sx;
-        f -= dy;
-      }
-      if (f != 0 && !isSafe(cx + u_x, cy + u_y, sl_cost)) {
-        return false;
-      }
-      if (dx == 0 && !isSafe(cx, cy + u_y, sl_cost) && !isSafe(cx - 1, cy + u_y, sl_cost)) {
-        return false;
-      }
-      cy += sy;
+
+    if (!visit(x, y, true)) {
+      return false;
     }
   }
+
   return true;
 }
 
@@ -260,9 +356,10 @@ void ThetaStar::initializePosn(int size_inc)
 
 void ThetaStar::clearStart()
 {
-  unsigned int mx_start = static_cast<unsigned int>(src_.x);
-  unsigned int my_start = static_cast<unsigned int>(src_.y);
-  costmap_->setCost(mx_start, my_start, costmap_2d::FREE_SPACE);
+  // Kept for source compatibility.  Mutating one cell in the layered master
+  // costmap created a free island surrounded by the unchanged inflation band
+  // and could also clear the previous request's start.  Start escape is now a
+  // search-local monotonic-cost rule in setNeighbors().
 }
     
 } // namespace theta_star

@@ -35,6 +35,21 @@ proto::ConstraintBuilderOptions CreateConstraintBuilderOptions(
   options.set_min_score(parameter_dictionary->GetDouble("min_score"));
   options.set_global_localization_min_score(
       parameter_dictionary->GetDouble("global_localization_min_score"));
+  options.set_active_frozen_constraint_max_range(
+      parameter_dictionary->HasKey("active_frozen_constraint_max_range")
+          ? parameter_dictionary->GetDouble(
+                "active_frozen_constraint_max_range")
+          : 0.);
+  options.set_active_frozen_constraint_min_points(
+      parameter_dictionary->HasKey("active_frozen_constraint_min_points")
+          ? parameter_dictionary->GetNonNegativeInt(
+                "active_frozen_constraint_min_points")
+          : 0);
+  options.set_active_frozen_local_min_score(
+      parameter_dictionary->HasKey("active_frozen_local_min_score")
+          ? parameter_dictionary->GetDouble(
+                "active_frozen_local_min_score")
+          : options.min_score());
   options.set_loop_closure_translation_weight(
       parameter_dictionary->GetDouble("loop_closure_translation_weight"));
   options.set_loop_closure_rotation_weight(

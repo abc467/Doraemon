@@ -1,7 +1,8 @@
 [Unit]
 Description=Doraemon Robot Runtime
-After=local-fs.target network-online.target systemd-udev-settle.service
+After=local-fs.target network-online.target systemd-udev-settle.service doraemon-orbbec-usb-preflight.service
 Wants=network-online.target systemd-udev-settle.service
+Requires=doraemon-orbbec-usb-preflight.service
 
 [Service]
 Type=oneshot

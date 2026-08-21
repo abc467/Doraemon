@@ -131,6 +131,33 @@ def _format_pairs(pairs: Sequence[str]) -> str:
     return ",".join(pairs) if pairs else "<none>"
 
 
+def validate_usb3_topology(
+    topology: str,
+    sysfs_root: str = "/sys/bus/usb/devices",
+    vendor_id: str = "2bc5",
+    minimum_speed: float = 5000.0,
+) -> bool:
+    """Validate the SDK-reported device path against the live USB3 sysfs node."""
+    if re.fullmatch(TOPOLOGY_PATTERN, topology) is None:
+        return False
+    try:
+        minimum_speed = float(minimum_speed)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(minimum_speed) or minimum_speed <= 0:
+        return False
+
+    device_root = os.path.join(sysfs_root, topology)
+    try:
+        with open(os.path.join(device_root, "idVendor"), "r", encoding="ascii") as handle:
+            actual_vendor = handle.read().strip().lower()
+        with open(os.path.join(device_root, "speed"), "r", encoding="ascii") as handle:
+            actual_speed = float(handle.read().strip())
+    except (OSError, ValueError):
+        return False
+    return actual_vendor == vendor_id.lower() and actual_speed >= minimum_speed
+
+
 def verify_stable_pairs(
     binary: str,
     expected_pairs: Sequence[str],
@@ -139,8 +166,11 @@ def verify_stable_pairs(
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     logger: Optional[Callable[[str], None]] = print,
+    require_expected_topologies: bool = True,
+    topology_validator: Optional[Callable[[str], bool]] = None,
 ) -> GateResult:
     expected = validate_expected_pairs(expected_pairs)
+    expected_serials = tuple(sorted(pair.split("|", 1)[0] for pair in expected))
     if (
         not math.isfinite(timeout_seconds)
         or timeout_seconds <= 0
@@ -154,6 +184,7 @@ def verify_stable_pairs(
     last_status = "deadline-exhausted"
     last_returncode = 0
     observed: Tuple[str, ...] = ()
+    previous_accepted: Tuple[str, ...] = ()
 
     while True:
         remaining = deadline - monotonic()
@@ -181,6 +212,7 @@ def verify_stable_pairs(
             last_status = "global-deadline-exceeded"
         elif last_returncode != 0:
             consecutive = 0
+            previous_accepted = ()
             observed = ()
             last_status = (
                 "attempt-timeout"
@@ -190,23 +222,50 @@ def verify_stable_pairs(
         else:
             snapshot = parse_machine_snapshot(attempt.stdout)
             observed = snapshot.pairs
-            if snapshot.valid and observed == expected:
-                consecutive += 1
-                last_status = "exact-match"
+            observed_serials = tuple(
+                sorted(pair.split("|", 1)[0] for pair in observed)
+            )
+            topologies_are_valid = snapshot.valid and (
+                topology_validator is None
+                or all(
+                    topology_validator(pair.split("|", 1)[1])
+                    for pair in observed
+                )
+            )
+            identity_matches = snapshot.valid and (
+                observed == expected
+                if require_expected_topologies
+                else observed_serials == expected_serials
+            )
+            if identity_matches and topologies_are_valid:
+                consecutive = consecutive + 1 if observed == previous_accepted else 1
+                previous_accepted = observed
+                last_status = (
+                    "exact-match"
+                    if observed == expected
+                    else "serial-match-usb3-topology-remap"
+                )
                 if logger is not None:
                     logger(
-                        "[INFO] Orbbec SDK exact snapshot attempt=%d consecutive=%d/%d observed=%s"
+                        "[INFO] Orbbec SDK accepted snapshot attempt=%d consecutive=%d/%d status=%s observed=%s"
                         % (
                             attempts,
                             consecutive,
                             REQUIRED_CONSECUTIVE_SNAPSHOTS,
+                            last_status,
                             _format_pairs(observed),
                         )
                     )
                 if consecutive >= REQUIRED_CONSECUTIVE_SNAPSHOTS:
                     if logger is not None:
+                        if not require_expected_topologies and observed != expected:
+                            logger(
+                                "[WARN] Orbbec USB3 topology differs from commissioned hints; "
+                                "continuing with stable serial-bound devices expected=%s observed=%s"
+                                % (_format_pairs(expected), _format_pairs(observed))
+                            )
                         logger(
-                            "[OK] Orbbec SDK stable serial/topology pairs attempts=%d consecutive=%d observed=%s"
+                            "[OK] Orbbec SDK stable serial identities and USB3 links attempts=%d consecutive=%d observed=%s"
                             % (attempts, consecutive, _format_pairs(observed))
                         )
                     return GateResult(
@@ -221,9 +280,17 @@ def verify_stable_pairs(
                     )
             else:
                 consecutive = 0
-                last_status = (
-                    "pair-set-mismatch" if snapshot.valid else snapshot.status
-                )
+                previous_accepted = ()
+                if not snapshot.valid:
+                    last_status = snapshot.status
+                elif not identity_matches:
+                    last_status = (
+                        "pair-set-mismatch"
+                        if require_expected_topologies
+                        else "serial-set-mismatch"
+                    )
+                else:
+                    last_status = "usb3-topology-invalid"
 
         remaining = deadline - monotonic()
         if remaining <= 0:
@@ -266,6 +333,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--binary", required=True)
     parser.add_argument("--timeout-seconds", required=True, type=float)
     parser.add_argument("--expected", action="append", required=True)
+    parser.add_argument(
+        "--allow-topology-remap",
+        action="store_true",
+        help=(
+            "treat configured topologies as commissioning hints while still "
+            "requiring exact serial identities and live USB3 links"
+        ),
+    )
+    parser.add_argument("--sysfs-root", default="/sys/bus/usb/devices")
+    parser.add_argument("--vendor-id", default="2bc5")
+    parser.add_argument("--min-usb-speed", type=float, default=5000.0)
     args = parser.parse_args(argv)
 
     if not os.path.isabs(args.binary) or not os.path.isfile(args.binary):
@@ -276,10 +354,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
     try:
+        topology_validator = None
+        if args.allow_topology_remap:
+            topology_validator = lambda topology: validate_usb3_topology(
+                topology,
+                sysfs_root=args.sysfs_root,
+                vendor_id=args.vendor_id,
+                minimum_speed=args.min_usb_speed,
+            )
         result = verify_stable_pairs(
             args.binary,
             args.expected,
             args.timeout_seconds,
+            require_expected_topologies=not args.allow_topology_remap,
+            topology_validator=topology_validator,
         )
     except ValueError as error:
         print("[ERROR] invalid Orbbec SDK pair-gate configuration: %s" % error)

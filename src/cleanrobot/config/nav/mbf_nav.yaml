@@ -2,19 +2,18 @@
 # Move Base Flex (MBF) 插件注册
 # =========================
 planners:
+  - name: SmacLatticePlanner
+    type: "smac_lattice_planner_mbf/SmacLatticePlanner"
+  # 保留旧 Theta* 插件便于回退和对照，但正式 CONNECT 不再选择它。
   - name: ThetaStarPlanner
     type: "mbf_global_planner/ThetaStarPlanner"
-  # - name: AStarPlanner
-  #   type: "a_star_planner/AStarMBFPlanner"
 
 controllers:
-  - name: MPPI_Connect_Controller
-    type: "local_planner/MPPIController"
+  # 当前调试阶段只加载 Standard MPPI；点对点与覆盖跟踪统一使用它。
+  # State 实例暂时停用。不要只删参数而保留注册，否则误调用时会加载默认值。
+  # - name: MPPI_State_Lattice_Controller
+  #   type: "local_planner/MPPIController"
   - name: MPPI_Standard_Controller
-    type: "local_planner/MPPIController"
-  - name: MPPI_Heavy_Controller
-    type: "local_planner/MPPIController"
-  - name: MPPI_Eco_Controller
     type: "local_planner/MPPIController"
   - name: MyPlanner
     type: "my_planner/MyPlanner"
@@ -22,13 +21,167 @@ controllers:
 recovery_behaviors:
   - name: clear_costmap
     type: "clear_costmap_recovery/ClearCostmapRecovery"
-  # - name: rotate
-  #   type: "rotate_recovery/RotateRecovery"
 
-# 常用节奏
-# planner/controller 的频率与 patience 已拆到 mbf_timing.yaml，
-# 由正式的 move_base_flex 运行时统一加载。
+# planner/controller频率与patience在mbf_timing.yaml中统一配置。
 recovery_enabled: true
+
+# 旧规划器在整个调用期持有代价地图锁；State Lattice使用不可变快照，
+# 只在取得搜索快照和最终复核快照时短暂加锁。
+planner_lock_costmap: true
+planner_lock_costmap_overrides:
+  SmacLatticePlanner: false
+
+# 清障只作用于局部障碍层，并立即触发重建，避免重试读取刚清空的瞬态地图。
+clear_costmap:
+  affected_maps: local
+  layer_names: [obstacle_layer]
+  reset_distance: 3.0
+  invert_area_to_clear: false
+  force_updating: true
+
+
+# =========================
+# 正式全局规划器（Nav2 Smac State Lattice 的 ROS1/MBF 移植）
+# =========================
+SmacLatticePlanner:
+  # 以 Nav2 官方差速最小控制集为基线（5 cm、32 航向、0.40 m 转弯半径），
+  # 为4个轴向航向补齐8条缺失的前进左右弧。文件仍保留官方原地旋转原语，
+  # 但生产的连续前进搜索会拒绝原地边，不依赖它们完成转向。
+  lattice_filepath: "package://smac_lattice_planner_mbf/config/diff_5cm_0p40m_32bins_forward.json"
+  # Forward-only搜索不能依赖原地旋转才能离开某些航向格。启动时强制
+  # 校验32个航向都同时具备平移左弧、直线和右弧，缺一项即拒绝加载。
+  require_forward_steering_primitives: true
+  # The production map is complete and block endpoints are required to lie in
+  # mapped free space. Keep global search, MPPI and the final filled-footprint
+  # proof on the same fail-closed unknown-space policy.
+  allow_unknown: false
+  max_iterations: 2000000
+  max_on_approach_iterations: 1000
+  # Long searches must still react promptly to cancel and the wall-clock
+  # deadline.  Checking every 100 expansions avoids multi-second cancel lag.
+  terminal_checking_interval: 100
+  # 复杂连接不再因四档后缀每20秒重启而耗尽搜索账本。
+  # 总期限180秒覆盖Theta、后缀候选、FULL回退和双快照校验；
+  # cancel 仍每次 expansion 检查，不会因此失去立即取消能力。
+  max_planning_time: 180.0
+  tolerance: 0.10
+  lookup_table_size: 20.0
+  goal_heading_mode: DEFAULT
+  coarse_search_resolution: 1
+  # 同一物理起点同时尝试最近航向格及其左右相邻格；只有从实时精确
+  # 姿态原地扫掠到该格完整 footprint 安全时才加入搜索。
+  start_heading_seed_span: 1
+
+  # 复合生产模式：沿用现场已验证的 Theta* 长距离清障路径，只把
+  # 最后 100 个 5 cm 参考姿态交给官方 State Lattice，生成满足终点
+  # 位置与最近航向格约束的连续后缀。100 是姿态数（约 4.95 m），
+  # 不是欧氏直线距离；最终小量化误差由 MPPI/MBF 分层容差共同吸收。
+  theta_prefix_lattice_suffix_enabled: true
+  # Nav2 Smac State Lattice 官方 smoother 的 ROS1 适配。已通过同图全连接
+  # A/B并启用；只平滑State生成的后缀/FULL
+  # 路径，不改Theta前缀。原始State路径始终保留，候选只有在曲率、
+  # 中心软代价、Forward/Rotation语义和连续矩形footprint全部通过时替换。
+  state_lattice_smoothing_enabled: true
+  state_lattice_smoother_max_iterations: 1000
+  state_lattice_smoother_w_data: 0.2
+  state_lattice_smoother_w_smooth: 0.3
+  state_lattice_smoother_tolerance: 1.0e-10
+  state_lattice_smoother_do_refinement: true
+  state_lattice_smoother_refinement_num: 2
+  state_lattice_smoother_max_time: 1.0
+  # 下面是本项目额外的原子接受门槛，不改变官方迭代公式。
+  state_lattice_smoother_max_path_length_ratio: 1.05
+  state_lattice_smoother_max_center_cost_increase: 0.0
+  state_lattice_smoother_max_mean_center_cost_increase: 0.5
+  state_lattice_smoother_max_curvature_regression_ratio: 1.05
+  state_lattice_smoother_minimum_curvature_improvement: 0.001
+  # Theta 中心线仅允许进入更低的膨胀代价区域。按当前现场调试策略，
+  # Theta 所属路径段不做全局规划器的连续矩形 footprint 扫掠，由 MPPI
+  # 在执行时结合局部代价图避障；State 前/后缀的连续 footprint 校验保留。
+  theta_max_allowed_cost: 10
+  theta_full_footprint_validation_enabled: false
+  theta_w_traversal_cost: 32.0
+  theta_w_euc_cost: 1.5
+  theta_w_heuristic_cost: 1.0
+  theta_reference_spacing: 0.05
+  theta_reference_smoothing_enabled: true
+  # 整条Theta参考若不超过100点，State从实时起点一次接管完整短连接，
+  # 使用剩余总预算且失败后不重复FULL。较长路线的100点末段无解时，
+  # 才自动扩大到160/240/400点；各档共享同一总期限。
+  # 首选100点后缀允许连续搜索最多60秒，避免在系统负载较高时
+  # 反复丢弃已展开状态；后续候选仍共享同一180秒绝对期限。
+  theta_suffix_candidate_max_planning_time: 60.0
+  # 从实车精确SE(2)出发，先尝试在Theta前方第40个参考点（约2m）
+  # 以当地切线接入；失败才扩大到80/120/160点。主路径只接受连续
+  # 前进、无原地旋转的State前缀。每档预算与后缀共享180秒总期限。
+  theta_prefix_candidate_max_planning_time: 20.0
+  # 接点必须同位置/同航向，且前后几何切线和局部曲率连续。0.20rad
+  # 覆盖32航向格的单格量化误差，2.5rad/m对应0.4m原语曲率尺度。
+  theta_prefix_join_max_heading_error: 0.20
+  theta_prefix_join_max_curvature_jump: 2.5
+  # 前缀和整路State搜索均只允许连续前进原语。找不到安全前进接入时
+  # 继续扩大接入距离，最后使用同样禁止原地旋转的FULL State搜索；
+  # 不再把Theta起点改造成含方向歧义的原地旋转回退。
+  # 若保留的Theta前缀在某条边首次发生矩形车身连续碰撞，State不再
+  # 从整条路线起点重搜；接管点沿Theta向起点方向提前30个参考姿态，
+  # 并由State从该处一直规划到最终目标。
+  theta_unsafe_segment_lookback_points: 30
+  # 旧的“State 在整条 Theta 走廊中搜索全程”保留代码用于离线对照，
+  # 生产关闭，避免复合后缀失败时先重复消耗四档走廊预算。
+  theta_corridor_search_enabled: false
+  coarse_route_max_planning_time: 5.0
+  corridor_level_max_planning_time: 10.0
+  # 早期走廊即使全部失败，也给无限制域 FULL 搜索和最新地图复核
+  # 保留独立预算，避免“有回退代码、实际却没有回退时间”。
+  corridor_full_search_min_time: 12.0
+  final_validation_reserve_time: 5.0
+  # 在受限走廊内，用 Theta 粗路线的剩余弧长修正官方直线启发式被
+  # U 形障碍误导的问题；它只改变候选排序，FULL 回退会完全关闭。
+  corridor_route_progress_weight: 1.0
+
+  # 搜索代价沿用 Nav2 官方 State Lattice 参数语义。
+  # 生产运动约束明确禁止倒车：保留前进圆弧和原地旋转，不展开
+  # reverse primitives。这也避免 Reeds-Shepp 启发式未表达 reverse_penalty
+  # 时用大量倒车分支干扰固定终点姿态的前进进场搜索。
+  reverse_penalty: 4.0
+  # 现场复测发现 State 后缀会连续选择“右弯-直线-左弯-直线”，
+  # 虽然 MPPI 能准确跟踪，但会形成可见的左右摆动。该参数只提高
+  # 左右转向原语互相切换的代价，不增加持续同向圆弧的代价。
+  change_penalty: 0.45
+  # 降低移动圆弧相对直线的附加代价，让终点角差较大时更愿意
+  # 提前走连续圆弧，而不是把主要转向留到最后的小范围内。
+  non_straight_penalty: 1.05
+  # 增强全局搜索对软膨胀代价的敏感度，使路径在空间允许时
+  # 主动远离墙体和禁行区；完整 footprint 仍负责硬碰撞边界。
+  cost_penalty: 5.0
+  retrospective_penalty: 0.015
+  # 差速底盘可原地转向。该代价仍高于普通移动步，但不再高到迫使
+  # 搜索用一段倒车代替合理的姿态调整。
+  # 优先用连续前进圆弧完成姿态切入；只在通道几何确实
+  # 需要时使用原地旋转原语。倒车扩展仍完全关闭。
+  rotation_penalty: 10.0
+  allow_reverse_expansion: false
+  # 终点解析连接与启发式统一使用 Dubins 前进模型；若捷径碰撞，
+  # 则继续搜索前进圆弧/原地旋转原语，不会退化成 Reeds-Shepp 倒车。
+  prefer_forward_analytic_expansion: true
+  cache_obstacle_heuristic: false
+  downsample_obstacle_heuristic: true
+  use_quadratic_cost_penalty: false
+  analytic_expansion_ratio: 3.5
+  # 允许从更远处尝试连续前进 Dubins 终点连接，提前完成姿态调整。
+  analytic_expansion_max_length: 4.0
+  analytic_expansion_max_cost: 200.0
+  analytic_expansion_max_cost_override: false
+
+  # 不使用中心点近似：每个采样姿态检查完整矩形 footprint；官方运动
+  # 原语/解析扩展的相邻状态按各矩形顶点实际位移自适应细分到 1 cm。
+  collision_checker_angle_bins: 72
+  collision_check_resolution: 0.01
+  # Never search a reset/not-yet-updated master. One live-map invalidation may
+  # be replanned inside the same configured overall deadline.
+  costmap_current_timeout: 3.0
+  live_validation_retries: 1
+  live_validation_retry_min_time: 0.25
 
 
 # =========================
@@ -39,16 +192,53 @@ ThetaStarPlanner:
   allow_unknown: true
   terminal_checking_interval: 1024
   # Prefer paths through low-cost cells and reject cells too close to inflated
-  # keepouts/obstacles. This keeps CONNECT centerlines away from no-go edges
-  # before MPPI receives the path.
-  w_traversal_cost: 6.0
+  # keepouts/obstacles. With the shared 10.0/1.0 inflation, cost 26 places the
+  # continuous centre-line threshold at about 0.442 m; on the 5 cm grid the
+  # nearest straight band is about 0.45 m. For the 0.65 m body this gives about
+  # 0.12 m side clearance, while traversal cost still adds clearance when space allows.
+  w_traversal_cost: 8.0
   w_euc_cost: 2.0
   w_heuristic_cost: 1.0
-  max_allowed_cost: 140
+  max_allowed_cost: 26
+  # Theta* 先保证 XY 拓扑连通；然后对不安全局部路段做 SE(2)
+  # 修复，每条候选边都连续扫掠完整矩形车身。不再因某个初始
+  # footprint 冲突就立即否定整条已连通路径。
   use_footprint_path_check: true
   goal_tolerance: 0.05
+  # 缓存复用同时比较终点朝向，避免相同 XY 但新的清扫进入方向
+  # 错误复用上一条路径。
+  goal_orientation_tolerance: 0.05
   path_check_interval: 0.05
   path_max_age: 60.0
+  # 先保证目标 XY 可达，再在已成功路径的末段做朝向连续几何整形。
+  # 整形失败不会否定已经连通的 block，Connect MPPI 仍可使用原始 XY 路径。
+  terminal_approach_enabled: true
+  # 优先保留 0.40 m 同目标朝向直线尾段；空间受限时按 0.10 m
+  # 逐步缩短到 0 m，但 Bezier 终点切线仍与目标朝向一致。
+  terminal_straight_length: 0.40
+  terminal_min_straight_length: 0.00
+  terminal_straight_length_step: 0.10
+  # 差速底盘可原地转向，0 表示不施加 Dubins/汽车型最小转弯半径硬约束。
+  terminal_min_turn_radius: 0.00
+  terminal_sample_step: 0.05
+  # 允许在目标前约 1.8 m 内选择末段替换点，给提前对向留出空间。
+  terminal_max_prefix_splice_distance: 1.80
+  # 旧 Theta* 插件保留原有局部修复能力；本次“State 后缀不倒车”
+  # 只约束 SmacLatticePlanner，不扩展成其他规划器的全局策略。
+  se2_refinement_enabled: true
+  se2_allow_reverse: true
+  # 与 Theta* 的 allow_unknown 保持一致，允许完整车身扫掠经过未知栅格；
+  # 致命障碍和地图边界仍按硬碰撞拒绝。
+  se2_allow_unknown: true
+  se2_yaw_bins: 32
+  se2_max_expansions: 300000
+  se2_max_repairs: 8
+  se2_motion_step: 0.10
+  se2_collision_check_step: 0.025
+  se2_goal_position_tolerance: 0.12
+  se2_goal_yaw_tolerance: 0.20
+  se2_repair_window_lengths: [1.8, 3.0, 4.5, 6.0]
+  se2_corridor_widths: [0.75, 1.25, 2.0]
 
 
 # =========================
@@ -66,408 +256,311 @@ MyPlanner:
 # =========================
 # MPPI 局部控制器（实例 1：全覆盖清扫）
 # =========================
-
-MPPI_Standard_Controller: &mppi_standard_controller
+# 参数语义以 Nav2 MPPI 官方文档为基线；标有“本项目扩展”的参数由
+# ROS1/MBF 适配层实现。Standard 与 State 保持独立完整配置，不继承。
+# 官方参数说明：https://docs.nav2.org/configuration/packages/configuring-mppic.html
+# 官方调参指南：https://github.com/ros-navigation/navigation2/tree/main/nav2_mppi_controller
+MPPI_Standard_Controller:
+  # 临时 v9 模块级 A/B：本段只保留 v9 已支持的键；具体 v9 数值由
+  # cleanrobot/launch/mppi_v9_ab.yaml 在启动时覆盖。当前版专属键必须从此
+  # 命名空间移除，否则会污染 v9 PathHandler/Optimizer 的现场对比结论。
+  # --- ROS1/MBF 适配层：里程计与到达判定（本项目扩展） ---
+  # 用于初始速度估计和“已停稳”判定的里程计话题。
   odom_topic: /odom
-  # FOLLOW 到达判定：距离 <= 0.6 m 且朝向误差 <= 0.4 rad。
-  goal_tolerance: 0.6
-  angle_tolerance: 0.4
-  rotate_to_goal_enabled: false
-  rotate_to_goal_kp: 0.8
-  rotate_to_goal_min_angular_speed: 0.12
-  rotate_to_goal_max_angular_speed: 0.4
-  rotate_to_goal_collision_horizon: 0.5
-  rotate_to_goal_collision_step: 0.05
+  # 仅约束整条局部控制任务的最终全局目标，不是每个路径点的跟踪容差；
+  # MBF传入的容差只能进一步收紧，不能放宽这里的配置。
+  goal_tolerance: 0.60       # 最终目标XY欧氏距离容差，单位m
+  angle_tolerance: 0.40      # 最终目标最短航向角误差容差，单位rad
+  # --- 官方 MPPI：预测模型与采样 ---
+  motion_model: "DiffDrive"   # 差速模型，只允许vx和wz，不生成横向vy运动
+  # 本移植显式读取控制频率。当前周期0.10s与model_dt相等，会启用控制序列
+  # warm-start平移；若控制周期大于model_dt，本地代码会拒绝初始化。
+  controller_frequency: 10.0  # 期望computeVelocityCommands调用频率，单位Hz
+  time_steps: 40              # 每条候选轨迹的离散预测状态数
+  model_dt: 0.10              # 相邻状态时间间隔；预测时域=40*0.10=4.0s
+  batch_size: 1800            # 每次迭代采样的候选控制序列数量；越大越耗CPU/内存
+  iteration_count: 1          # 每控制周期的优化迭代数；官方通常建议保持1并增加batch
 
-  # 模型参数
-  time_steps: 30           # 预测时域步数
-  model_dt: 0.10           # 与 10 Hz 控制周期对齐，预测时域共 3 秒
+  # 叠加到warm-start控制序列上的高斯速度噪声标准差；越大搜索越宽，
+  # 但命令方差/抖动和采到极端候选的概率也会上升。
+  vx_std: 0.15                # 纵向速度采样标准差，单位m/s
+  vy_std: 0.0                 # DiffDrive不使用横向速度噪声
+  wz_std: 0.30                # 角速度采样标准差，单位rad/s
+
+  # rollout和最终控制序列的硬运动约束；动态speed_limit只缩放速度项。
+  vx_min: 0.0                 # 最小纵向速度，0表示禁止倒车，单位m/s
+  vx_max: 0.32                # 最大纵向速度，单位m/s；4s内理论最大行程1.28m
+  vy_max: 0.0                 # DiffDrive横向速度固定为0，单位m/s
+  wz_max: 0.60                # 最大角速度绝对值，单位rad/s
+  ax_max: 3.0                 # 最大纵向加速度，单位m/s^2
+  ax_min: -0.6                # 最大制动减速度（应为负），单位m/s^2
+  az_max: 1.0                 # 最大角加速度绝对值，单位rad/s^2
+
+  # softmax权重=exp(-(cost-min_cost)/temperature)：越低越集中于最低代价候选，
+  # 越高越接近所有候选的均值；过低会更敏感，过高会削弱Critic选择性。
+  temperature: 0.30
+  # 信息论MPPI的控制噪声/控制能量正则项系数，不是时间折扣；官方定义为
+  # 平滑性（较高）与低能量（较低）的权衡，通常保留默认值。
+  gamma: 0.015
+
+  # 当全部候选不可行（或最终验证请求软复位）时，重置优化器并完整重采样的
+  # 额外重试次数；超过后抛出失败给MBF。每次重试会清除fail_flag和路径缓存。
+  retry_attempt_limit: 2
+
+  # --- 官方 PathHandler：路径裁剪与坐标变换 ---
+  # 从剩余全局路径的最近点开始，向前保留的最大弧长；实际局部路径还会在
+  # local costmap边界处截断。终点前至少保留前驱点，避免只剩单点丢失切向。
+  prune_distance: 1.80       # 单位m；覆盖1.28m预测行程及Critic前探余量
+  # TF lookup可等待/容忍的时长参数，单位s；不是传感器消息TTL。
+  transform_tolerance: 0.25
+  # 本地所有Critic的threshold_to_consider和near_goal_distance，均比较“变换并
+  # 裁剪后的局部路径弧长”，不是机器人到最终目标的直线距离。
+  # PathAlign/PathFollow共享官方中心点路径有效性缓存：LETHAL/253/越图无效，
+  # unknown是否有效由LayeredCostmap::isTrackingUnknown决定，与CostCritic的
+  # allow_unknown不是同一个开关。候选车体安全则由CostCritic独立检查。
+
+  # --- 诊断与最终轨迹复核 ---
+  # 本项目扩展；true时每50次评分输出rollout/Critic/update平均耗时到rosout。
+  timing_diagnostics: false
+  # 关闭候选轨迹Marker构造/发布，减少计算与通信负载；Critic统计不受影响。
+  visualize: true
+  TrajectoryVisualizer:
+    trajectory_step: 5       # visualize=true时，每隔多少条候选轨迹取一条
+    time_step: 3             # visualize=true时，每隔多少个预测状态取一个Marker点
+  # --- 官方 Critic插件：按此顺序累加代价；前项置fail_flag会停止后续评分 ---
+  # 各插件cost_power是加权项的幂次（当前1为线性）；精确归一化随插件而异，
+  # 因此不同Critic的原始统计数值不能只按绝对大小直接比较权重强弱。
+  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic",
+            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic",
+            "PreferForwardCritic", "TwirlingCritic"]
+
+  ConstraintCritic:
+    enabled: true
+    cost_power: 1            # 代价项幂次
+    # DiffDrive本地实现仅累计预测vx越过顶层[vx_min,vx_max]的幅度；
+    # wz和加速度硬限制由运动模型/最终约束投影负责。本Critic不负责碰撞。
+    cost_weight: 5.0
+
+  CostCritic:
+    enabled: true
+    cost_power: 1            # CostCritic累计项的幂次
+    # 膨胀代价软斥力权重；本地先除以254，再除以实际检查的预测点数。
+    # 增大可更早远离代价区，也可能造成减速、边界抖动或拒绝进入可通行软代价区。
+    cost_weight: 12.0
+    # 单个检查点中心代价>=near_collision_cost（本地默认253），或allow_unknown
+    # 接受了unknown/越图中心时，加入的严重软惩罚。
+    critical_cost: 300.0
+    # true时先利用中心膨胀代价筛选；进入“车身可能触障”的代价范围后，才栅格化
+    # 完整矩形footprint检查硬障碍。车身内普通253膨胀格不是硬碰撞，避免重复膨胀；
+    # LETHAL、禁止的unknown及车体部分越出costmap才是硬失败。
+    consider_footprint: true
+    collision_cost: 1000000.0 # 任一检查点硬碰撞时给整条候选的淘汰级代价
+    # 局部路径弧长<=该值时停止累计普通(<253)膨胀软代价；critical和硬碰撞仍检查。
+    near_goal_distance: 0.35
+    # 每隔几个rollout状态评分。1表示每个0.10s离散状态都检查，但不会自动检查
+    # 两状态之间的连续扫掠；连续扫掠属于上面的TrajectoryValidator。
+    trajectory_point_step: 1
+    # 本项目OpenMP扩展：按候选轨迹并行完整CostCritic。线程越多不一定越快，
+    # 还会与costmap和其他导航线程争用CPU。
+    parallel_threads: 10
+
+  GoalAngleCritic:
+    enabled: true
+    cost_power: 1
+    # 激活后，按候选所有预测状态到“局部路径末点航向”的最短角误差均值评分。
+    cost_weight: 3.2
+    # 局部路径弧长<=该值时激活；默认只接受目标原航向，不把yaw+pi视为等价。
+    threshold_to_consider: 0.60
+
+  GoalCritic:
+    enabled: true
+    cost_power: 1
+    # 激活后，按候选所有预测状态到局部路径末点的XY距离均值评分，
+    # 不是只比较候选轨迹最后一个点。
+    cost_weight: 5.2
+    threshold_to_consider: 1.00 # 局部路径弧长<=该值时激活
+
+  PathAlignCritic:
+    enabled: true
+    cost_power: 1
+    # 候选轨迹按自身累计行程与路径累计弧长配对，惩罚平均位置误差；
+    # use_path_orientations=true时把航向误差也并入该距离项。
+    cost_weight: 8.5
+    # 在候选达到的最远路径段之前，中心点无效姿态比例超过该值（且无效点>2）时，
+    # 整个PathAlign本周期退出，让Cost/PathFollow引导绕障。
+    max_path_occupancy_ratio: 0.07
+    # 这是激活门槛，不是PathAlign的目标点偏移。候选只要能够沿路径推进
+    # 至少6个索引（当前约0.30m）就开始评分，使内部低速U形弯保持高生效率；
+    # 靠近障碍时仍由下面的中心点占用比例门槛决定是否退出。
+    offset_from_furthest: 6
+    trajectory_point_step: 4 # 每隔4个候选预测状态计算一次对齐，降低计算量
+    # 局部路径弧长<该值时退出，让Goal类Critic接管。
+    threshold_to_consider: 0.40
+    # true同时约束参考XY与yaw；实测紧凑U形弯需要该航向提前量，避免航向
+    # 滞后后向弯道外侧漂移。是否退出由上面的激活门槛和共享中心点有效性决定。
+    use_path_orientations: true
+
+  PathAngleCritic:
+    enabled: true
+    cost_power: 1
+    # 激活后，惩罚候选轨迹末端航向与“候选末端到前方参考点”的方向误差。
+    cost_weight: 2.2
+    # 参考点索引=所有候选达到的最远路径点+4（并限制在局部路径末端）。
+    offset_from_furthest: 4
+    threshold_to_consider: 0.40 # 仅局部路径弧长>该值时考虑
+    # 当前机器人相对参考点要求方向的角误差小于此值时退出；误差达到/超过才激活。
+    max_angle_to_furthest: 0.80
+    # 0=前进偏好；1=前/后方向取较小误差（但vx_min=0时会强制退回0）；
+    # 2=利用可行路径参考点yaw决定期望行驶方向。顶层vx_min是倒车能力的唯一来源。
+    mode: 2
+
+  PathFollowCritic:
+    enabled: true
+    cost_power: 1
+    # 惩罚候选轨迹“最后一个预测状态”到前方路径目标点的XY距离，提供向前推进力。
+    cost_weight: 6.5
+    # 请求目标索引=所有候选达到的最远路径点+5；若该路径中心点无效，则按共享缓存
+    # 向前跳到首个有效点（找不到时保留最终可用目标），不会像PathAlign整体退出。
+    offset_from_furthest: 5
+    threshold_to_consider: 0.40 # 仅局部路径弧长>=该值时激活
+
+  PreferForwardCritic:
+    enabled: true
+    cost_power: 1
+    # 按时间累计负vx并惩罚，不惩罚转弯；当前vx_min=0时通常为0，作为防御性约束。
+    cost_weight: 4.0
+    threshold_to_consider: 0.40 # 仅局部路径弧长>=该值时激活
+
+  TwirlingCritic:
+    enabled: true
+    cost_power: 1
+    # 惩罚候选全时域|wz|均值，抑制不必要旋转；本地实现用局部路径弧长与顶层
+    # goal_tolerance比较，弧长<0.60m时退出，避免妨碍终点航向收敛。
+    cost_weight: 2.0
+
+# =========================
+# MPPI 局部控制器（停用存档：State Lattice 点对点）
+# =========================
+# 当前未在controllers中注册，下面参数不会创建控制器实例；保留用于后续对照恢复。
+MPPI_State_Lattice_Controller:
+  # --- ROS1/MBF 适配层：里程计与到达判定（本项目扩展） ---
+  odom_topic: /odom
+  # 只作用于整条State路径的最终目标。外层MBF/Executor仍独立复核任务目标。
+  goal_tolerance: 0.50
+  angle_tolerance: 0.40
+  trans_stopped_velocity: 0.02
+  rot_stopped_velocity: 0.03
+  goal_stopped_time: 0.30
+  speed_limit_topic: "/coverage_executor/speed_limit_scale"
+
+  # --- 官方 MPPI：预测模型与采样 ---
+  motion_model: "DiffDrive"
   controller_frequency: 10.0
-  batch_size: 2000         # 保留完整候选轨迹数量，依据分阶段耗时再定向优化
-  timing_diagnostics: false # 调试时开启，每 50 周期输出一次分阶段平均耗时
+  time_steps: 60              # 预测时域 = 60 x 0.10 = 6.0 s
+  model_dt: 0.10
+  batch_size: 1800
+  iteration_count: 1
 
-  # 控制输入噪声（标准差）
-  vx_std: 0.1              # 线速度x的噪声标准差
-  vy_std: 0.0              # 线速度y的噪声标准差（差速驱动应为0）
-  wz_std: 0.3              # 角速度z的噪声标准差
+  vx_std: 0.15
+  vy_std: 0.0
+  wz_std: 0.35
 
-  # 控制输入限制
-  vx_max: 0.3             # 最大线速度x（正方向）
-  vx_min: 0.0             # 最小线速度x（负方向，倒车）
-  vy_max: 0.0              # 最大线速度y（差速驱动应为0）
-  wz_max: 0.6              # 最大角速度z
-  # 当前轮速里程计异常时可能持续反馈 0 m/s；允许首个控制周期恢复
-  # 到正常巡航速度，但仍按保守减速度预测停车距离。
+  vx_min: 0.0
+  vx_max: 0.38
+  vy_max: 0.0
+  wz_max: 0.80
   ax_max: 3.0
   ax_min: -0.6
   az_max: 1.0
 
-  # 优化参数
-  iteration_count: 1       # 每次控制周期的优化迭代次数
-  prune_distance: 1.8      # 轨迹修剪距离（超过此距离的轨迹点被忽略）
-  transform_tolerance: 0.25 # 为定位抖动保留裕量，拒绝超过 250 ms 的陈旧位姿
-  temperature: 0.3         # 软最大值温度参数（控制随机性）
-  gamma: 0.015             # 折扣因子（未来代价的权重衰减）
+  temperature: 0.30
+  gamma: 0.015
+  open_loop: false
+  regenerate_noises: false
+  clamp_raw_controls: false
+  model_delay_vx: 0.0
+  model_delay_vy: 0.0
+  model_delay_wz: 0.0
+  sgf_order: 2
+  retry_attempt_limit: 2
 
-  # 运动模型
-  motion_model: "DiffDrive" # 差速驱动模型
+  # --- 官方 PathHandler ---
+  prune_distance: 2.50
+  max_robot_pose_search_dist: 3.00
+  transform_tolerance: 0.25
 
-  # 重试机制
-  retry_attempt_limit: 2   # 路径重试次数限制
-
-  # 可视化
-  visualize: true          # 是否启用轨迹可视化
+  # --- 诊断与最终轨迹复核 ---
+  timing_diagnostics: false
+  publish_critic_stats: true
+  critic_stats_publish_period: 10
+  visualize: false
+  # visualize=false时使用默认降采样值；需要调试时打开即可。
   TrajectoryVisualizer:
-     trajectory_step: 5    # 可视化轨迹的步长
-     time_step: 3          # 可视化时间步长
+    trajectory_step: 5
+    time_step: 3
+  TrajectoryValidator:
+    enabled: false
+    plugin: "mppi::DefaultOptimalTrajectoryValidator"
+    maximum_corner_motion: 0.025
 
-  # 评估函数（Critic）配置
-  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic", 
-            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic", 
-            "PreferForwardCritic", "TwirlingCritic"]
+  # State路径已由全局规划器按前进语义生成，因此不再叠加
+  # PreferForwardCritic；也不使用TwirlingCritic压制必要的路径转向。
+  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic",
+            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic"]
 
-  # --- 各Critic详细配置 ---
-
-  # 约束评估（避免碰撞）
   ConstraintCritic:
-     enabled: true
-     cost_power: 1         # 代价指数
-     cost_weight: 5.0      # 代价权重
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
 
-  # 代价地图评估（路径代价）
   CostCritic:
-     enabled: true
-     cost_power: 1
-     cost_weight: 12.0     # Increase local costmap repulsion for depth obstacles.
-     critical_cost: 300.0  # 临界代价阈值
-     consider_footprint: true  # 使用完整矩形车体做硬碰撞检查
-     collision_cost: 1000000.0 # 碰撞代价
-     near_goal_distance: 0.35  # Keep obstacle repulsion active until close to the goal.
-     trajectory_point_step: 1  # 每个预测点都检查，避免跨过近距离障碍
-     parallel_threads: 1       # 当前场景并行无墙钟收益，避免额外 CPU 调度开销
+    enabled: true
+    allow_unknown: false
+    cost_power: 1
+    cost_weight: 10.0
+    critical_cost: 300.0
+    consider_footprint: true
+    collision_cost: 1000000.0
+    near_goal_distance: 0.10
+    trajectory_point_step: 1
+    parallel_threads: 10
 
-  # 目标角度评估（朝向目标角度）
   GoalAngleCritic:
-     enabled: true
-     cost_power: 1
-     cost_weight: 3.2
-     threshold_to_consider: 0.6 # 仅当距离目标<0.4米时激活
+    enabled: true
+    cost_power: 1
+    cost_weight: 8.0
+    threshold_to_consider: 0.80
 
-  # 目标位置评估（到达目标）
   GoalCritic:
-     enabled: true
-     cost_power: 1
-     cost_weight: 5.2      # 高权重确保目标优先
-     threshold_to_consider: 1.0 # 激活距离阈值
+    enabled: true
+    cost_power: 1
+    cost_weight: 4.0
+    threshold_to_consider: 0.60
 
-  # 路径对齐评估（轨迹与路径对齐）
   PathAlignCritic:
-     enabled: true
-     cost_power: 1
-     cost_weight: 8    # 高权重确保严格对齐  10.0
-     max_path_occupancy_ratio: 0.03 # More readily yield path alignment to dynamic obstacles.
-     offset_from_furthest: 20       # 从最远点开始的偏移量
-     trajectory_point_step: 4       # 轨迹点采样步长
-     threshold_to_consider: 0.4     # 激活阈值
-     use_path_orientations: true    # 是否使用路径朝向信息
+    enabled: true
+    cost_power: 1
+    cost_weight: 10.0
+    max_path_occupancy_ratio: 0.03
+    offset_from_furthest: 6
+    trajectory_point_step: 4
+    threshold_to_consider: 0.025
+    # 仅做位置对齐；动态避障时允许临时偏航。
+    use_path_orientations: false
+    # 与PathFollow共享同一份完整车体路径有效性缓存。
 
-  # 路径角度评估（轨迹角度与路径一致）
   PathAngleCritic:
-     enabled: true
-     vx_min: -0.35         # 激活的最小速度
-     offset_from_furthest: 4
-     cost_power: 1
-     cost_weight: 2.2
-     threshold_to_consider: 0.4
-     max_angle_to_furthest: 0.8     # 与最远点的最大角度差
-     mode: 2               # 计算模式
+    enabled: true
+    cost_power: 1
+    cost_weight: 2.5
+    offset_from_furthest: 8
+    threshold_to_consider: 0.025
+    max_angle_to_furthest: 0.65
+    mode: 2
 
-  # 路径跟随评估（靠近全局路径）
   PathFollowCritic:
-     enabled: true
-     threshold_to_consider: 0.4
-     offset_from_furthest: 6.2
-     cost_power: 1
-     cost_weight: 5.0
-
-  # 优先向前评估（避免频繁转向）
-  PreferForwardCritic:
-     enabled: true
-     threshold_to_consider: 0.4
-     cost_power: 1
-     cost_weight: 4.5      # 高权重减少不必要的转向
-
-  # 旋转评估（避免原地旋转）
-  TwirlingCritic:
-     enabled: true
-     threshold_to_consider: 0.3
-     cost_power: 1
-     cost_weight: 2      # 较低权重，仅轻微惩罚旋转
-
-MPPI_Connect_Controller:
-  <<: *mppi_standard_controller
-  # 用于清扫 CONNECT：连接路径终点是当前待执行区块的起始点。
-  # 距离区块起点 <= 0.6 m 且朝向误差 > 0.4 rad 时停车原地对向。
-  rotate_to_goal_enabled: true
-
-MPPI_Heavy_Controller:
-  <<: *mppi_standard_controller
-  vx_max: 0.35
-  wz_max: 0.22
-  vx_std: 0.15
-  wz_std: 0.15
-  prune_distance: 1.5
-  temperature: 0.25
-
-MPPI_Eco_Controller:
-  <<: *mppi_standard_controller
-
-# MPPI_Clean_Controller:
-#   visualize: true
-#   goal_tolerance: 0.60
-#   angle_tolerance: 0.40
-
-#   # MPPI 内部也会读取 controller_frequency（用于 offset/shift 判定）
-#   controller_frequency: 20.0
-
-#   # 模型/采样
-#   time_steps: 80
-#   model_dt: 0.1
-#   # time_steps: 30
-#   # model_dt: 0.15
-#   batch_size: 2000
-
-#   # 控制输入噪声（标准差）
-#   vx_std: 0.2
-#   vy_std: 0.0
-#   wz_std: 0.4
-
-#   # 控制输入限制
-#   vx_max: 0.5
-#   vx_min: 0.0
-#   vy_max: 0.0
-#   wz_max: 0.8
-
-#   # 加速度限制
-#   ax_max: 0.8
-#   ax_min: -0.8
-#   ay_max: 0.0
-#   az_max: 1.5
-
-#   # 优化参数
-#   iteration_count: 2
-#   temperature: 0.3
-#   gamma: 0.015
-
-#   # 路径处理
-#   max_robot_pose_search_dist: 3.0
-#   prune_distance: 1.7
-#   # max_robot_pose_search_dist: 5.0
-#   # prune_distance: 4.0
-#   transform_tolerance: 0.2
-
-#   motion_model: "DiffDrive"
-#   retry_attempt_limit: 3
-
-#   TrajectoryVisualizer:
-#     trajectory_step: 5
-#     time_step: 3
-
-#   critics:
-#     - ConstraintCritic
-#     - CostCritic
-#     - GoalAngleCritic
-#     - GoalCritic
-#     - PathAlignCritic
-#     - PathAngleCritic
-#     - PathFollowCritic
-#     - PreferForwardCritic
-#     - TwirlingCritic
-
-#   ConstraintCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 5.0
-
-#   CostCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 3.81
-#     critical_cost: 300.0
-#     consider_footprint: false
-#     collision_cost: 1000000.0
-#     near_goal_distance: 1.0
-#     inflation_layer_name: "local_costmap/inflation_layer"
-#     trajectory_point_step: 2
-
-#   GoalAngleCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 3.0
-#     threshold_to_consider: 0.4
-
-#   GoalCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 5.0
-#     threshold_to_consider: 1.0
-
-#   PathAlignCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 8.0
-#     max_path_occupancy_ratio: 0.07
-#     offset_from_furthest: 20
-#     trajectory_point_step: 4
-#     threshold_to_consider: 0.4
-#     use_path_orientations: true
-
-#   PathAngleCritic:
-#     enabled: true
-#     vx_min: -0.35
-#     offset_from_furthest: 4
-#     cost_power: 1
-#     cost_weight: 2.2
-#     threshold_to_consider: 0.4
-#     max_angle_to_furthest: 0.8
-#     mode: 2
-
-#   PathFollowCritic:
-#     enabled: true
-#     threshold_to_consider: 0.4
-#     offset_from_furthest: 6
-#     cost_power: 1
-#     cost_weight: 5.0
-
-#   PreferForwardCritic:
-#     enabled: true
-#     threshold_to_consider: 0.4
-#     cost_power: 1
-#     cost_weight: 5.0
-
-#   TwirlingCritic:
-#     enabled: true
-#     threshold_to_consider: 0.3
-#     cost_power: 1
-#     cost_weight: 0.2
-
-
-# =========================
-# MPPI 局部控制器（实例 2：重压清扫/更保守）
-# =========================
-# MPPI_Heavy_Clean_Controller:
-#   visualize: true
-#   goal_tolerance: 0.60
-#   angle_tolerance: 0.40
-#   controller_frequency: 20.0
-
-#   time_steps: 30
-#   model_dt: 0.10
-#   batch_size: 2000
-
-#   vx_std: 0.5
-#   vy_std: 0.0
-#   wz_std: 0.1
-
-#   vx_max: 0.10
-#   vx_min: 0.0
-#   vy_max: 0.0
-#   wz_max: 0.5
-
-#   ax_max: 0.5
-#   ax_min: -0.5
-#   ay_max: 0.0
-#   az_max: 1.0
-
-#   iteration_count: 1
-#   temperature: 0.3
-#   gamma: 0.015
-
-#   max_robot_pose_search_dist: 3.0
-#   prune_distance: 1.7
-#   transform_tolerance: 0.1
-
-#   motion_model: "DiffDrive"
-#   retry_attempt_limit: 2
-
-#   TrajectoryVisualizer:
-#     trajectory_step: 5
-#     time_step: 3
-
-#   critics:
-#     - ConstraintCritic
-#     - CostCritic
-#     - GoalAngleCritic
-#     - GoalCritic
-#     - PathAlignCritic
-#     - PathAngleCritic
-#     - PathFollowCritic
-#     - PreferForwardCritic
-#     - TwirlingCritic
-
-#   ConstraintCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 5.0
-
-#   CostCritic:
-#     enabled: true
-#     consider_footprint: false
-#     cost_power: 1
-#     cost_weight: 3.81
-#     critical_cost: 300.0
-#     collision_cost: 1000000.0
-#     near_goal_distance: 1.0
-#     inflation_layer_name: "local_costmap/inflation_layer"
-#     trajectory_point_step: 2
-
-#   GoalAngleCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 3.0
-#     threshold_to_consider: 0.4
-
-#   GoalCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 5.0
-#     threshold_to_consider: 1.0
-
-#   PathAlignCritic:
-#     enabled: true
-#     cost_power: 1
-#     cost_weight: 8.0
-#     max_path_occupancy_ratio: 0.07
-#     offset_from_furthest: 20
-#     trajectory_point_step: 4
-#     threshold_to_consider: 0.4
-#     use_path_orientations: true
-
-#   PathAngleCritic:
-#     enabled: true
-#     vx_min: -0.35
-#     offset_from_furthest: 4
-#     cost_power: 1
-#     cost_weight: 2.2
-#     threshold_to_consider: 0.4
-#     max_angle_to_furthest: 0.8
-#     mode: 2
-
-#   PathFollowCritic:
-#     enabled: true
-#     threshold_to_consider: 0.4
-#     offset_from_furthest: 6
-#     cost_power: 1
-#     cost_weight: 5.0
-
-#   PreferForwardCritic:
-#     enabled: true
-#     threshold_to_consider: 0.4
-#     cost_power: 1
-#     cost_weight: 5.0
-
-#   TwirlingCritic:
-#     enabled: true
-#     threshold_to_consider: 0.3
-#     cost_power: 1
-#     cost_weight: 2.0
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+    offset_from_furthest: 8
+    threshold_to_consider: 0.025

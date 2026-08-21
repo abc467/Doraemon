@@ -14,13 +14,19 @@ if SRC_DIR not in sys.path:
 
 try:
     import fields2cover  # noqa: F401
-    from shapely.geometry import LineString, box
+    from shapely.geometry import LineString, Polygon, box
 
     _HAS_GEOMETRY_RUNTIME = True
 except Exception:
     _HAS_GEOMETRY_RUNTIME = False
 
-from coverage_planner.coverage_planner_core.planner import plan_coverage
+from coverage_planner.coverage_planner_core.planner import (
+    SNAKE_CLEARANCE_NUMERICAL_GUARD_M,
+    _filter_swaths_inside_geometry,
+    _planning_cell_candidates,
+    plan_coverage,
+)
+from coverage_planner.coverage_planner_core.shrink import shapely_to_f2c_cells
 from coverage_planner.coverage_planner_core.types import PlannerParams, RobotSpec
 
 
@@ -157,6 +163,93 @@ class PlannerSiteAxisRectangleCoreTest(unittest.TestCase):
         stats = result.blocks[0].stats or {}
         self.assertEqual(stats.get("cell_geometry_mode"), "legacy_long_side_shrink")
         self.assertNotIn("rectangle_source_bounds", stats)
+        self.assertNotIn("snake_clearance_enforced", stats)
+        self.assertEqual(int(stats.get("swaths_clearance_filtered") or 0), 0)
+
+    def test_raw_concavity_removed_by_shrink_never_uses_raw_bbox_edge_loop(self):
+        # The shallow bottom notch is removed by the long-side shrink.  The
+        # resulting candidate is rectangular, but the original Cell is not;
+        # using the original bbox would bridge directly across the notch.
+        raw_polygon = Polygon(
+            [
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 0.20),
+                (6.0, 0.20),
+                (6.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 6.0),
+                (0.0, 6.0),
+            ]
+        )
+        raw_cells = shapely_to_f2c_cells(raw_polygon)
+        self.assertEqual(len(raw_cells), 1)
+
+        candidates = _planning_cell_candidates(
+            raw_cells[0],
+            wall_margin_m=0.38,
+            path_step_m=0.05,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertNotEqual(
+            candidate.get("geometry_mode"),
+            "legacy_long_side_shrink",
+        )
+        self.assertEqual(
+            candidate.get("geometry_mode"),
+            "concave_raw_cell_snake_only",
+        )
+        self.assertFalse(bool(candidate.get("edge_loop_safe")))
+        self.assertIsNone(candidate.get("site_rect"))
+
+    def test_snake_only_cell_filters_unsafe_outer_lanes_without_clipping_cell(self):
+        raw_polygon = Polygon(
+            [
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 0.20),
+                (6.0, 0.20),
+                (6.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 6.0),
+                (0.0, 6.0),
+            ]
+        )
+        raw_cells = shapely_to_f2c_cells(raw_polygon)
+        self.assertEqual(len(raw_cells), 1)
+        safe_center_region = raw_polygon.buffer(
+            -(0.38 + SNAKE_CLEARANCE_NUMERICAL_GUARD_M)
+        )
+
+        candidates = _planning_cell_candidates(
+            raw_cells[0],
+            wall_margin_m=0.38,
+            path_step_m=0.05,
+            snake_center_region=safe_center_region,
+        )
+
+        self.assertTrue(candidates)
+        for candidate in candidates:
+            self.assertFalse(bool(candidate.get("edge_loop_safe")))
+            self.assertTrue(bool(candidate.get("snake_clearance_enforced")))
+            self.assertAlmostEqual(
+                float(candidate.get("snake_clearance_margin_m")), 0.38, places=9
+            )
+
+        swaths = [
+            [(0.0, 0.20, 0.0), (10.0, 0.20, 0.0)],
+            [(0.0, 0.80, 0.0), (10.0, 0.80, 0.0)],
+            [(0.0, 5.50, 0.0), (10.0, 5.50, 0.0)],
+            [(0.0, 5.80, 0.0), (10.0, 5.80, 0.0)],
+        ]
+        kept = _filter_swaths_inside_geometry(
+            swaths,
+            safe_center_region,
+            turn_margin_m=1.20,
+        )
+        self.assertEqual(kept, swaths[1:3])
 
     def test_turn_setback_is_normalized_to_the_shared_edge_loop(self):
         regular_outer = [(0.0, 0.0), (10.0, 0.0), (10.0, 6.0), (0.0, 6.0)]
@@ -232,7 +325,7 @@ class PlannerSiteAxisRectangleCoreTest(unittest.TestCase):
             ),
         )
 
-    def test_preapplied_margin_larger_than_turn_target_is_clamped_to_zero(self):
+    def test_preapplied_margin_larger_than_turn_target_fails_closed_if_turns_leave_region(self):
         tail_outer = [
             (0.0, 0.0),
             (10.0, 0.0),
@@ -248,11 +341,8 @@ class PlannerSiteAxisRectangleCoreTest(unittest.TestCase):
             debug=False,
         )
 
-        self.assertTrue(result.ok, result.error_message)
-        stats = result.blocks[0].stats or {}
-        self.assertEqual(stats.get("cell_geometry_mode"), "site_axis_inscribed_rectangle")
-        self.assertAlmostEqual(float(stats.get("effective_turn_margin_m")), 0.0, places=9)
-        self.assertTrue(bool(stats.get("turn_margin_clamped")))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "PATH_OUTSIDE_EFFECTIVE_REGION")
 
 
 if __name__ == "__main__":

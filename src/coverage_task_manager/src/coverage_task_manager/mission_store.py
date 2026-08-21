@@ -34,6 +34,9 @@ class MissionRun:
     trigger_source: str = ""
     map_id: str = ""
     map_md5: str = ""
+    cleaning_distance_m: float = 0.0
+    cleaning_area_m2: float = 0.0
+    metrics_source: str = ""
     created_ts: float = 0.0
 
 
@@ -62,6 +65,9 @@ def _convert_run(row: MissionRunRecord) -> MissionRun:
         trigger_source=str(row.trigger_source or ""),
         map_id=str(row.map_id or ""),
         map_md5=str(row.map_md5 or ""),
+        cleaning_distance_m=float(row.cleaning_distance_m or 0.0),
+        cleaning_area_m2=float(row.cleaning_area_m2 or 0.0),
+        metrics_source=str(row.metrics_source or ""),
         created_ts=float(row.created_ts or 0.0),
     )
 
@@ -124,6 +130,9 @@ class MissionStore:
 
     def update_state(self, run_id: str, state: str, *, reason: str = "", set_end: bool = False):
         self._ops.update_run_state(str(run_id or ""), str(state or ""), reason=str(reason or ""), set_end=bool(set_end))
+
+    def get_latest_error_event(self, run_id: str):
+        return self._ops.get_latest_run_error_event(str(run_id or ""))
 
     def finish(self, run_id: str, state: str, *, reason: str = ""):
         self._ops.finish_run(str(run_id or ""), str(state or ""), reason=str(reason or ""))

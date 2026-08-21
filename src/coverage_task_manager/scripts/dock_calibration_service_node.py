@@ -101,6 +101,8 @@ def _map_identity_match_issue(*, saved, active, runtime) -> str:
     saved_values = {key: _text((saved or {}).get(key, "")) for key in ("name", "id", "md5")}
     active_values = {key: _text((active or {}).get(key, "")) for key in ("name", "id", "md5")}
     runtime_values = {key: _text((runtime or {}).get(key, "")) for key in ("name", "id", "md5")}
+    active_revision_id = _text((active or {}).get("revision_id", ""))
+    runtime_revision_id = _text((runtime or {}).get("revision_id", ""))
     missing_saved = [key for key, value in saved_values.items() if not value]
     if missing_saved:
         return "saved dock points have incomplete map identity: missing %s" % ",".join(missing_saved)
@@ -109,6 +111,17 @@ def _map_identity_match_issue(*, saved, active, runtime) -> str:
             continue
         if active_values.get(key) != expected:
             return "saved dock map %s does not match active map" % key
+    # The active identity describes the verified map asset, while the runtime
+    # id/md5 may describe a live OccupancyGrid encoding of that same revision.
+    # Prefer the canonical revision scope and retain exact legacy identity
+    # checks only when either side does not publish a revision id.
+    if active_revision_id and runtime_revision_id:
+        if active_revision_id != runtime_revision_id:
+            return "active and runtime map revision ids do not match"
+        if runtime_values.get("name") != saved_values.get("name"):
+            return "saved dock map name does not match runtime map"
+        return ""
+    for key, expected in saved_values.items():
         if runtime_values.get(key) != expected:
             return "saved dock map %s does not match runtime map" % key
     return ""
@@ -783,11 +796,13 @@ class DockCalibrationServiceNode:
                         },
                         active={
                             "name": getattr(msg, "active_map_name", ""),
+                            "revision_id": getattr(msg, "active_map_revision_id", ""),
                             "id": getattr(msg, "active_map_id", ""),
                             "md5": getattr(msg, "active_map_md5", ""),
                         },
                         runtime={
                             "name": getattr(msg, "runtime_map_name", ""),
+                            "revision_id": getattr(msg, "runtime_map_revision_id", ""),
                             "id": getattr(msg, "runtime_map_id", ""),
                             "md5": getattr(msg, "runtime_map_md5", ""),
                         },
@@ -889,18 +904,29 @@ class DockCalibrationServiceNode:
             raise ValueError("localization is not valid")
         active = {
             "name": _text(getattr(msg, "active_map_name", "")),
+            "revision_id": _text(getattr(msg, "active_map_revision_id", "")),
             "id": _text(getattr(msg, "active_map_id", "")),
             "md5": _text(getattr(msg, "active_map_md5", "")),
         }
         runtime = {
             "name": _text(getattr(msg, "runtime_map_name", "")),
+            "revision_id": _text(getattr(msg, "runtime_map_revision_id", "")),
             "id": _text(getattr(msg, "runtime_map_id", "")),
             "md5": _text(getattr(msg, "runtime_map_md5", "")),
         }
         missing = [
             "%s.%s" % (source, key)
-            for source, values in (("active", active), ("runtime", runtime))
-            for key in ("name", "id", "md5")
+            for source, values, keys in (
+                ("active", active, ("name", "id", "md5")),
+                (
+                    "runtime",
+                    runtime,
+                    ("name", "revision_id")
+                    if active["revision_id"] and runtime["revision_id"]
+                    else ("name", "id", "md5"),
+                ),
+            )
+            for key in keys
             if not values[key]
         ]
         if missing:
@@ -908,8 +934,14 @@ class DockCalibrationServiceNode:
                 "cannot persist dock calibration without complete map identity: missing %s"
                 % ",".join(missing)
             )
-        if not self._map_identities_equal(active, runtime):
-            raise ValueError("active and runtime map identities do not match exactly")
+        if active["revision_id"] and runtime["revision_id"]:
+            if (
+                active["name"] != runtime["name"]
+                or active["revision_id"] != runtime["revision_id"]
+            ):
+                raise ValueError("active and runtime map revision scopes do not match")
+        elif not self._map_identities_equal(active, runtime):
+            raise ValueError("active and runtime legacy map identities do not match exactly")
         return active
 
     def _storage_payload(self, map_identity, *, stage1, stage2):

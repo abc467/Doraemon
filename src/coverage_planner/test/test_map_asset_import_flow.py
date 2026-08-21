@@ -1369,7 +1369,7 @@ class MapAssetImportFlowTest(unittest.TestCase):
             self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_cascade_token"))
             self.assertEqual(len(ops.list_jobs()), 1)
 
-    def test_map_asset_service_cascade_hard_delete_preserves_mission_audit_revision(self):
+    def test_map_asset_service_cascade_hard_delete_archives_terminal_mission_audit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             maps_root = os.path.join(tmpdir, "managed")
             plan_db_path = os.path.join(tmpdir, "planning.db")
@@ -1395,6 +1395,8 @@ class MapAssetImportFlowTest(unittest.TestCase):
                 plan_id="plan_gc",
                 zone_version=1,
                 state="DONE",
+                map_id="map-gc-audited",
+                map_md5="md5-gc-audited",
             )
             ops.upsert_mission_checkpoint(
                 MissionCheckpointRecord(
@@ -1404,6 +1406,8 @@ class MapAssetImportFlowTest(unittest.TestCase):
                     zone_version=1,
                     state="DONE",
                     map_revision_id="rev_gc_audited",
+                    map_id="map-gc-audited",
+                    map_md5="md5-gc-audited",
                 )
             )
             node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
@@ -1422,22 +1426,35 @@ class MapAssetImportFlowTest(unittest.TestCase):
                 )
             )
 
-            self.assertFalse(bool(resp.success))
-            blocked_reasons = list(getattr(resp, "blocked_reasons", []))
-            self.assertTrue(
-                any(reason.endswith("audit-referenced by mission_runs: 1") for reason in blocked_reasons),
-                blocked_reasons,
-            )
-            self.assertTrue(
-                any(reason.endswith("audit-referenced by mission_checkpoints: 1") for reason in blocked_reasons),
-                blocked_reasons,
-            )
-            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_audited"))
-            self.assertTrue(os.path.exists(str(asset.get("pbstream_path") or "")))
+            self.assertTrue(bool(resp.success), list(getattr(resp, "blocked_reasons", [])))
+            self.assertIsNone(store.resolve_map_revision(revision_id="rev_gc_audited"))
+            self.assertFalse(os.path.exists(str(asset.get("pbstream_path") or "")))
             self.assertIsNotNone(ops.get_run("run_gc_audited"))
             self.assertIsNotNone(ops.get_mission_checkpoint("run_gc_audited"))
-            self.assertEqual(len(ops.list_jobs()), 1)
-            self.assertEqual(len(ops.list_schedules()), 1)
+            self.assertEqual(len(ops.list_jobs()), 0)
+            self.assertEqual(len(ops.list_schedules()), 0)
+
+            conn = ops._connect()
+            try:
+                run_row = conn.execute(
+                    "SELECT map_revision_id, archived_map_revision_id, map_id, map_md5 FROM mission_runs WHERE run_id=?;",
+                    ("run_gc_audited",),
+                ).fetchone()
+                checkpoint_row = conn.execute(
+                    "SELECT map_revision_id, archived_map_revision_id, map_id, map_md5 FROM mission_checkpoints WHERE run_id=?;",
+                    ("run_gc_audited",),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(str(run_row["map_revision_id"] or ""), "")
+            self.assertEqual(str(run_row["archived_map_revision_id"] or ""), "rev_gc_audited")
+            self.assertTrue(str(run_row["map_id"] or ""))
+            self.assertTrue(str(run_row["map_md5"] or ""))
+            self.assertEqual(str(checkpoint_row["map_revision_id"] or ""), "")
+            self.assertEqual(
+                str(checkpoint_row["archived_map_revision_id"] or ""),
+                "rev_gc_audited",
+            )
 
             report = REVISION_DB_HEALTH_MODULE.build_report(
                 plan_db_path=plan_db_path,
@@ -1446,6 +1463,47 @@ class MapAssetImportFlowTest(unittest.TestCase):
                 strict=True,
             )
             self.assertTrue(bool((report.get("summary") or {}).get("ok")), report.get("findings"))
+
+    def test_map_asset_service_cascade_hard_delete_blocks_live_mission_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            _register_gc_asset(
+                store,
+                maps_root,
+                revision_id="rev_gc_live_run",
+                enabled=False,
+            )
+            ops.create_run(
+                run_id="run_gc_live",
+                map_name="gc_demo",
+                map_revision_id="rev_gc_live_run",
+                state="RUNNING",
+            )
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            resp = node._handle(
+                _make_map_gc_req(
+                    operation=5,
+                    map_revision_id="rev_gc_live_run",
+                    dry_run=True,
+                    cascade=True,
+                )
+            )
+
+            self.assertFalse(bool(resp.success))
+            self.assertTrue(
+                any(
+                    reason.endswith("audit-referenced by live_mission_runs: 1")
+                    for reason in list(getattr(resp, "blocked_reasons", []))
+                )
+            )
+            self.assertIsNotNone(store.resolve_map_revision(revision_id="rev_gc_live_run"))
 
     def test_map_asset_service_hard_delete_fails_closed_when_ops_scan_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1735,6 +1793,82 @@ class MapAssetImportFlowTest(unittest.TestCase):
             )
             self.assertTrue(bool(cleaned.success))
             self.assertIsNone(store.resolve_map_revision(revision_id="rev_gc_cleanup"))
+
+    def test_map_asset_service_cleanup_disabled_cascade_archives_stale_paused_run(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps_root = os.path.join(tmpdir, "managed")
+            store = PlanStore(os.path.join(tmpdir, "planning.db"))
+            ops = OperationsStore(os.path.join(tmpdir, "operations.db"))
+            _register_gc_asset(
+                store,
+                maps_root,
+                revision_id="rev_gc_cleanup_cascade",
+                enabled=False,
+            )
+            _attach_gc_business_refs(
+                store,
+                ops,
+                revision_id="rev_gc_cleanup_cascade",
+            )
+            ops.create_run(
+                run_id="run_gc_paused",
+                job_id="301",
+                map_name="gc_demo",
+                map_revision_id="rev_gc_cleanup_cascade",
+                zone_id="zone_a",
+                plan_profile_name="cover_standard",
+                plan_id="plan_gc",
+                zone_version=1,
+                state="PAUSED",
+                map_id="map-gc-paused",
+                map_md5="md5-gc-paused",
+            )
+            ops.upsert_mission_checkpoint(
+                MissionCheckpointRecord(
+                    run_id="run_gc_paused",
+                    zone_id="zone_a",
+                    plan_id="plan_gc",
+                    zone_version=1,
+                    state="PAUSED",
+                    map_revision_id="rev_gc_cleanup_cascade",
+                    map_id="map-gc-paused",
+                    map_md5="md5-gc-paused",
+                )
+            )
+            node = MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode.__new__(MAP_ASSET_SERVICE_MODULE.MapAssetServiceNode)
+            node.robot_id = "robot_a"
+            node.maps_root = maps_root
+            node.store = store
+            node.ops = ops
+
+            cleaned = node._handle(
+                _make_map_gc_req(
+                    operation=6,
+                    dry_run=False,
+                    cascade=False,
+                    confirm_token="CLEANUP_DISABLED",
+                )
+            )
+
+            self.assertTrue(bool(cleaned.success), list(getattr(cleaned, "blocked_reasons", [])))
+            self.assertIsNone(
+                store.resolve_map_revision(revision_id="rev_gc_cleanup_cascade")
+            )
+            conn = ops._connect()
+            try:
+                row = conn.execute(
+                    "SELECT state, reason, map_revision_id, archived_map_revision_id FROM mission_runs WHERE run_id=?;",
+                    ("run_gc_paused",),
+                ).fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(str(row["state"] or ""), "CANCELED")
+            self.assertEqual(str(row["reason"] or ""), "MAP_REVISION_DELETED")
+            self.assertEqual(str(row["map_revision_id"] or ""), "")
+            self.assertEqual(
+                str(row["archived_map_revision_id"] or ""),
+                "rev_gc_cleanup_cascade",
+            )
 
     def test_migrate_map_assets_set_active_prefers_revision_pointer(self):
         fake_store = mock.Mock()

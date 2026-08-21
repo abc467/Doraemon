@@ -56,4 +56,21 @@ message ConstraintBuilderOptions {
       fast_correlative_scan_matcher_options_3d = 10;
   mapping.scan_matching.proto.CeresScanMatcherOptions3D
       ceres_scan_matcher_options_3d = 12;
+
+  // For active-trajectory nodes matched against a frozen 2D map, prefer a
+  // near-range cloud. Long grazing rays in corridors are highly sensitive to
+  // tiny angular errors and can dominate the exact-cell CSM average.
+  // A non-positive value disables this filter.
+  double active_frozen_constraint_max_range = 15;
+
+  // If the preferred near-range cloud would be too sparse, the 2D constraint
+  // builder expands the range just far enough to reach this count; it does
+  // not jump directly to the full cloud.
+  int32 active_frozen_constraint_min_points = 16;
+
+  // Permissive FCSM candidate threshold used only for local active-to-frozen
+  // matching. Candidates below 'min_score' are not accepted directly: the
+  // pose graph applies stricter geometry, correction and temporal-consistency
+  // gates first. A non-positive value falls back to 'min_score'.
+  double active_frozen_local_min_score = 17;
 }

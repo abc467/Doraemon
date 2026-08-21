@@ -30,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <utility>
 
@@ -61,12 +62,9 @@ namespace cartographer
 
         constexpr int kStableActiveFrozenConnectionNodeGap = 40;
         constexpr size_t kMaxStableActiveFrozenSubmapsPerNode = 8;
-        constexpr size_t kMaxDisconnectedActiveFrozenSubmapsPerNode = 8;
         constexpr size_t kMaxRecoveryActiveFrozenSubmapsPerNode = 8;
         constexpr size_t kMaxSoftBackloggedActiveFrozenSubmapsPerNode = 2;
         constexpr size_t kMaxMediumBackloggedActiveFrozenSubmapsPerNode = 1;
-        constexpr int kActiveFrozenGlobalSearchNodeGap = 10;
-        constexpr int kBackloggedActiveFrozenGlobalSearchNodeGap = 30;
         constexpr size_t kWorkQueueConstraintSoftBacklogThreshold = 5000;
         constexpr size_t kWorkQueueSensorMediumBacklogThreshold = 10000;
         constexpr size_t kWorkQueueDropSensorDataThreshold = 20000;
@@ -89,17 +87,17 @@ namespace cartographer
         constexpr double kHardActiveFrozenConstraintTranslationMeters = 3.0;
         constexpr double kHardActiveFrozenConstraintRotationRadians =
             0.08726646259971647; // 5 degrees.
-        constexpr double kRejectOnlyNormalGeometryMinHit20 = 0.45;
-        constexpr double kRejectOnlyNormalGeometryMaxMeanDistance = 0.45;
-        constexpr double kRejectOnlyLargeGeometryMinHit20 = 0.55;
-        constexpr double kRejectOnlyLargeGeometryMaxMeanDistance = 0.35;
-        constexpr double kRejectOnlyNormalGeometryMaxFreeSpaceConflictRatio =
-            0.30;
-        constexpr double kRejectOnlyLargeGeometryMaxFreeSpaceConflictRatio =
+        constexpr double kLowScoreLocalGeometryMinHit20 = 0.68;
+        constexpr double kLowScoreLocalGeometryMaxMeanDistance = 0.28;
+        constexpr double kLowScoreLocalGeometryMaxFreeSpaceConflictRatio =
             0.25;
-        constexpr double kConsistencyTranslationToleranceMeters = 0.60;
+        constexpr double kLowScoreLocalGeometryMinKnownRatio = 0.65;
+        constexpr double kRecoveryCandidateTranslationMeters = 0.50;
+        constexpr double kRecoveryCandidateRotationRadians =
+            0.03490658503988659; // 2 degrees.
+        constexpr double kConsistencyTranslationToleranceMeters = 0.30;
         constexpr double kConsistencyRotationToleranceRadians =
-            0.05235987755982989; // 3 degrees.
+            0.026179938779914945; // 1.5 degrees.
         constexpr int kConsistencyWindowSize = 3;
         constexpr int kConsistencyRequiredHits = 2;
         constexpr int kMapScanHealthOkNodeGap = 30;
@@ -110,24 +108,91 @@ namespace cartographer
         constexpr double kCurrentPoseScanMapHitRadiusMeters = 0.20;
         constexpr double kCurrentPoseScanMapSearchRadiusMeters = 1.00;
         constexpr double kCurrentPoseScanMapOccupiedProbabilityThreshold = 0.55;
-        constexpr double kMapScanBadHit20 = 0.55;
-        constexpr double kMapScanBadMeanDistance = 0.35;
+        constexpr double kMapScanBadHit20 = 0.70;
+        constexpr double kMapScanBadMeanDistance = 0.22;
         constexpr int kMapScanBadRequiredSamples = 6;
         constexpr double kMapScanSevereBadHit20 = 0.35;
         constexpr double kMapScanSevereBadMeanDistance = 0.60;
         constexpr int kMapScanSevereBadRequiredSamples = 4;
         constexpr int kRecoveryNoConstraintNodeGap = 200;
+        constexpr double kRecoveryNoConstraintSeconds = 60.0;
         constexpr int kRecoveryConfirmedLostNodeGap = 200;
         constexpr int kRecoveryFullSearchNodeGap = 10;
         constexpr int kRecoveryFullSearchMaxAttempts = 3;
         constexpr size_t kRecoveryFullSearchMaxSubmaps = 96;
         constexpr size_t kRecoveryFullSearchNearestSubmaps = 48;
         constexpr size_t kRecoveryWorkQueueTriggerThreshold = 1000;
-        constexpr double kCandidateFullMapMinHit20 = 0.60;
-        constexpr double kCandidateFullMapMaxMeanDistance = 0.30;
-        constexpr double kCandidateFullMapMinKnownRatio = 0.75;
+        constexpr double kCandidateFullMapMinHit20 = 0.82;
+        constexpr double kCandidateFullMapMaxMeanDistance = 0.16;
+        constexpr double kCandidateFullMapMinKnownRatio = 0.80;
         constexpr double kCandidateFullMapMinHit20Improvement = 0.10;
-        constexpr double kCandidateFullMapMinDistanceImprovement = 0.08;
+        constexpr double kCandidateFullMapMinDistanceImprovement = 0.05;
+
+        bool IsActiveFrozenRecoveryEndpointValid(
+            const double hit20, const double mean_distance,
+            const double known_ratio)
+        {
+            return hit20 >= kLowScoreLocalGeometryMinHit20 &&
+                   mean_distance <= kLowScoreLocalGeometryMaxMeanDistance &&
+                   known_ratio >= kLowScoreLocalGeometryMinKnownRatio;
+        }
+
+        bool IsActiveFrozenCorrectionWithinHardLimits(
+            const double translation_m, const double yaw_rad)
+        {
+            return translation_m <=
+                       kHardActiveFrozenConstraintTranslationMeters &&
+                   yaw_rad <= kHardActiveFrozenConstraintRotationRadians;
+        }
+
+        bool NeedsActiveFrozenRecoveryValidation(
+            const double translation_m, const double yaw_rad,
+            const double free_space_conflict_ratio,
+            const bool recovery_path, const bool match_full_submap,
+            const bool ambiguous)
+        {
+            return recovery_path || match_full_submap || ambiguous ||
+                   translation_m > kRecoveryCandidateTranslationMeters ||
+                   yaw_rad > kRecoveryCandidateRotationRadians ||
+                   (free_space_conflict_ratio >= 0.0 &&
+                    free_space_conflict_ratio >
+                        kLowScoreLocalGeometryMaxFreeSpaceConflictRatio);
+        }
+
+        bool PassesActiveFrozenSameFrameFullMapGate(
+            const ActiveFrozenFullMapQuality &current,
+            const ActiveFrozenFullMapQuality &candidate,
+            std::string *const reject_reason)
+        {
+            CHECK(reject_reason != nullptr);
+            reject_reason->clear();
+            if (!current.valid)
+            {
+                *reject_reason = "current_full_map_unavailable";
+                return false;
+            }
+            if (!candidate.valid)
+            {
+                *reject_reason = "invalid_candidate_full_map";
+                return false;
+            }
+            if (candidate.hit20 < kCandidateFullMapMinHit20 ||
+                candidate.mean_distance > kCandidateFullMapMaxMeanDistance ||
+                candidate.known_ratio < kCandidateFullMapMinKnownRatio)
+            {
+                *reject_reason = "candidate_full_map_bad";
+                return false;
+            }
+            if (candidate.hit20 - current.hit20 <
+                    kCandidateFullMapMinHit20Improvement ||
+                current.mean_distance - candidate.mean_distance <
+                    kCandidateFullMapMinDistanceImprovement)
+            {
+                *reject_reason = "candidate_full_map_not_improved";
+                return false;
+            }
+            return true;
+        }
 
         size_t HighRateSensorKeepEveryN(const size_t queue_size)
         {
@@ -1014,16 +1079,18 @@ namespace cartographer
                     IsTrajectoryFrozen(submap_id.trajectory_id);
                 // 如果节点和子图属于同一轨迹, 或者时间小于阈值
                 // 则只需进行 局部搜索窗口 的约束计算(对局部子图进行回环检测)
-                if (node_id.trajectory_id == submap_id.trajectory_id ||
+                if (active_node_to_frozen_submap ||
+                    node_id.trajectory_id == submap_id.trajectory_id ||
                     node_time <
                         last_connection_time +
                             common::FromSeconds(
                                 options_.global_constraint_search_after_n_seconds()))
                 {
-                    // If the node and the submap belong to the same trajectory or if there
-                    // has been a recent global constraint that ties that node's trajectory to
-                    // the submap's trajectory, it suffices to do a match constrained to a
-                    // local search window.
+                    // Active-to-frozen localization always uses the current
+                    // pose and a local search window. Disconnected full-map
+                    // round-robin searches were slow and routinely skipped
+                    // the submaps near the vehicle; explicit relocalization
+                    // remains responsible for large global pose recovery.
                     maybe_add_local_constraint = true;
                 }
                 else if (active_node_to_frozen_submap ||
@@ -1187,9 +1254,7 @@ namespace cartographer
                 // TODO(danielsievers): Add a member variable and avoid having to copy
                 // them out here.
                 std::vector<std::pair<double, SubmapId>>
-                    active_frozen_local_submap_candidates;
-                std::vector<std::pair<double, SubmapId>>
-                    active_frozen_global_submap_candidates;
+                    active_frozen_submap_candidates;
                 for (const auto &submap_id_data : data_.submap_data)
                 {
                     if (submap_id_data.data.state == SubmapState::kFinished)
@@ -1221,43 +1286,41 @@ namespace cartographer
                                 optimization_problem_->submap_data()
                                     .at(submap_id_data.id)
                                     .global_pose;
-                            const double distance =
+                            // Rank frozen submaps by the trajectory footprint
+                            // that actually built them, not just by their
+                            // first-insertion pose. On a reverse traversal of
+                            // a long corridor, a vehicle can be inside a
+                            // submap while its origin is 5-10 m away. Origin
+                            // distance selected the next submap (whose grid
+                            // did not cover the scan) and rejected the
+                            // geometrically correct previous submap.
+                            double distance =
                                 (submap_pose.inverse() * global_pose_2d)
                                     .translation()
                                     .norm();
-                            const common::Time candidate_node_time =
-                                GetLatestNodeTime(node_id, submap_id_data.id);
-                            const common::Time last_connection_time =
-                                data_.trajectory_connectivity_state
-                                    .LastConnectionTime(
-                                        node_id.trajectory_id,
-                                        submap_id_data.id.trajectory_id);
-                            if (candidate_node_time <
-                                last_connection_time +
-                                    common::FromSeconds(
-                                        options_
-                                            .global_constraint_search_after_n_seconds()))
+                            for (const NodeId &submap_node_id :
+                                 submap_id_data.data.node_ids)
                             {
-                                active_frozen_local_submap_candidates.emplace_back(
-                                    distance, submap_id_data.id);
+                                if (!optimization_problem_->node_data().Contains(
+                                        submap_node_id))
+                                {
+                                    continue;
+                                }
+                                distance = std::min(
+                                    distance,
+                                    (optimization_problem_->node_data()
+                                         .at(submap_node_id)
+                                         .global_pose_2d.translation() -
+                                     global_pose_2d.translation())
+                                        .norm());
                             }
-                            else
-                            {
-                                active_frozen_global_submap_candidates.emplace_back(
-                                    distance, submap_id_data.id);
-                            }
+                            active_frozen_submap_candidates.emplace_back(
+                                distance, submap_id_data.id);
                             continue;
                         }
                         finished_submap_ids.emplace_back(submap_id_data.id);
                     }
                 }
-                const bool active_frozen_local_search_window =
-                    !active_frozen_local_submap_candidates.empty();
-                std::vector<std::pair<double, SubmapId>>
-                    &active_frozen_submap_candidates =
-                        active_frozen_local_search_window
-                            ? active_frozen_local_submap_candidates
-                            : active_frozen_global_submap_candidates;
                 if (!active_frozen_submap_candidates.empty())
                 {
                     std::sort(active_frozen_submap_candidates.begin(),
@@ -1270,7 +1333,7 @@ namespace cartographer
                     const std::vector<SubmapId> selected_active_frozen_submaps =
                         SelectActiveFrozenSubmapsForSearch(
                             node_id, active_frozen_submap_candidates,
-                            active_frozen_local_search_window,
+                            /*local_search_window=*/true,
                             recovery_full_search, queued_work_items_at_start);
                     for (const SubmapId &submap_id :
                          selected_active_frozen_submaps)
@@ -1278,9 +1341,7 @@ namespace cartographer
                         finished_submap_ids.emplace_back(submap_id);
                     }
                     skipped_active_frozen_submaps =
-                        static_cast<int>(
-                            active_frozen_local_submap_candidates.size() +
-                            active_frozen_global_submap_candidates.size() -
+                        static_cast<int>(active_frozen_submap_candidates.size() -
                                          selected_active_frozen_submaps.size());
                     if (recovery_full_search)
                     {
@@ -1497,11 +1558,15 @@ namespace cartographer
                 {
                     continue;
                 }
-                submaps.push_back(MapScanDistanceFieldSubmapSnapshot{
-                    submap_2d,
+                const transform::Rigid2d global_submap_pose =
                     optimization_problem_->submap_data()
                         .at(submap_id_data.id)
-                        .global_pose});
+                        .global_pose;
+                const transform::Rigid2d local_submap_pose =
+                    transform::Project2D(submap_2d->local_pose());
+                submaps.push_back(MapScanDistanceFieldSubmapSnapshot{
+                    submap_2d,
+                    global_submap_pose * local_submap_pose.inverse()});
             }
             return submaps;
         }
@@ -1560,11 +1625,11 @@ namespace cartographer
                     std::max(first_center.y(), last_center.y()) +
                     0.5 * source_resolution;
                 source.global_from_local_translation_x =
-                    snapshot.global_pose.translation().x();
+                    snapshot.global_from_local_pose.translation().x();
                 source.global_from_local_translation_y =
-                    snapshot.global_pose.translation().y();
+                    snapshot.global_from_local_pose.translation().y();
                 source.global_from_local_rotation =
-                    snapshot.global_pose.rotation().angle();
+                    snapshot.global_from_local_pose.rotation().angle();
                 source.sample =
                     [grid, cropped_offset, cropped_limits](
                         const double local_x, const double local_y)
@@ -2184,6 +2249,12 @@ namespace cartographer
                     node_id.trajectory_id;
                 last_active_to_frozen_constraint_node_index_ =
                     node_id.node_index;
+                if (data_.trajectory_nodes.Contains(node_id) &&
+                    data_.trajectory_nodes.at(node_id).constant_data != nullptr)
+                {
+                    last_active_to_frozen_constraint_time_ =
+                        data_.trajectory_nodes.at(node_id).constant_data->time;
+                }
                 RecordLocalizationHealthRecoveryState(
                     recovery.recovery_state, recovery.recovery_reason);
                 return;
@@ -2232,8 +2303,26 @@ namespace cartographer
             const NodeId &node_id,
             const LocalizationRecoveryRuntime &recovery) const
         {
-            return NodesSinceLastActiveFrozenConstraint(node_id) >=
-                       kRecoveryNoConstraintNodeGap &&
+            bool timed_out = false;
+            if (last_active_to_frozen_constraint_trajectory_id_ ==
+                    node_id.trajectory_id &&
+                last_active_to_frozen_constraint_time_ != common::Time::min() &&
+                data_.trajectory_nodes.Contains(node_id) &&
+                data_.trajectory_nodes.at(node_id).constant_data != nullptr)
+            {
+                const common::Time node_time =
+                    data_.trajectory_nodes.at(node_id).constant_data->time;
+                timed_out = node_time >= last_active_to_frozen_constraint_time_ &&
+                            common::ToSeconds(
+                                node_time -
+                                last_active_to_frozen_constraint_time_) >=
+                                kRecoveryNoConstraintSeconds;
+            }
+            const bool no_recent_constraint =
+                timed_out ||
+                NodesSinceLastActiveFrozenConstraint(node_id) >=
+                    kRecoveryNoConstraintNodeGap;
+            return no_recent_constraint &&
                    HasLocalizationRecoveryEvidence(recovery);
         }
 
@@ -2298,6 +2387,8 @@ namespace cartographer
             const bool recovery_full_search,
             const std::size_t queued_work_items_at_start)
         {
+            static_cast<void>(node_id);
+            static_cast<void>(local_search_window);
             std::vector<SubmapId> selected;
             if (candidates.empty() ||
                 queued_work_items_at_start >=
@@ -2322,68 +2413,19 @@ namespace cartographer
             {
                 budget = kMaxRecoveryActiveFrozenSubmapsPerNode;
             }
-            else if (local_search_window)
-            {
-                budget = kMaxStableActiveFrozenSubmapsPerNode;
-            }
             else
             {
-                budget =
-                    kMaxDisconnectedActiveFrozenSubmapsPerNode;
+                budget = kMaxStableActiveFrozenSubmapsPerNode;
             }
             budget = std::min(budget, candidates.size());
             selected.reserve(budget);
 
-            if (local_search_window && !recovery_full_search)
-            {
-                // While localization is healthy, constrained matching only
-                // needs the closest frozen submaps.
-                for (size_t i = 0; i < budget; ++i)
-                {
-                    selected.push_back(candidates[i].second);
-                }
-                return selected;
-            }
-
-            if (!recovery_full_search)
-            {
-                const int node_gap =
-                    queued_work_items_at_start >=
-                            kWorkQueueConstraintSoftBacklogThreshold
-                        ? kBackloggedActiveFrozenGlobalSearchNodeGap
-                        : kActiveFrozenGlobalSearchNodeGap;
-                auto last_search_it =
-                    last_active_frozen_global_search_node_index_
-                        .emplace(node_id.trajectory_id, -1)
-                        .first;
-                int &last_search_node_index =
-                    last_search_it->second;
-                if (last_search_node_index >= 0 &&
-                    node_id.node_index - last_search_node_index < node_gap)
-                {
-                    return selected;
-                }
-                last_search_node_index = node_id.node_index;
-            }
-
-            // Global matching does not use the current pose as an initial
-            // estimate. Iterate by stable SubmapId order so every frozen
-            // submap is searched within a bounded number of nodes.
-            std::vector<SubmapId> coverage_order;
-            coverage_order.reserve(candidates.size());
-            for (const auto &candidate : candidates)
-            {
-                coverage_order.push_back(candidate.second);
-            }
-            std::sort(coverage_order.begin(), coverage_order.end());
-
-            size_t &cursor =
-                active_frozen_global_search_cursor_[node_id.trajectory_id];
-            cursor %= coverage_order.size();
+            // Always use the nearest frozen submaps. Full-map SubmapId
+            // round-robin made one coverage cycle longer as the map grew and
+            // had no relation to the vehicle's current pose.
             for (size_t i = 0; i < budget; ++i)
             {
-                selected.push_back(coverage_order[cursor]);
-                cursor = (cursor + 1) % coverage_order.size();
+                selected.push_back(candidates[i].second);
             }
             return selected;
         }
@@ -2782,84 +2824,25 @@ namespace cartographer
                 const bool ambiguous =
                     quality_candidate.same_submap_ambiguous ||
                     quality_candidate.cross_submap_ambiguous;
-                const bool large_correction =
-                    quality_candidate.correction.translation_m >=
-                        kLargeCorrectionTranslationMeters ||
-                    quality_candidate.correction.yaw_rad >=
-                        kLargeCorrectionRotationRadians;
+                const bool low_score_local_constraint =
+                    !candidate.match_full_submap &&
+                    candidate.fast_score <
+                        options_.constraint_builder_options().min_score();
                 const bool beyond_soft_correction_gate =
                     quality_candidate.correction.translation_m >
                         kSoftActiveFrozenConstraintTranslationMeters ||
                     quality_candidate.correction.yaw_rad >
                         kSoftActiveFrozenConstraintRotationRadians;
                 const bool too_large_for_recovery_constraint =
-                    quality_candidate.correction.translation_m >
-                        kHardActiveFrozenConstraintTranslationMeters ||
-                    quality_candidate.correction.yaw_rad >
-                        kHardActiveFrozenConstraintRotationRadians;
-                const bool suspicious =
-                    large_correction || candidate.match_full_submap ||
-                    margin < 0.05 || ambiguous;
+                    !IsActiveFrozenCorrectionWithinHardLimits(
+                        quality_candidate.correction.translation_m,
+                        quality_candidate.correction.yaw_rad);
                 LocalizationRecoveryRuntime &recovery =
                     localization_recovery_[candidate.constraint.node_id
                                                .trajectory_id];
-                if (suspicious && candidate.geometry_quality.hit20 >= 0.0)
-                {
-                    const double min_hit20 =
-                        large_correction
-                            ? kRejectOnlyLargeGeometryMinHit20
-                            : kRejectOnlyNormalGeometryMinHit20;
-                    const double max_mean_distance =
-                        large_correction
-                            ? kRejectOnlyLargeGeometryMaxMeanDistance
-                            : kRejectOnlyNormalGeometryMaxMeanDistance;
-                    const double max_free_space_conflict_ratio =
-                        large_correction
-                            ? kRejectOnlyLargeGeometryMaxFreeSpaceConflictRatio
-                            : kRejectOnlyNormalGeometryMaxFreeSpaceConflictRatio;
-                    const bool free_space_conflict_bad =
-                        candidate.geometry_quality
-                                .free_space_conflict_ratio >= 0.0 &&
-                        candidate.geometry_quality
-                                .free_space_conflict_ratio >
-                            max_free_space_conflict_ratio;
-                    if (candidate.geometry_quality.hit20 < min_hit20 ||
-                        candidate.geometry_quality.mean_distance >
-                            max_mean_distance ||
-                        free_space_conflict_bad)
-                    {
-                        RecordLocalizationHealthActiveFrozenGeometryReject();
-                        ++recovery.geometry_reject_count_since_accept;
-                        LOG(WARNING)
-                            << "[ActiveFrozenQualityGate]Reject geometry "
-                            << "constraint node="
-                            << candidate.constraint.node_id
-                            << " submap="
-                            << candidate.constraint.submap_id
-                            << " hit20="
-                            << candidate.geometry_quality.hit20
-                            << " mean_distance="
-                            << candidate.geometry_quality.mean_distance
-                            << " free_space_conflict_ratio="
-                            << candidate.geometry_quality
-                                   .free_space_conflict_ratio
-                            << " max_free_space_conflict_ratio="
-                            << max_free_space_conflict_ratio
-                            << " known_ratio="
-                            << candidate.geometry_quality.known_ratio
-                            << " sector_coverage="
-                            << candidate.geometry_quality.sector_coverage
-                            << " large_correction=" << large_correction;
-                        continue;
-                    }
-                }
-
                 if (too_large_for_recovery_constraint)
                 {
                     RecordLocalizationHealthActiveFrozenConsistencyReject();
-                    LocalizationRecoveryRuntime &recovery =
-                        localization_recovery_[candidate.constraint.node_id
-                                                   .trajectory_id];
                     ++recovery.consistency_reject_count_since_accept;
                     ++recovery
                           .large_correction_consistency_reject_count_since_accept;
@@ -2886,26 +2869,49 @@ namespace cartographer
                     recovery.scan_map_severe_bad ||
                     recovery.recovery_full_search_attempts_since_accept > 0;
                 const bool needs_candidate_full_map_gate =
-                    recovery_path || beyond_soft_correction_gate;
+                    NeedsActiveFrozenRecoveryValidation(
+                        quality_candidate.correction.translation_m,
+                        quality_candidate.correction.yaw_rad,
+                        candidate.geometry_quality.free_space_conflict_ratio,
+                        recovery_path, candidate.match_full_submap, ambiguous);
                 if (needs_candidate_full_map_gate)
                 {
+                    if (!IsActiveFrozenRecoveryEndpointValid(
+                            candidate.geometry_quality.hit20,
+                            candidate.geometry_quality.mean_distance,
+                            candidate.geometry_quality.known_ratio))
+                    {
+                        RecordLocalizationHealthActiveFrozenGeometryReject();
+                        ++recovery.geometry_reject_count_since_accept;
+                        LOG(WARNING)
+                            << "[ActiveFrozenQualityGate]Reject recovery "
+                               "endpoint geometry node="
+                            << candidate.constraint.node_id
+                            << " submap=" << candidate.constraint.submap_id
+                            << " score=" << candidate.fast_score
+                            << " hit20=" << candidate.geometry_quality.hit20
+                            << " mean_distance="
+                            << candidate.geometry_quality.mean_distance
+                            << " known_ratio="
+                            << candidate.geometry_quality.known_ratio
+                            << " free_space_conflict_ratio="
+                            << candidate.geometry_quality
+                                   .free_space_conflict_ratio
+                            << " implied_translation_m="
+                            << quality_candidate.correction.translation_m
+                            << " implied_yaw_rad="
+                            << quality_candidate.correction.yaw_rad;
+                        continue;
+                    }
+
                     bool reject_candidate_full_map = false;
                     std::string reject_reason;
+                    CurrentPoseScanMapQuality current_full_map_quality;
                     CurrentPoseScanMapQuality candidate_full_map_quality;
                     double candidate_hit20_improvement = -1.0;
                     double candidate_mean_distance_improvement = -1.0;
                     transform::Rigid2d candidate_global_pose =
                         transform::Rigid2d::Identity();
-                    const bool current_map_quality_valid =
-                        recovery.latest_scan_map_hit20 >= 0.0 &&
-                        recovery.latest_scan_map_mean_distance >= 0.0;
-                    const bool current_map_already_ok =
-                        current_map_quality_valid && !recovery.scan_map_bad &&
-                        !recovery.scan_map_severe_bad &&
-                        recovery.latest_scan_map_hit20 >=
-                            kMapScanBadHit20 &&
-                        recovery.latest_scan_map_mean_distance <=
-                            kMapScanBadMeanDistance;
                     if (!data_.trajectory_nodes.Contains(
                             candidate.constraint.node_id) ||
                         data_.trajectory_nodes
@@ -2930,26 +2936,41 @@ namespace cartographer
                         }
                         else
                         {
+                            const TrajectoryNode &trajectory_node =
+                                data_.trajectory_nodes.at(
+                                    candidate.constraint.node_id);
+                            current_full_map_quality =
+                                ComputeMapScanQuality(
+                                    *trajectory_node.constant_data,
+                                    transform::Project2D(
+                                        trajectory_node.global_pose),
+                                    *distance_field,
+                                    kMapScanHealthRecoveryMaxSampledPoints);
                             candidate_full_map_quality =
                                 ComputeMapScanQuality(
-                                    *data_.trajectory_nodes
-                                         .at(candidate.constraint.node_id)
-                                         .constant_data,
+                                    *trajectory_node.constant_data,
                                     candidate_global_pose, *distance_field,
                                     kMapScanHealthRecoveryMaxSampledPoints);
                         }
-                        const bool valid =
+                        const bool current_valid =
+                            current_full_map_quality.sampled_points > 0 &&
+                            current_full_map_quality.checked_submaps > 0 &&
+                            current_full_map_quality.hit20 >= 0.0 &&
+                            current_full_map_quality.mean_distance >= 0.0 &&
+                            current_full_map_quality.known_ratio >= 0.0;
+                        const bool candidate_valid =
                             candidate_full_map_quality.sampled_points > 0 &&
                             candidate_full_map_quality.checked_submaps > 0 &&
                             candidate_full_map_quality.hit20 >= 0.0 &&
-                            candidate_full_map_quality.mean_distance >= 0.0;
-                        if (valid && current_map_quality_valid)
+                            candidate_full_map_quality.mean_distance >= 0.0 &&
+                            candidate_full_map_quality.known_ratio >= 0.0;
+                        if (candidate_valid && current_valid)
                         {
                             candidate_hit20_improvement =
                                 candidate_full_map_quality.hit20 -
-                                recovery.latest_scan_map_hit20;
+                                current_full_map_quality.hit20;
                             candidate_mean_distance_improvement =
-                                recovery.latest_scan_map_mean_distance -
+                                current_full_map_quality.mean_distance -
                                 candidate_full_map_quality.mean_distance;
                         }
                         RecordLocalizationHealthActiveFrozenCandidateFullMap(
@@ -2958,49 +2979,22 @@ namespace cartographer
                             candidate_full_map_quality.known_ratio,
                             candidate_hit20_improvement,
                             candidate_mean_distance_improvement);
-                        const bool known_ratio_bad =
-                            candidate_full_map_quality.known_ratio >= 0.0 &&
-                            candidate_full_map_quality.known_ratio <
-                                kCandidateFullMapMinKnownRatio;
-                        if (!reject_candidate_full_map && !valid)
+                        if (!reject_candidate_full_map)
                         {
-                            reject_candidate_full_map = true;
-                            reject_reason = "invalid_candidate_full_map";
-                        }
-                        else if (!reject_candidate_full_map &&
-                                 (candidate_full_map_quality.hit20 <
-                                     kCandidateFullMapMinHit20 ||
-                                 candidate_full_map_quality.mean_distance >
-                                     kCandidateFullMapMaxMeanDistance ||
-                                  known_ratio_bad))
-                        {
-                            reject_candidate_full_map = true;
-                            reject_reason = "candidate_full_map_bad";
-                        }
-                        else if (!reject_candidate_full_map &&
-                                 beyond_soft_correction_gate &&
-                                 !current_map_quality_valid)
-                        {
-                            reject_candidate_full_map = true;
-                            reject_reason = "current_full_map_unavailable";
-                        }
-                        else if (!reject_candidate_full_map &&
-                                 beyond_soft_correction_gate &&
-                                 current_map_already_ok)
-                        {
-                            reject_candidate_full_map = true;
-                            reject_reason = "current_full_map_not_bad";
-                        }
-                        else if (!reject_candidate_full_map &&
-                                 current_map_quality_valid &&
-                                 (candidate_hit20_improvement <
-                                      kCandidateFullMapMinHit20Improvement ||
-                                  candidate_mean_distance_improvement <
-                                      kCandidateFullMapMinDistanceImprovement))
-                        {
-                            reject_candidate_full_map = true;
-                            reject_reason =
-                                "candidate_full_map_not_improved";
+                            const ActiveFrozenFullMapQuality current_quality{
+                                current_full_map_quality.hit20,
+                                current_full_map_quality.mean_distance,
+                                current_full_map_quality.known_ratio,
+                                current_valid};
+                            const ActiveFrozenFullMapQuality candidate_quality{
+                                candidate_full_map_quality.hit20,
+                                candidate_full_map_quality.mean_distance,
+                                candidate_full_map_quality.known_ratio,
+                                candidate_valid};
+                            reject_candidate_full_map =
+                                !PassesActiveFrozenSameFrameFullMapGate(
+                                    current_quality, candidate_quality,
+                                    &reject_reason);
                         }
                     }
                     if (reject_candidate_full_map)
@@ -3030,78 +3024,102 @@ namespace cartographer
                             << candidate_hit20_improvement
                             << " candidate_mean_distance_improvement="
                             << candidate_mean_distance_improvement
-                            << " latest_hit20="
-                            << recovery.latest_scan_map_hit20
-                            << " latest_mean_distance="
-                            << recovery.latest_scan_map_mean_distance
+                            << " current_map_hit20="
+                            << current_full_map_quality.hit20
+                            << " current_map_mean_distance="
+                            << current_full_map_quality.mean_distance
+                            << " current_map_known_ratio="
+                            << current_full_map_quality.known_ratio
                             << " implied_translation_m="
                             << quality_candidate.correction.translation_m
                             << " implied_yaw_rad="
                             << quality_candidate.correction.yaw_rad;
                         continue;
                     }
-                }
-
-                if (ambiguous &&
-                    !PassesActiveFrozenConsistencyGate(
-                        candidate.constraint.node_id,
-                        quality_candidate.correction, "ambiguous constraint",
-                        /*count_as_ambiguous_reject=*/true))
-                {
-                    LOG(WARNING) << "[ActiveFrozenQualityGate]Hold ambiguous "
-                                 << "constraint node="
-                                 << candidate.constraint.node_id
-                                 << " submap="
-                                 << candidate.constraint.submap_id
-                                 << " score=" << candidate.fast_score
-                                 << " margin=" << margin
-                                 << " same_submap="
-                                 << quality_candidate.same_submap_ambiguous
-                                 << " cross_submap="
-                                 << quality_candidate.cross_submap_ambiguous;
-                    continue;
-                }
-                if (ambiguous)
-                {
-                    LOG(WARNING) << "[ActiveFrozenQualityGate]Accept "
-                                 << "ambiguous constraint after consistency "
-                                 << "node=" << candidate.constraint.node_id
-                                 << " submap="
-                                 << candidate.constraint.submap_id
-                                 << " score=" << candidate.fast_score
-                                 << " margin=" << margin
-                                 << " same_submap="
-                                 << quality_candidate.same_submap_ambiguous
-                                 << " cross_submap="
-                                 << quality_candidate.cross_submap_ambiguous;
-                }
-
-                if (large_correction &&
-                    !ambiguous &&
-                    !PassesActiveFrozenConsistencyGate(
+                    if (!PassesActiveFrozenConsistencyGate(
                         candidate.constraint.node_id,
                         quality_candidate.correction,
-                        beyond_soft_correction_gate
-                            ? "soft excessive correction"
-                            : "large correction",
-                        /*count_as_ambiguous_reject=*/false))
-                {
-                    continue;
-                }
-                if (beyond_soft_correction_gate && large_correction)
-                {
+                        "same-frame full-map recovery candidate",
+                        /*count_as_ambiguous_reject=*/ambiguous))
+                    {
+                        continue;
+                    }
                     LOG(WARNING)
-                        << "[ActiveFrozenQualityGate]Accept soft excessive "
-                        << "correction after consistency node="
+                        << "[ActiveFrozenQualityGate]Accept recovery "
+                           "candidate after endpoint, same-frame full-map, "
+                           "and consistency gates node="
                         << candidate.constraint.node_id
                         << " submap=" << candidate.constraint.submap_id
                         << " score=" << candidate.fast_score
+                        << " current_map_hit20="
+                        << current_full_map_quality.hit20
+                        << " candidate_map_hit20="
+                        << candidate_full_map_quality.hit20
+                        << " current_map_mean_distance="
+                        << current_full_map_quality.mean_distance
+                        << " candidate_map_mean_distance="
+                        << candidate_full_map_quality.mean_distance
+                        << " free_space_conflict_ratio="
+                        << candidate.geometry_quality
+                               .free_space_conflict_ratio
                         << " implied_translation_m="
                         << quality_candidate.correction.translation_m
-                        << " soft_translation_m="
-                        << kSoftActiveFrozenConstraintTranslationMeters
-                        << " hard_translation_m="
-                        << kHardActiveFrozenConstraintTranslationMeters
+                        << " implied_yaw_rad="
+                        << quality_candidate.correction.yaw_rad;
+                }
+                else if (low_score_local_constraint)
+                {
+                    const bool free_space_conflict_bad =
+                        candidate.geometry_quality.free_space_conflict_ratio <
+                            0.0 ||
+                        candidate.geometry_quality.free_space_conflict_ratio >
+                            kLowScoreLocalGeometryMaxFreeSpaceConflictRatio;
+                    const bool endpoint_geometry_bad =
+                        !IsActiveFrozenRecoveryEndpointValid(
+                            candidate.geometry_quality.hit20,
+                            candidate.geometry_quality.mean_distance,
+                            candidate.geometry_quality.known_ratio);
+                    if (endpoint_geometry_bad || free_space_conflict_bad)
+                    {
+                        RecordLocalizationHealthActiveFrozenGeometryReject();
+                        ++recovery.geometry_reject_count_since_accept;
+                        LOG(WARNING)
+                            << "[ActiveFrozenQualityGate]Reject low-score "
+                               "local endpoint geometry node="
+                            << candidate.constraint.node_id
+                            << " submap=" << candidate.constraint.submap_id
+                            << " score=" << candidate.fast_score
+                            << " hit20=" << candidate.geometry_quality.hit20
+                            << " mean_distance="
+                            << candidate.geometry_quality.mean_distance
+                            << " known_ratio="
+                            << candidate.geometry_quality.known_ratio
+                            << " free_space_conflict_ratio="
+                            << candidate.geometry_quality
+                                   .free_space_conflict_ratio;
+                        continue;
+                    }
+                    if (!PassesActiveFrozenConsistencyGate(
+                            candidate.constraint.node_id,
+                            quality_candidate.correction,
+                            "low-score local constraint",
+                            /*count_as_ambiguous_reject=*/false))
+                    {
+                        continue;
+                    }
+                    LOG(WARNING)
+                        << "[ActiveFrozenQualityGate]Accept low-score local "
+                           "constraint after endpoint and consistency node="
+                        << candidate.constraint.node_id
+                        << " submap=" << candidate.constraint.submap_id
+                        << " score=" << candidate.fast_score
+                        << " hit20=" << candidate.geometry_quality.hit20
+                        << " mean_distance="
+                        << candidate.geometry_quality.mean_distance
+                        << " known_ratio="
+                        << candidate.geometry_quality.known_ratio
+                        << " implied_translation_m="
+                        << quality_candidate.correction.translation_m
                         << " implied_yaw_rad="
                         << quality_candidate.correction.yaw_rad;
                 }
@@ -3193,6 +3211,28 @@ namespace cartographer
                     << constraint.node_id << " submap=" << constraint.submap_id;
                 return;
             }
+            if (constraint.node_id.trajectory_id !=
+                    last_active_to_frozen_constraint_trajectory_id_ ||
+                constraint.node_id.node_index >
+                    last_active_to_frozen_constraint_node_index_)
+            {
+                last_active_to_frozen_constraint_trajectory_id_ =
+                    constraint.node_id.trajectory_id;
+                last_active_to_frozen_constraint_node_index_ =
+                    constraint.node_id.node_index;
+                if (data_.trajectory_nodes.Contains(constraint.node_id) &&
+                    data_.trajectory_nodes.at(constraint.node_id)
+                            .constant_data != nullptr)
+                {
+                    last_active_to_frozen_constraint_time_ =
+                        data_.trajectory_nodes.at(constraint.node_id)
+                            .constant_data->time;
+                }
+                LOG(WARNING) << "[LocalizationRecovery]Cross constraint node="
+                             << constraint.node_id
+                             << " submap=" << constraint.submap_id
+                             << " reset no-cross counter.";
+            }
             if (recovery.scan_map_bad || recovery.scan_map_severe_bad)
             {
                 recovery.recovery_state = "DEGRADED";
@@ -3226,21 +3266,6 @@ namespace cartographer
             active_frozen_consistency_windows_.erase(
                 constraint.node_id.trajectory_id);
             RecordLocalizationHealthRecoveryState("OK", "active_frozen_accepted");
-
-            if (constraint.node_id.trajectory_id !=
-                    last_active_to_frozen_constraint_trajectory_id_ ||
-                constraint.node_id.node_index >
-                    last_active_to_frozen_constraint_node_index_)
-            {
-                last_active_to_frozen_constraint_trajectory_id_ =
-                    constraint.node_id.trajectory_id;
-                last_active_to_frozen_constraint_node_index_ =
-                    constraint.node_id.node_index;
-                LOG(WARNING) << "[LocalizationRecovery]Cross constraint node="
-                             << constraint.node_id
-                             << " submap=" << constraint.submap_id
-                             << " reset no-cross counter.";
-            }
         }
         // 根据轨迹状态删除轨迹
         void PoseGraph2D::DeleteTrajectoriesIfNeeded()

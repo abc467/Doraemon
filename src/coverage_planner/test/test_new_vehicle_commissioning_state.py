@@ -55,7 +55,7 @@ def _create_operations_db(path):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                ("standard", 40, 10, 1000, 12, 70, 70, 10, 0, 1, 1.0),
+                ("standard", 40, 10, 1000, 0, 0, 0, 10, 0, 1, 1.0),
                 ("heavy", 60, 20, 80, 40, 50, 50, 42, 0, 1, 1.0),
                 ("eco", 0, 0, 50, 0, 0, 0, 5, 0, 0, 1.0),
             ],
@@ -69,8 +69,8 @@ def _create_operations_db(path):
             """,
             [
                 ("standard", "MPPI_Standard_Controller", "standard", "scrub", 1.0),
-                ("heavy", "MPPI_Heavy_Controller", "heavy", "scrub", 1.0),
-                ("eco", "MPPI_Eco_Controller", "eco", "scrub", 1.0),
+                ("heavy", "MPPI_Standard_Controller", "heavy", "scrub", 1.0),
+                ("eco", "MPPI_Standard_Controller", "eco", "scrub", 1.0),
             ],
         )
         conn.execute(

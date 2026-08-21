@@ -19,9 +19,11 @@
   <arg name="skip_precise_docking_if_station_in_place" default="false"/>
   <arg name="direct_charge_after_precise_docking" default="true"/>
   <arg name="dock_supply_enable_drain" default="true"/>
-  <arg name="dock_supply_enable_refill" default="false"/>
+  <arg name="dock_supply_enable_refill" default="true"/>
   <arg name="dock_supply_drain_timeout_s" default="600.0"/>
-  <arg name="dock_supply_drain_settle_s" default="30.0"/>
+  <arg name="dock_supply_target_clean_level" default="74"/>
+  <arg name="dock_supply_refill_timeout_s" default="600.0"/>
+  <arg name="dock_supply_refill_settle_s" default="20.0"/>
   <arg name="dock_supply_combined_status_wait_s" default="5.0"/>
   <arg name="dock_supply_combined_status_stale_timeout_s" default="3.0"/>
   <arg name="target_soc" default="0.95"/>
@@ -91,7 +93,7 @@
     <node pkg="robot_hw_bridge" type="dock_supply_manager.py" name="dock_supply_manager" output="screen"
           respawn="true" respawn_delay="2.0">
       <param name="target_soc" value="$(arg target_soc)"/>
-      <param name="target_clean_level" value="35"/>
+      <param name="target_clean_level" value="$(arg dock_supply_target_clean_level)"/>
       <param name="enable_drain" value="$(arg dock_supply_enable_drain)"/>
       <param name="enable_refill" value="$(arg dock_supply_enable_refill)"/>
       <param name="mechanical_connect_enable" value="$(arg mechanical_connect_enable)"/>
@@ -102,10 +104,10 @@
       <param name="docking_target_dist" value="$(arg dock_target_dist)"/>
       <param name="pre_dock_settle_s" value="0.5"/>
       <param name="drain_timeout_s" value="$(arg dock_supply_drain_timeout_s)"/>
-      <param name="drain_settle_s" value="$(arg dock_supply_drain_settle_s)"/>
       <param name="combined_status_wait_s" value="$(arg dock_supply_combined_status_wait_s)"/>
       <param name="combined_status_stale_timeout_s" value="$(arg dock_supply_combined_status_stale_timeout_s)"/>
-      <param name="refill_timeout_s" value="30.0"/>
+      <param name="refill_timeout_s" value="$(arg dock_supply_refill_timeout_s)"/>
+      <param name="refill_settle_s" value="$(arg dock_supply_refill_settle_s)"/>
       <param name="charge_timeout_s" value="10800.0"/>
       <param name="charge_cmd_repeat" value="1"/>
       <param name="charge_cmd_interval_s" value="0.08"/>

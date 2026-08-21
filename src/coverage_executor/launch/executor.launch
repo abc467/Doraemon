@@ -52,10 +52,10 @@
     <param name="mbf_exe_path_action" value="/move_base_flex/exe_path"/>
 
     <!-- 可选：指定 planner/controller/recovery -->
-    <param name="mbf_planner" value="ThetaStarPlanner"/>
+    <param name="mbf_planner" value="SmacLatticePlanner"/>
     <param name="mbf_controller" value="MPPI_Standard_Controller"/>
-    <!-- 清扫 FSM 的所有 CONNECT 阶段使用 -->
-    <param name="mbf_connect_controller" value="MPPI_Connect_Controller"/>
+    <!-- 当前点对点 A/B：Smac 路径也交给 Standard MPPI 跟踪。 -->
+    <param name="mbf_connect_controller" value="MPPI_Standard_Controller"/>
     <param name="mbf_recovery" value=""/>
 
     <param name="water_off_distance" value="6.0"/>
@@ -108,6 +108,27 @@
     <param name="strict_resume_map_check" value="$(arg strict_resume_map_check)"/>
     <param name="resume_backtrack_m" value="0.2"/>
     <param name="connect_skip_dist" value="0.35"/>
+    <!-- XY 接近但朝向不一致时仍走 State Lattice CONNECT，禁止直接把
+         大角度姿态差交给 FOLLOW 在 block 起点临时处理。 -->
+    <param name="connect_skip_yaw_rad" value="0.25"/>
+    <!-- Match the production MBF task tolerance. Once CONNECT has reached
+         this SE(2) envelope, FOLLOW owns the remaining path capture; do not
+         generate extra short State-Lattice correction goals. -->
+    <param name="connect_handoff_dist_m" value="0.60"/>
+    <param name="connect_handoff_yaw_rad" value="0.52"/>
+    <!-- 总时限随距离增长；无平移且无转动达到截止时间时取消本次
+         MBF goal 并进入现有有界重试，避免任务永久 RUNNING。 -->
+    <!-- Initial State-Lattice planning may intentionally use up to 180 s
+         during this tuning phase. Keep the executor watchdog outside the MBF
+         planner deadline; distance scaling still bounds long executions. -->
+    <param name="connect_timeout_base_s" value="240.0"/>
+    <param name="connect_timeout_per_meter_s" value="20.0"/>
+    <param name="connect_no_progress_timeout_s" value="210.0"/>
+    <param name="follow_timeout_base_s" value="60.0"/>
+    <param name="follow_timeout_per_meter_s" value="20.0"/>
+    <param name="follow_no_progress_timeout_s" value="45.0"/>
+    <param name="navigation_progress_dist_m" value="0.03"/>
+    <param name="navigation_progress_yaw_rad" value="0.08"/>
     <param name="resume_accept_dist" value="1.0"/>
     <param name="resume_finish_thresh_m" value="0.3"/>
     <param name="connect_retry_max" value="2"/>

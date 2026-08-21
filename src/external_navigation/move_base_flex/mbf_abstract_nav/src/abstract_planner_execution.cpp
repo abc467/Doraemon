@@ -296,7 +296,7 @@ void AbstractPlannerExecution::run()
 
       // unlock goal
       goal_start_mtx_.unlock();
-      if (cancel_)
+      if (cancel_.load())
       {
         ROS_INFO_STREAM("The global planner has been canceled!");
         setState(CANCELED, true);
@@ -310,7 +310,7 @@ void AbstractPlannerExecution::run()
 
         boost::lock_guard<boost::mutex> guard(configuration_mutex_);
 
-        if (cancel_ && !isPatienceExceeded())
+        if (cancel_.load() && !isPatienceExceeded())
         {
           ROS_INFO_STREAM("The planner \"" << name_ << "\" has been canceled!"); // but not due to patience exceeded
           setState(CANCELED, true);
@@ -341,7 +341,7 @@ void AbstractPlannerExecution::run()
           // In the second case, the navigation server has tried to cancel planning (possibly without success, as
           // old nav_core-based planners do not support canceling), and we add here the fact to the log for info
           ROS_INFO_STREAM("Planning patience (" << patience_.toSec() << "s) has been exceeded"
-                                                << (cancel_ ? "; planner canceled!" : ""));
+                                                << (cancel_.load() ? "; planner canceled!" : ""));
           setState(PAT_EXCEEDED, true);
         }
         else if (max_retries_ == 0 && patience_.isZero())
@@ -370,4 +370,3 @@ void AbstractPlannerExecution::run()
 }
 
 } /* namespace mbf_abstract_nav */
-

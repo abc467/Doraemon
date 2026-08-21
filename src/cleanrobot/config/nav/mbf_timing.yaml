@@ -1,7 +1,42 @@
 # Shared timing parameters for the formal MBF runtime.
 
-planner_frequency: 0.5
+# Connect 执行期间不再启动同进程的周期 State Lattice 搜索。
+# 全局代价图只有静态约束，动态避障由 10 Hz MPPI+局部代价图负责；
+# 若局部实在无法绕行，控制失败后再走一次 fresh 全局规划。
+# 这避免长 State 搜索与 MPPI/CostCritic 抢占 CPU，也不会用过时
+# 起点重置正在跟踪的路径进度。0 Hz 仍会为新 goal 生成初始路径。
+planner_frequency: 0.0
+# 周期规划是后台优化，不得用长时间前的起点路径抢占当前安全执行。
+# 初始 State Lattice 可使用当前配置的宽松规划期限；以下门槛只约束周期刷新结果。
+periodic_plan_max_age: 10.0
+periodic_plan_max_join_distance: 0.15
+periodic_plan_max_join_yaw: 0.35
+# 全局默认仍为10 Hz，供Standard/Heavy/Eco等控制器使用。MBF会优先
+# 读取具体控制器实例下的controller_frequency；State实例因此可独立
+# 运行20 Hz，而不会改变清扫Standard控制器的调用节奏。
 controller_frequency: 10.0
 
-planner_patience: 20.0
+# ExePath 对原始 MoveBase requested target 的外层最终残差门槛。
+# State MPPI 的 0.50 m/0.40 rad 跟踪容差与最坏 lattice 量化误差
+# （约 7.1 cm / 0.10 rad）叠加后，仍落在这里的外层门槛以内。
+dist_tolerance: 0.60
+angle_tolerance: 0.52
+
+# A planner plugin failure is synchronous and normally deterministic for the
+# current costmap. Do not busy-loop thousands of identical calls until
+# planner_patience expires; one immediate retry is enough before MBF recovery.
+planner_max_retries: 1
+
+# State Lattice 总搜索上限为180 s。MBF必须稍晚于
+# 插件自身超时，才能让插件返回准确的 TIMEOUT/NO_PATH 而不是被外层提前取消。
+planner_patience: 190.0
 controller_patience: 30.0
+
+# 若局部代价地图/传感器状态连续不新鲜，控制循环全程只发布零速；
+# 超过该墙钟时间后以 MAP_ERROR 结束本次执行并交给上层重规划/恢复，
+# 避免无限显示 RUNNING 却原地不动。
+safety_check_patience: 3.0
+
+# 代价地图重新变为 current 后仍保持零速，只有连续稳定 0.5 s 才恢复
+# 控制，避免 current 状态抖动时在零速/非零速之间逐周期切换。
+safety_check_recovery_hold: 0.5

@@ -16,7 +16,7 @@ bool set_active
 int8 enabled_state # 0: 保持不变 1: 禁用 2: 启用
 bool dry_run # hardDelete / cleanupDisabled 默认应先 dry-run；真正删除需 dry_run=false
 bool force # 预留：当前仍不允许删除 active/runtime/pending/有引用 revision
-bool cascade # hardDelete: true 表示二次确认后级联删除该 revision 下属业务资产；任务运行/断点等历史审计引用不会级联删除并会阻止 hardDelete
+bool cascade # hardDelete / cleanupDisabled: true 表示确认后级联删除下属业务资产；已结束运行按身份快照归档，活动运行仍阻止删除
 uint32 min_age_days # cleanupDisabled: 只清理停用后超过 N 天的 revision
 uint64 max_reclaim_bytes # cleanupDisabled: 0 表示不限
 string confirm_token # hardDelete: map_revision_id 或 DELETE:<map_revision_id>; cleanupDisabled: CLEANUP_DISABLED
@@ -47,6 +47,6 @@ string deleted_business_refs # JSON summary for cascade hardDelete
 # modify: 更新资产元数据（description/enabled），可选 set_active
 # Delete: 软删除/禁用 map_name，不删除磁盘文件
 # hardDelete: 默认物理删除一个已停用且无业务引用的 map_revision_id；cascade=true 时级联删除该 revision 下属业务资产
-# cleanupDisabled: 批量物理清理已停用 revision，默认 dry-run，需 confirm_token=CLEANUP_DISABLED 才执行
+# cleanupDisabled: 批量物理清理始终级联清理业务定义并归档已结束运行；需 confirm_token=CLEANUP_DISABLED 才执行
 # get: 按 map_name / map_revision_id 查询；若同名 head 与 active 不同且未显式指定 revision，默认返回 active revision 视图
 # getAll: 返回所有已纳管地图的展示视图，并通过 latest_head_* 字段暴露最新 head revision 信息

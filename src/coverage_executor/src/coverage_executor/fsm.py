@@ -93,6 +93,22 @@ class ExecutorFSM:
         pause_hold_hz: float = 10.0,
         hard_stop_s: float = 0.6,
         connect_skip_dist: float = 0.35,
+        connect_skip_yaw_rad: float = 0.25,
+        connect_handoff_dist_m: float = 0.60,
+        connect_handoff_yaw_rad: float = 0.52,
+
+        # Navigation actions must not remain ACTIVE forever.  Total deadlines
+        # scale with path length, while the no-progress deadlines are reset by
+        # either translation or rotation (State Lattice may legitimately use
+        # in-place rotation primitives).
+        connect_timeout_base_s: float = 240.0,
+        connect_timeout_per_meter_s: float = 20.0,
+        connect_no_progress_timeout_s: float = 210.0,
+        follow_timeout_base_s: float = 60.0,
+        follow_timeout_per_meter_s: float = 20.0,
+        follow_no_progress_timeout_s: float = 45.0,
+        navigation_progress_dist_m: float = 0.03,
+        navigation_progress_yaw_rad: float = 0.08,
 
         resume_backtrack_m: float = 0.5,
         resume_accept_dist: float = 1.0,
@@ -180,6 +196,17 @@ class ExecutorFSM:
         self.pause_hold_hz = float(pause_hold_hz)
         self.hard_stop_s = float(hard_stop_s)
         self.connect_skip_dist = float(connect_skip_dist)
+        self.connect_skip_yaw_rad = max(0.0, float(connect_skip_yaw_rad))
+        self.connect_handoff_dist_m = max(0.0, float(connect_handoff_dist_m))
+        self.connect_handoff_yaw_rad = max(0.0, float(connect_handoff_yaw_rad))
+        self.connect_timeout_base_s = max(0.0, float(connect_timeout_base_s))
+        self.connect_timeout_per_meter_s = max(0.0, float(connect_timeout_per_meter_s))
+        self.connect_no_progress_timeout_s = max(0.0, float(connect_no_progress_timeout_s))
+        self.follow_timeout_base_s = max(0.0, float(follow_timeout_base_s))
+        self.follow_timeout_per_meter_s = max(0.0, float(follow_timeout_per_meter_s))
+        self.follow_no_progress_timeout_s = max(0.0, float(follow_no_progress_timeout_s))
+        self.navigation_progress_dist_m = max(0.0, float(navigation_progress_dist_m))
+        self.navigation_progress_yaw_rad = max(0.0, float(navigation_progress_yaw_rad))
 
         self.resume_backtrack_m = float(resume_backtrack_m)
         self.resume_accept_dist = float(resume_accept_dist)
@@ -217,6 +244,7 @@ class ExecutorFSM:
         self._cancel_req = False
         self._estop = False
         self._running_thread: Optional[threading.Thread] = None
+        self._execution_epoch: int = 0
 
         self._state = "INIT"
         self._state_pub = rospy.Publisher("~state", String, queue_size=1, latch=True)
@@ -473,6 +501,55 @@ class ExecutorFSM:
         p = max(0.0, min(s_done / total, 1.0))
         return float(p), float(p * 100.0)
 
+    def _reset_progress_tracking_locked(self):
+        """Discard progress that must not cross an IDLE -> START boundary.
+
+        The caller holds ``self._lock``.  Run/checkpoint persistence lives in
+        SQLite, so clearing these in-memory presentation fields does not remove
+        resumable task data.
+        """
+        self._plan = None
+        self._exec_index = 0
+        self._block_id = -1
+        self._path_index = 0
+        self._path_s = 0.0
+        self._block_cut_s0 = 0.0
+        self._block_cut_idx0 = 0
+        self._current_block_len_m = 0.0
+        self._plan_total_len_m = 0.0
+        self._prefix_before_m = []
+        self._exec_block_ids = []
+        self._last_progress_0_1 = 0.0
+
+    @staticmethod
+    def _normalize_idle_progress_message(msg):
+        """Make an IDLE heartbeat explicitly own no run or progress."""
+        state = str(getattr(msg, "state", "") or "").strip().upper()
+        if state != "IDLE":
+            return msg
+
+        msg.run_id = ""
+        msg.zone_id = ""
+        msg.plan_id = ""
+        msg.plan_profile = ""
+        msg.sys_profile = ""
+        msg.mode = ""
+        msg.error_code = ""
+        msg.error_msg = ""
+        msg.interlock_active = False
+        msg.interlock_reason = ""
+        msg.v_mps = 0.0
+        msg.w_rps = 0.0
+        msg.exec_index = 0
+        msg.block_id = -1
+        msg.path_index = 0
+        msg.path_s = 0.0
+        msg.block_length_m = 0.0
+        msg.total_length_m = 0.0
+        msg.progress_0_1 = 0.0
+        msg.progress_pct = 0.0
+        return msg
+
 
     def _publish_minimal_progress(self, reason: str = "", lock_busy: bool = False):
         """Publish a minimal RunProgress heartbeat without taking self._lock.
@@ -506,6 +583,7 @@ class ExecutorFSM:
             p01 = float(getattr(self, "_last_progress_0_1", 0.0) or 0.0)
             msg.progress_0_1 = p01
             msg.progress_pct = float(p01 * 100.0)
+            self._normalize_idle_progress_message(msg)
             msg.stamp = rospy.Time.now()
             self._progress_pub.publish(msg)
             if lock_busy:
@@ -642,6 +720,7 @@ class ExecutorFSM:
             msg.total_length_m = float(total_len)
             msg.progress_0_1 = float(p01)
             msg.progress_pct = float(ppct)
+            self._normalize_idle_progress_message(msg)
             msg.stamp = rospy.Time.now()
             self._progress_pub.publish(msg)
 
@@ -1219,6 +1298,7 @@ class ExecutorFSM:
             if s == "IDLE":
                 self._error_code = ""
                 self._error_msg = ""
+                self._reset_progress_tracking_locked()
             elif s.startswith("ERROR"):
                 self._error_code = s
         self._state_pub.publish(String(data=s))
@@ -1572,21 +1652,38 @@ class ExecutorFSM:
                 if not zone:
                     rospy.logwarn("[EXEC] start requires zone_id")
                     return
-                self._apply_intent_from_kv(kv)
                 req_run = (kv.get("run_id") or "").strip() if kv else ""
                 with self._lock:
                     if self._actuator_debug_active or self._actuator_debug_transition:
                         rospy.logwarn("[EXEC] reject start: actuator debug transition active")
                         self._emit("CMD_REJECTED:start:ACTUATOR_DEBUG")
                         return
+                    active_thread = self._running_thread
+                    if active_thread is not None and active_thread.is_alive():
+                        # Do not mutate run ownership or clear an outstanding
+                        # pause/cancel.  The previous implementation changed
+                        # _run_id first and only then discovered the live
+                        # thread, which allowed an old execution to checkpoint
+                        # and publish under the new run id.
+                        rospy.logwarn(
+                            "[EXEC] reject start: execution already active run=%s state=%s",
+                            str(self._run_id or ""),
+                            str(getattr(self, "_state", "") or ""),
+                        )
+                        self._emit("CMD_REJECTED:start:EXECUTION_ACTIVE")
+                        return
+                    self._apply_intent_from_kv(kv)
                     self._zone_id = zone
                     # always create/use a run_id for this execution
                     self._run_id = req_run or uuid.uuid4().hex
                     self._pause_req = False
                     self._cancel_req = False
-                rospy.loginfo("[EXEC] start zone_id=%s", self._zone_id)
-                self._publish_state("START_REQ")
-                self._start_thread(mode="start")
+                    self._reset_progress_tracking_locked()
+                    self._execution_epoch = int(getattr(self, "_execution_epoch", 0)) + 1
+                    epoch = int(self._execution_epoch)
+                    rospy.loginfo("[EXEC] start zone_id=%s run=%s epoch=%d", self._zone_id, self._run_id, epoch)
+                    self._publish_state("START_REQ")
+                    self._start_thread(mode="start")
             return
 
         if verb == "resume":
@@ -1598,7 +1695,6 @@ class ExecutorFSM:
                 kv = self._parse_kv_tokens(parts[1:])
                 zone = (kv.get("zone_id") or "").strip() if kv else ""
                 # canonical: resume run_id=... [zone_id=...] [plan_profile=...] [sys_profile=...] [mode=...]
-                self._apply_intent_from_kv(kv)
                 req_run = (kv.get("run_id") or "").strip() if kv else ""
                 if not req_run:
                     rospy.logwarn("[EXEC] resume requires run_id")
@@ -1608,18 +1704,60 @@ class ExecutorFSM:
                         rospy.logwarn("[EXEC] reject resume: actuator debug transition active")
                         self._emit("CMD_REJECTED:resume:ACTUATOR_DEBUG")
                         return
+                    active_thread = self._running_thread
+                    if active_thread is not None and active_thread.is_alive():
+                        rospy.logwarn(
+                            "[EXEC] reject resume: execution already active run=%s state=%s",
+                            str(self._run_id or ""),
+                            str(getattr(self, "_state", "") or ""),
+                        )
+                        self._emit("CMD_REJECTED:resume:EXECUTION_ACTIVE")
+                        return
+                    self._apply_intent_from_kv(kv)
                     if zone:
                         self._zone_id = zone
                     self._run_id = req_run
                     self._pause_req = False
                     self._cancel_req = False
-                rospy.logwarn("[EXEC] RESUME zone_id=%s", self._zone_id)
-                self._stop_pause_hold()
-                self._publish_state("RESUME_REQ")
-                self._start_thread(mode="resume")
+                    # A resume starts a new execution attempt for the same run.
+                    # Do not keep the previous recoverable failure attached to
+                    # fresh CONNECT/FOLLOW heartbeats; any new failure will set
+                    # its own error summary before publishing a terminal state.
+                    self._error_code = ""
+                    self._error_msg = ""
+                    self._execution_epoch = int(getattr(self, "_execution_epoch", 0)) + 1
+                    epoch = int(self._execution_epoch)
+                    rospy.logwarn("[EXEC] RESUME zone_id=%s run=%s epoch=%d", self._zone_id, self._run_id, epoch)
+                    self._stop_pause_hold()
+                    self._publish_state("RESUME_REQ")
+                    self._start_thread(mode="resume")
             return
 
         if verb == "pause":
+            with self._lock:
+                active_thread = self._running_thread
+                run_active = bool(active_thread and active_thread.is_alive())
+                current_state = str(self._state or "").strip().upper()
+                if not run_active:
+                    self._pause_req = False
+            if not run_active:
+                # A direct safety publisher may race with TaskManager during
+                # startup.  With no live execution there is nothing to
+                # checkpoint or resume, so PAUSE_REQ would only create a
+                # false, latched paused state for the UI.  Preserve meaningful
+                # terminal states; normalize idle-like terminal states to
+                # canonical IDLE.
+                if current_state in ("IDLE", "DONE", "CANCELED"):
+                    rospy.logwarn("[EXEC] PAUSE while idle -> keep IDLE")
+                    self._stop_pause_hold()
+                    self._publish_state("IDLE")
+                else:
+                    rospy.logwarn(
+                        "[EXEC] reject PAUSE without active execution state=%s",
+                        current_state or "UNKNOWN",
+                    )
+                    self._emit("CMD_REJECTED:pause:NO_ACTIVE_EXECUTION")
+                return
             with self._lock:
                 self._pause_req = True
             rospy.logwarn("[EXEC] PAUSE (async)")
@@ -1932,6 +2070,12 @@ class ExecutorFSM:
                 clean_mode=str(clean_mode or ""),
                 map_id=str(self._runtime_map_id or ""),
                 map_md5=str(self._runtime_map_md5 or ""),
+                cleaning_distance_m=max(0.0, float(plan.total_length_m or 0.0)),
+                cleaning_area_m2=(
+                    max(0.0, float(plan.total_length_m or 0.0))
+                    * max(0.01, float(getattr(plan, "coverage_width_m", 0.6) or 0.6))
+                ),
+                metrics_source="plan_snapshot",
             )
         except Exception as e:
             rospy.logwarn_throttle(2.0, "[EXEC] update_run_execution_context failed: run=%s err=%s", run_id, str(e))
@@ -2023,18 +2167,31 @@ class ExecutorFSM:
         return str(map_name or "").strip()
 
     # ---------- thread control ----------
-    def _start_thread(self, mode: str):
+    def _start_thread(self, mode: str, execution_epoch: Optional[int] = None) -> bool:
         with self._lock:
             if self._actuator_debug_active or self._actuator_debug_transition:
                 rospy.logwarn("[EXEC] reject %s thread: actuator debug lease active", str(mode))
                 self._emit("CMD_REJECTED:%s:ACTUATOR_DEBUG" % str(mode))
-                return
+                return False
             if self._running_thread and self._running_thread.is_alive():
                 rospy.logwarn("[EXEC] thread already running; ignore %s", mode)
-                return
-            t = threading.Thread(target=self._run_thread_main, args=(mode,), daemon=True)
+                return False
+            epoch = int(
+                execution_epoch
+                if execution_epoch is not None
+                else getattr(self, "_execution_epoch", 0)
+            )
+            t = threading.Thread(
+                target=self._run_thread_main,
+                args=(mode, epoch),
+                daemon=True,
+            )
             self._running_thread = t
+            # Start while still holding _lock.  A concurrent cancel therefore
+            # either sees no execution before this atomic admission, or sees an
+            # alive thread and latches _cancel_req for this exact epoch.
             t.start()
+            return True
 
     def _should_abort(self) -> str:
         with self._lock:
@@ -2055,10 +2212,15 @@ class ExecutorFSM:
         rospy.spin()
 
     # ---------- run logic (start/resume) ----------
-    def _run_thread_main(self, mode: str):
+    def _run_thread_main(self, mode: str, execution_epoch: Optional[int] = None):
         with self._lock:
             zone_id = self._zone_id
             run_id = str(self._run_id or "")
+            epoch = int(
+                execution_epoch
+                if execution_epoch is not None
+                else getattr(self, "_execution_epoch", 0)
+            )
 
         # start requires zone_id; resume requires a concrete run_id
         if mode != "resume" and not zone_id:
@@ -2079,7 +2241,10 @@ class ExecutorFSM:
             self._publish_state("FAILED")
         finally:
             with self._lock:
-                if getattr(self, "_running_thread", None) is threading.current_thread():
+                if (
+                    getattr(self, "_running_thread", None) is threading.current_thread()
+                    and int(getattr(self, "_execution_epoch", 0)) == epoch
+                ):
                     self._running_thread = None
 
     def _apply_profile_only_and_stop(self, profile_name: str, water_off_latched: bool):
@@ -2545,6 +2710,9 @@ class ExecutorFSM:
             self._publish_state("ERROR_PLAN_MISMATCH")
             return
 
+        if not self._validate_resume_checkpoint(plan, ckpt):
+            return
+
         self._exec_index = ckpt["exec_index"]
         self._block_id = ckpt["block_id"]
         self._path_index = ckpt["path_index"]
@@ -2583,6 +2751,70 @@ class ExecutorFSM:
         )
         self._execute_from_checkpoint(zone_id, plan, ckpt=ckpt)
 
+    def _validate_resume_checkpoint(self, plan: LoadedPlan, ckpt: Dict[str, Any]) -> bool:
+        """Validate block ownership before checkpoint progress can affect resume."""
+        blocks = list(plan.blocks or [])
+        exec_index = int(ckpt.get("exec_index", 0) or 0)
+        if exec_index < 0 or exec_index >= len(blocks):
+            msg = "checkpoint exec_index=%d outside plan block count=%d" % (
+                exec_index,
+                len(blocks),
+            )
+            rospy.logerr("[CKPT] %s", msg)
+            self._set_error(code="INVALID_CHECKPOINT", msg=msg)
+            self._publish_state("ERROR_INVALID_CHECKPOINT")
+            return False
+
+        block = blocks[exec_index]
+        expected_block_id = int(block.block_id)
+        checkpoint_block_id = int(ckpt.get("block_id", -1))
+        if checkpoint_block_id != expected_block_id:
+            msg = "checkpoint block mismatch: exec_index=%d expected=%d actual=%d" % (
+                exec_index,
+                expected_block_id,
+                checkpoint_block_id,
+            )
+            rospy.logerr("[CKPT] %s", msg)
+            self._set_error(code="INVALID_CHECKPOINT", msg=msg)
+            self._publish_state("ERROR_INVALID_CHECKPOINT")
+            return False
+
+        path = list(block.path_xyyaw or [])
+        total_length = float(getattr(block, "length_m", 0.0) or 0.0)
+        path_s = float(ckpt.get("path_s", 0.0) or 0.0)
+        path_index = int(ckpt.get("path_index", 0) or 0)
+        progress_is_invalid = (
+            not math.isfinite(path_s)
+            or path_s < -1e-6
+            or path_s > total_length + 0.05
+            or path_index < 0
+            or (path and path_index >= len(path))
+        )
+        if progress_is_invalid:
+            # Prefer re-cleaning from this block's beginning over silently
+            # skipping an uncleaned block due to legacy cross-block progress.
+            rospy.logerr(
+                "[CKPT] invalid progress for block=%d: idx=%d/%d s=%.3f/%.3f; resetting to block start",
+                expected_block_id,
+                path_index,
+                len(path),
+                path_s,
+                total_length,
+            )
+            ckpt["path_index"] = 0
+            ckpt["path_s"] = 0.0
+            self._emit(
+                "CHECKPOINT_PROGRESS_RESET:block=%d old_idx=%d old_s=%.3f" % (
+                    expected_block_id,
+                    path_index,
+                    path_s,
+                )
+            )
+        else:
+            ckpt["path_index"] = max(0, path_index)
+            ckpt["path_s"] = max(0.0, min(path_s, total_length))
+        return True
+
     # ---------- exec blocks ----------
     def _execute_from_checkpoint(self, zone_id: str, plan: LoadedPlan, ckpt: Optional[dict]):
         # plan.blocks 已经是执行顺序
@@ -2602,6 +2834,11 @@ class ExecutorFSM:
             self._current_block_len_m = float(getattr(blk, "length_m", 0.0) or 0.0)
             self._block_cut_s0 = 0.0
             self._block_cut_idx0 = 0
+            # Progress belongs to the newly selected block. Reset it before
+            # any CONNECT/checkpoint path so a failure cannot persist the
+            # preceding block's completed path_s/path_index.
+            self._path_index = 0
+            self._path_s = 0.0
             is_last = (ei == len(exec_blocks) - 1)
 
             # default for start
@@ -2856,6 +3093,57 @@ class ExecutorFSM:
         self._emit(f"PAUSED_RECOVERY:{code}:{msg}")
         self._publish_state("PAUSED_RECOVERY")
 
+    @staticmethod
+    def _se2_residual(
+        robot_xyt: Optional[Tuple[float, float, float]],
+        target_xyt: Tuple[float, float, float],
+    ) -> Tuple[float, float]:
+        """Return position/yaw residual, or infinities when pose is unavailable."""
+        if robot_xyt is None:
+            return float("inf"), float("inf")
+        return (
+            math.hypot(
+                float(robot_xyt[0]) - float(target_xyt[0]),
+                float(robot_xyt[1]) - float(target_xyt[1]),
+            ),
+            abs(_wrap_pi(float(robot_xyt[2]) - float(target_xyt[2]))),
+        )
+
+    @staticmethod
+    def _advance_motion_watchdog(
+        anchor_xyt: Optional[Tuple[float, float, float]],
+        last_progress_ts: float,
+        robot_xyt: Optional[Tuple[float, float, float]],
+        now_ts: float,
+        min_dist_m: float,
+        min_yaw_rad: float,
+    ) -> Tuple[Optional[Tuple[float, float, float]], float]:
+        """Advance a wall-time watchdog on translation *or* rotation progress."""
+        if robot_xyt is None:
+            return anchor_xyt, float(last_progress_ts)
+        current = (
+            float(robot_xyt[0]),
+            float(robot_xyt[1]),
+            float(robot_xyt[2]),
+        )
+        if anchor_xyt is None:
+            return current, float(now_ts)
+        moved = math.hypot(
+            current[0] - float(anchor_xyt[0]),
+            current[1] - float(anchor_xyt[1]),
+        )
+        turned = abs(_wrap_pi(current[2] - float(anchor_xyt[2])))
+        if moved >= max(0.0, float(min_dist_m)) or turned >= max(0.0, float(min_yaw_rad)):
+            return current, float(now_ts)
+        return anchor_xyt, float(last_progress_ts)
+
+    @staticmethod
+    def _scaled_action_timeout(base_s: float, per_meter_s: float, distance_m: float) -> float:
+        distance = float(distance_m)
+        if not math.isfinite(distance) or distance < 0.0:
+            distance = 0.0
+        return max(0.0, float(base_s)) + max(0.0, float(per_meter_s)) * distance
+
     def _run_one_block(
         self,
         zone_id: str,
@@ -2899,18 +3187,29 @@ class ExecutorFSM:
             self._block_cut_s0 = float(cur_cut_start_s)
 
             robot = self._get_robot_xyt()
-            rx, ry, _ = robot if robot else (0.0, 0.0, 0.0)
+            rx, ry, ryaw = robot if robot else (0.0, 0.0, 0.0)
             start_xy = (float(cur_cut_path[0][0]), float(cur_cut_path[0][1]))
+            start_yaw = float(cur_cut_path[0][2])
             d_start = math.hypot(start_xy[0] - rx, start_xy[1] - ry) if robot else 1e9
+            yaw_start = abs(_wrap_pi(start_yaw - ryaw)) if robot else math.pi
 
             if cur_force_connect is None:
-                do_connect = (d_start > self.connect_skip_dist)
+                # Being close in XY is insufficient for a differential-drive
+                # handoff.  A large yaw mismatch can require a collision-aware
+                # State Lattice rotation/arc before FOLLOW is safe to start.
+                do_connect = (
+                    d_start > self.connect_skip_dist
+                    or yaw_start > self.connect_skip_yaw_rad
+                )
             else:
                 do_connect = bool(cur_force_connect)
 
             connect_transit = bool(cur_transit) or (not self.keep_cleaning_on_during_connect)
 
             if do_connect:
+                self._path_index = 0
+                self._path_s = 0.0
+                self._save_checkpoint(zone_id, plan.plan_id, state="RUNNING")
                 self._publish_state(f"CONNECT:block_{blk.block_id}")
 
                 if connect_transit:
@@ -2918,14 +3217,25 @@ class ExecutorFSM:
 
                 entry_pose = make_pose(plan.frame_id, start_xy[0], start_xy[1], float(cur_cut_path[0][2]))
                 rospy.logwarn(
-                    "[CONNECT] blk=%d retry=%d start=(%.2f,%.2f) d_start=%.2f cut_idx=%d transit=%s",
-                    blk.block_id, connect_failures, start_xy[0], start_xy[1], d_start, int(cur_cut_start_idx), str(connect_transit),
+                    "[CONNECT] blk=%d retry=%d start=(%.2f,%.2f) d_start=%.2f yaw_err=%.2f cut_idx=%d transit=%s",
+                    blk.block_id, connect_failures, start_xy[0], start_xy[1], d_start, yaw_start,
+                    int(cur_cut_start_idx), str(connect_transit),
                 )
 
                 self.mbf.send_connect(
                     entry_pose,
                     controller=self.mbf.connect_controller or None,
                 )
+
+                connect_started_ts = time.time()
+                connect_last_progress_ts = connect_started_ts
+                connect_anchor = robot
+                connect_timeout_s = self._scaled_action_timeout(
+                    self.connect_timeout_base_s,
+                    self.connect_timeout_per_meter_s,
+                    d_start,
+                )
+                connect_watchdog_reason = ""
 
                 while not rospy.is_shutdown():
                     reason = self._should_abort()
@@ -2935,17 +3245,81 @@ class ExecutorFSM:
                         self._save_checkpoint(zone_id, plan.plan_id, state=("PAUSED" if reason == "PAUSE" else "CANCELED"))
                         self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
                         return False
+                    now_ts = time.time()
+                    connect_anchor, connect_last_progress_ts = self._advance_motion_watchdog(
+                        connect_anchor,
+                        connect_last_progress_ts,
+                        self._get_robot_xyt(),
+                        now_ts,
+                        self.navigation_progress_dist_m,
+                        self.navigation_progress_yaw_rad,
+                    )
+                    if connect_timeout_s > 0.0 and (now_ts - connect_started_ts) >= connect_timeout_s:
+                        connect_watchdog_reason = "connect_action_timeout:%.1fs" % connect_timeout_s
+                    elif (
+                        self.connect_no_progress_timeout_s > 0.0
+                        and (now_ts - connect_last_progress_ts) >= self.connect_no_progress_timeout_s
+                    ):
+                        connect_watchdog_reason = "connect_no_progress:%.1fs" % self.connect_no_progress_timeout_s
+                    if connect_watchdog_reason:
+                        rospy.logerr(
+                            "[EXEC] CONNECT watchdog stopped block=%d reason=%s",
+                            blk.block_id,
+                            connect_watchdog_reason,
+                        )
+                        self.mbf.cancel_all()
+                        break
                     if self.mbf.connect_done():
                         break
                     rospy.sleep(0.05)
 
-                if not self.mbf.connect_succeeded():
+                connect_ok = (not connect_watchdog_reason) and self.mbf.connect_succeeded()
+                handoff_dist = float("inf")
+                handoff_yaw = float("inf")
+                if connect_ok:
+                    handoff_dist, handoff_yaw = self._se2_residual(
+                        self._get_robot_xyt(),
+                        (start_xy[0], start_xy[1], start_yaw),
+                    )
+                    if (
+                        handoff_dist > self.connect_handoff_dist_m
+                        or handoff_yaw > self.connect_handoff_yaw_rad
+                    ):
+                        connect_ok = False
+                        connect_watchdog_reason = (
+                            "connect_handoff_residual:dist=%.3f>%.3f yaw=%.3f>%.3f"
+                            % (
+                                handoff_dist,
+                                self.connect_handoff_dist_m,
+                                handoff_yaw,
+                                self.connect_handoff_yaw_rad,
+                            )
+                        )
+
+                if not connect_ok:
                     connect_failures += 1
-                    msg = f"block={blk.block_id} connect failed attempt={connect_failures}/{self.connect_retry_max}"
+                    connect_result = self.mbf.get_connect_result()
+                    connect_outcome = int(
+                        -2 if connect_watchdog_reason else getattr(connect_result, "outcome", -1)
+                    )
+                    connect_reason = str(
+                        connect_watchdog_reason
+                        or getattr(connect_result, "message", "")
+                        or "unknown"
+                    ).strip()
+                    connect_attempt_total = self.connect_retry_max + 1
+                    msg = (
+                        f"block={blk.block_id} connect failed "
+                        f"attempt={connect_failures}/{connect_attempt_total} "
+                        f"outcome={connect_outcome} reason={connect_reason}"
+                    )
                     rospy.logwarn("[EXEC] %s", msg)
 
                     if connect_failures <= self.connect_retry_max:
-                        self._emit(f"CONNECT_RETRY:block={blk.block_id} attempt={connect_failures}/{self.connect_retry_max}")
+                        self._emit(
+                            f"CONNECT_RETRY:block={blk.block_id} "
+                            f"retry={connect_failures}/{self.connect_retry_max}"
+                        )
                         self._force_cleaning_all_off("connect_retry")
                         if self.retry_clear_costmaps:
                             self.mbf.clear_costmaps()
@@ -2966,7 +3340,12 @@ class ExecutorFSM:
                             zone_id, plan.plan_id,
                             code="CONNECT_FAILED",
                             msg=msg,
-                            data={"block_id": int(blk.block_id), "attempt": int(connect_failures)},
+                            data={
+                                "block_id": int(blk.block_id),
+                                "attempt": int(connect_failures),
+                                "outcome": int(connect_outcome),
+                                "reason": str(connect_reason),
+                            },
                         )
                         return False
 
@@ -3001,6 +3380,16 @@ class ExecutorFSM:
             self._path_s = 0.0
 
             self.mbf.send_execute_path(path_msg)
+
+            follow_started_ts = time.time()
+            follow_last_progress_ts = follow_started_ts
+            follow_anchor = self._get_robot_xyt()
+            follow_timeout_s = self._scaled_action_timeout(
+                self.follow_timeout_base_s,
+                self.follow_timeout_per_meter_s,
+                total_s,
+            )
+            follow_watchdog_reason = ""
 
             last_ckpt_write = time.time()
             last_follow_log = 0.0
@@ -3042,6 +3431,29 @@ class ExecutorFSM:
                         )
 
                 now = time.time()
+                follow_anchor, follow_last_progress_ts = self._advance_motion_watchdog(
+                    follow_anchor,
+                    follow_last_progress_ts,
+                    p,
+                    now,
+                    self.navigation_progress_dist_m,
+                    self.navigation_progress_yaw_rad,
+                )
+                if follow_timeout_s > 0.0 and (now - follow_started_ts) >= follow_timeout_s:
+                    follow_watchdog_reason = "follow_action_timeout:%.1fs" % follow_timeout_s
+                elif (
+                    self.follow_no_progress_timeout_s > 0.0
+                    and (now - follow_last_progress_ts) >= self.follow_no_progress_timeout_s
+                ):
+                    follow_watchdog_reason = "follow_no_progress:%.1fs" % self.follow_no_progress_timeout_s
+                if follow_watchdog_reason:
+                    rospy.logerr(
+                        "[EXEC] FOLLOW watchdog stopped block=%d reason=%s",
+                        blk.block_id,
+                        follow_watchdog_reason,
+                    )
+                    self.mbf.cancel_all()
+                    break
                 if self.checkpoint_hz > 0.0 and now - last_ckpt_write >= (1.0 / self.checkpoint_hz):
                     self._save_checkpoint(zone_id, plan.plan_id, state="RUNNING")
                     last_ckpt_write = now
@@ -3059,13 +3471,30 @@ class ExecutorFSM:
 
                 rate.sleep()
 
-            if not self.mbf.exe_succeeded():
+            if follow_watchdog_reason or (not self.mbf.exe_succeeded()):
                 follow_failures += 1
-                msg = f"block={blk.block_id} follow failed attempt={follow_failures}/{self.follow_retry_max}"
+                follow_result = self.mbf.get_exe_result()
+                follow_outcome = int(
+                    -2 if follow_watchdog_reason else getattr(follow_result, "outcome", -1)
+                )
+                follow_reason = str(
+                    follow_watchdog_reason
+                    or getattr(follow_result, "message", "")
+                    or "unknown"
+                ).strip()
+                follow_attempt_total = self.follow_retry_max + 1
+                msg = (
+                    f"block={blk.block_id} follow failed "
+                    f"attempt={follow_failures}/{follow_attempt_total} "
+                    f"outcome={follow_outcome} reason={follow_reason}"
+                )
                 rospy.logwarn("[EXEC] %s", msg)
 
                 if follow_failures <= self.follow_retry_max:
-                    self._emit(f"FOLLOW_RETRY:block={blk.block_id} attempt={follow_failures}/{self.follow_retry_max}")
+                    self._emit(
+                        f"FOLLOW_RETRY:block={blk.block_id} "
+                        f"retry={follow_failures}/{self.follow_retry_max}"
+                    )
 
                     self._force_cleaning_all_off("follow_retry")
 
@@ -3108,6 +3537,8 @@ class ExecutorFSM:
                             "block_id": int(blk.block_id),
                             "attempt": int(follow_failures),
                             "path_s": float(self._block_cut_s0 + self._path_s),
+                            "outcome": int(follow_outcome),
+                            "reason": str(follow_reason),
                         },
                     )
                     return False

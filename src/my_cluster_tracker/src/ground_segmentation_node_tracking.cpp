@@ -131,14 +131,18 @@ private:
       tf_buf_.transform(*msg, tf_pc, target_frame_, ros::Duration(0.1));
     } catch (const tf2::TransformException& e) {
       ROS_WARN_STREAM_THROTTLE(5.0, "TF: " << e.what());
-      publish2D(Cloud::Ptr(new Cloud), msg->header.stamp);
+      // A transform failure is not an observation that the scene is empty.
+      // Publish nothing and let the camera costmap layer retain the last valid
+      // snapshot until its bounded TTL expires.
       return;
     }
 
     // 2) ROS→PCL
     Cloud::Ptr raw(new Cloud);
     pcl::fromROSMsg(tf_pc, *raw);
-    if (raw->empty()) { publish2D(Cloud::Ptr(new Cloud), msg->header.stamp); return; }
+    // An empty raw sensor frame is treated as invalid transport, not evidence
+    // that all previously seen obstacles disappeared. TTL handles dropouts.
+    if (raw->empty()) { return; }
 
     // 3) ROI 裁剪：x → y → z
     Cloud::Ptr roi_x(new Cloud), roi_xy(new Cloud), roi_xyz(new Cloud);
@@ -161,7 +165,7 @@ private:
     Cloud::Ptr obst(new Cloud);
     if (!segmentGroundStable(ds, obst)) {
       if (!height_fallback_enabled_) {
-        publish2D(Cloud::Ptr(new Cloud), msg->header.stamp);
+        // Ground-model failure is not a verified empty scene.
         return;
       }
       segmentByBaseHeight(ds, obst);

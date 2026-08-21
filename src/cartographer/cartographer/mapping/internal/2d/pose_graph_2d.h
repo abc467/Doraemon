@@ -59,6 +59,29 @@
 namespace cartographer {
 namespace mapping {
 
+// Inputs used by the active-to-frozen recovery gate. These helpers are kept
+// independent of PoseGraph2D so the safety-critical threshold behavior can be
+// unit tested without constructing a full pose graph.
+struct ActiveFrozenFullMapQuality {
+  double hit20 = -1.;
+  double mean_distance = -1.;
+  double known_ratio = -1.;
+  bool valid = false;
+};
+
+bool IsActiveFrozenRecoveryEndpointValid(double hit20, double mean_distance,
+                                         double known_ratio);
+bool IsActiveFrozenCorrectionWithinHardLimits(double translation_m,
+                                              double yaw_rad);
+bool NeedsActiveFrozenRecoveryValidation(double translation_m, double yaw_rad,
+                                         double free_space_conflict_ratio,
+                                         bool recovery_path,
+                                         bool match_full_submap,
+                                         bool ambiguous);
+bool PassesActiveFrozenSameFrameFullMapGate(
+    const ActiveFrozenFullMapQuality& current,
+    const ActiveFrozenFullMapQuality& candidate, std::string* reject_reason);
+
 // Implements the loop closure method called Sparse Pose Adjustment (SPA) from
 // Konolige, Kurt, et al. "Efficient sparse pose adjustment for 2d mapping."
 // Intelligent Robots and Systems (IROS), 2010 IEEE/RSJ International Conference
@@ -337,7 +360,8 @@ class PoseGraph2D : public PoseGraph {
 
   struct MapScanDistanceFieldSubmapSnapshot {
     std::shared_ptr<const Submap2D> submap;
-    transform::Rigid2d global_pose = transform::Rigid2d::Identity();
+    transform::Rigid2d global_from_local_pose =
+        transform::Rigid2d::Identity();
   };
 
   struct LocalizationRecoveryRuntime {
@@ -432,10 +456,8 @@ class PoseGraph2D : public PoseGraph {
 
   int last_active_to_frozen_constraint_trajectory_id_ GUARDED_BY(mutex_) = -1;
   int last_active_to_frozen_constraint_node_index_ GUARDED_BY(mutex_) = -1;
-  std::map<int, std::size_t> active_frozen_global_search_cursor_
-      GUARDED_BY(mutex_);
-  std::map<int, int> last_active_frozen_global_search_node_index_
-      GUARDED_BY(mutex_);
+  common::Time last_active_to_frozen_constraint_time_ GUARDED_BY(mutex_) =
+      common::Time::min();
   std::map<int, std::deque<ActiveFrozenCorrectionObservation>>
       active_frozen_consistency_windows_ GUARDED_BY(mutex_);
   std::map<int, LocalizationRecoveryRuntime> localization_recovery_

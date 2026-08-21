@@ -1,4 +1,5 @@
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -59,6 +60,9 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._is_dock_supply_owner_phase = lambda: False
         mgr._dock_supply_state = "IDLE"
         mgr._dock_supply_cancel = lambda: None
+        mgr._return_home_cancel_lock = threading.Lock()
+        mgr._return_home_cancel_timeout_s = 15.0
+        mgr._dock_supply_exit_inflight = False
         mgr._auto_charge_recovery_exhausted_running = False
         mgr._charge_clears = []
         mgr._clear_charge_monitor = lambda: mgr._charge_clears.append(True)
@@ -80,6 +84,12 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._charge_last_fresh_ts = 0.0
         mgr._executor_state = "IDLE"
         mgr._get_exec_state = lambda: str(mgr._executor_state)
+        mgr._last_run_progress = None
+        mgr._last_run_progress_ts = 0.0
+        mgr._last_run_progress_msg_ts = 0.0
+        mgr._auto_resume_started_ts = 0.0
+        mgr._auto_resume_run_id = ""
+        mgr.auto_resume_timeout_s = 60.0
         mgr._last_exec_state_seen = ""
         mgr._job_loops_total = 1
         mgr._job_loops_done = 0
@@ -87,6 +97,14 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr.nav = type("Nav", (), {"cancel_all": lambda _self: None})()
         mgr._dock_stage2_nav = type("Nav", (), {"cancel_all": lambda _self: None})()
         return mgr
+
+    @staticmethod
+    def _set_executor_progress(mgr, state, run_id="run_alpha"):
+        mgr._last_run_progress = SimpleNamespace(
+            run_id=str(run_id),
+            state=str(state),
+        )
+        mgr._last_run_progress_ts = time.time()
 
     def _enable_calibration_gate(self, mgr, **changes):
         values = {
@@ -515,6 +533,57 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertEqual(mgr._executor_state, "IDLE")
         self.assertEqual(persist_calls, [False, False])
 
+    def test_paused_recovery_waits_for_matching_run_progress(self):
+        mgr = self._manager()
+        mgr._mission_state = "RUNNING"
+
+        mgr._on_executor_state(String(data="PAUSED_RECOVERY"))
+
+        self.assertEqual(mgr._mission_state, "RUNNING")
+        self.assertEqual(mgr._published_states, [])
+
+        self._set_executor_progress(
+            mgr, "PAUSED_RECOVERY", run_id="previous_run"
+        )
+        self.assertFalse(mgr._consume_correlated_paused_recovery())
+        self.assertEqual(mgr._mission_state, "RUNNING")
+
+        self._set_executor_progress(mgr, "PAUSED_RECOVERY")
+        self.assertTrue(mgr._consume_correlated_paused_recovery())
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._published_states, ["PAUSED_RECOVERY"])
+        self.assertIn(
+            ("run_alpha", "PAUSED", "exec_paused_recovery"),
+            mgr._mission_updates,
+        )
+
+    def test_generic_paused_recovery_does_not_steal_auto_resume_phase(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "PAUSED_RECOVERY"
+        self._set_executor_progress(mgr, "PAUSED_RECOVERY")
+
+        self.assertFalse(mgr._consume_correlated_paused_recovery())
+        self.assertEqual(mgr._phase, "AUTO_RESUMING")
+        self.assertEqual(mgr._published_states, [])
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=201.0)
+    def test_progress_generation_time_rejects_latched_predispatch_message(
+        self, _time_now
+    ):
+        mgr = self._manager()
+        self._set_executor_progress(mgr, "CONNECT:block_2")
+        mgr._last_run_progress_ts = 201.0
+        mgr._last_run_progress_msg_ts = 100.0
+
+        self.assertFalse(
+            mgr._executor_progress_matches_active_run(
+                expected_state="CONNECT:block_2", not_before_ts=150.0
+            )
+        )
+
     @mock.patch("coverage_task_manager.task_manager.ensure_map_identity", return_value=("", "", False))
     @mock.patch("coverage_task_manager.task_manager.rospy.Time.now")
     @mock.patch("coverage_task_manager.task_manager.time.time", return_value=100.0)
@@ -604,6 +673,67 @@ class TaskCommandContractTest(unittest.TestCase):
             [("ERROR_AUTO_RESUME_CONTEXT", "missing active_run_id during auto undock resume")],
         )
 
+    def test_manual_resume_waits_for_matching_executor_ack(self):
+        mgr = self._manager()
+        mgr._mission_state = "PAUSED"
+        mgr._public_state = "PAUSED_RECOVERY"
+        mgr._active_job_id = "job_1"
+        mgr._prepare_runtime_for_execution = lambda **_kwargs: (True, "")
+
+        ok, message = mgr._resume_current_task(run_id="run_alpha")
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual(mgr._phase, "RESUMING")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._published_states, ["RESUMING"])
+        self.assertEqual(mgr._exec_cmds, ["resume run_id=run_alpha"])
+        self.assertEqual(mgr._mission_updates, [])
+
+        # A fresh heartbeat for the same run is the commit point.
+        mgr._executor_state = "CONNECT:block_8"
+        self._set_executor_progress(mgr, "CONNECT:block_8")
+        acknowledged = mgr._complete_auto_resuming_if_executor_running()
+
+        self.assertTrue(acknowledged)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "RUNNING")
+        self.assertEqual(mgr._published_states[-1], "RUNNING")
+        self.assertEqual(
+            mgr._mission_updates,
+            [("run_alpha", "RUNNING", "manual_resume_confirmed:CONNECT:block_8")],
+        )
+        self.assertIn(
+            "MANUAL_RESUME_CONFIRMED:exec_state=CONNECT:block_8",
+            mgr._emit_events,
+        )
+
+    def test_stale_paused_recovery_does_not_steal_manual_resume_phase(self):
+        mgr = self._manager()
+        mgr._phase = "RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._public_state = "RESUMING"
+        mgr._executor_state = "PAUSED_RECOVERY"
+        self._set_executor_progress(mgr, "PAUSED_RECOVERY")
+
+        consumed = mgr._consume_correlated_paused_recovery()
+
+        self.assertFalse(consumed)
+        self.assertEqual(mgr._phase, "RESUMING")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._mission_updates, [])
+        self.assertEqual(mgr._published_states, [])
+
+    def test_continue_is_rejected_while_resume_ack_is_pending(self):
+        mgr = self._manager()
+        mgr._mission_state = "PAUSED"
+        mgr._phase = "RESUMING"
+        mgr._public_state = "RESUMING"
+
+        allowed, message = mgr._ensure_exe_task_allowed(AppExeTaskRequest.CONTINUE)
+
+        self.assertFalse(allowed)
+        self.assertIn("continue already pending", message)
+
     @mock.patch("coverage_task_manager.task_manager.rospy.loginfo")
     def test_arm_auto_relocalizing_sets_phase_and_emits(self, _loginfo):
         mgr = self._manager()
@@ -627,14 +757,71 @@ class TaskCommandContractTest(unittest.TestCase):
     def test_complete_auto_resuming_if_executor_running_returns_to_running(self):
         mgr = self._manager()
         mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
         mgr._executor_state = "FOLLOW_PATH"
+        self._set_executor_progress(mgr, "FOLLOW_PATH")
 
         ok = mgr._complete_auto_resuming_if_executor_running()
 
         self.assertTrue(ok)
         self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "RUNNING")
         self.assertEqual(mgr._published_states, ["RUNNING"])
+        self.assertEqual(
+            mgr._mission_updates,
+            [
+                (
+                    "run_alpha",
+                    "RUNNING",
+                    "auto_resume_confirmed:FOLLOW_PATH",
+                )
+            ],
+        )
         self.assertIn("AUTO_RESUME_CONFIRMED:exec_state=FOLLOW_PATH", mgr._emit_events)
+        allowed, message = mgr._ensure_exe_task_allowed(AppExeTaskRequest.PAUSE)
+        self.assertTrue(allowed, msg=message)
+
+        paused, pause_message = mgr._pause_current_task()
+
+        self.assertTrue(paused, msg=pause_message)
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._exec_cmds, ["pause"])
+
+    @mock.patch("coverage_task_manager.task_manager.rospy.logwarn")
+    def test_pause_accepts_active_executor_when_auto_resume_state_is_stale(
+        self,
+        logwarn,
+    ):
+        mgr = self._manager()
+        mgr._phase = "IDLE"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "CONNECT:block_2"
+        mgr._is_mission_running = TaskManager._is_mission_running.__get__(
+            mgr,
+            TaskManager,
+        )
+
+        allowed, message = mgr._ensure_exe_task_allowed(AppExeTaskRequest.PAUSE)
+
+        self.assertTrue(allowed, msg=message)
+        logwarn.assert_called_once()
+
+        paused, pause_message = mgr._pause_current_task()
+
+        self.assertTrue(paused, msg=pause_message)
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._exec_cmds, ["pause"])
+
+    def test_pause_does_not_interrupt_auto_charge_phase(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_SUPPLY"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "PAUSED"
+
+        allowed, message = mgr._ensure_exe_task_allowed(AppExeTaskRequest.PAUSE)
+
+        self.assertFalse(allowed)
+        self.assertIn("pause requires running mission", message)
 
     def test_complete_auto_resuming_if_executor_done_finalizes_normally(self):
         mgr = self._manager()
@@ -642,6 +829,7 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._mission_state = "PAUSED"
         mgr._executor_state = "DONE"
         mgr._last_exec_state_seen = "DONE"
+        self._set_executor_progress(mgr, "DONE")
         mgr._active_job_id = "job_1"
         mgr._active_schedule_id = "sched_1"
         mgr._job_loops_total = 1
@@ -669,6 +857,7 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._job_loops_total = 2
         mgr._job_loops_done = 0
         mgr._new_run_id = lambda: "run_next"
+        self._set_executor_progress(mgr, "DONE")
 
         ok = mgr._complete_auto_resuming_if_executor_done()
 
@@ -682,6 +871,90 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertIn("LOOP:job_1 2/2", mgr._emit_events)
         self.assertEqual(mgr._published_states, ["RUNNING"])
         self.assertEqual(mgr._exec_cmds, ["start zone_id=zone_alpha run_id=run_next"])
+
+    def test_auto_resuming_does_not_accept_state_from_previous_run(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "CONNECT:block_2"
+        self._set_executor_progress(mgr, "CONNECT:block_2", run_id="run_old")
+
+        ok = mgr._complete_auto_resuming_if_executor_running()
+
+        self.assertFalse(ok)
+        self.assertEqual(mgr._phase, "AUTO_RESUMING")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._published_states, [])
+
+    def test_auto_resuming_does_not_accept_predispatch_state_from_same_run(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "CONNECT:block_2"
+        mgr._auto_resume_started_ts = time.time()
+        self._set_executor_progress(mgr, "CONNECT:block_2")
+        mgr._last_run_progress_ts = mgr._auto_resume_started_ts - 0.01
+
+        ok = mgr._complete_auto_resuming_if_executor_running()
+
+        self.assertFalse(ok)
+        self.assertEqual(mgr._phase, "AUTO_RESUMING")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._published_states, [])
+
+    def test_auto_resuming_postdispatch_paused_recovery_fails_immediately(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "PAUSED_RECOVERY"
+        mgr._auto_resume_started_ts = time.time() - 0.01
+        self._set_executor_progress(mgr, "PAUSED_RECOVERY")
+
+        handled = mgr._check_auto_resuming_failure_or_timeout()
+
+        self.assertTrue(handled)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._published_states, ["PAUSED_RECOVERY"])
+        self.assertIn(
+            ("run_alpha", "PAUSED", "auto_resume_failed:executor_terminal:PAUSED_RECOVERY"),
+            mgr._mission_updates,
+        )
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=100.0)
+    def test_auto_resuming_timeout_enters_paused_recovery(self, _time_now):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "RESUME_REQ"
+        mgr._auto_resume_started_ts = 30.0
+        mgr.auto_resume_timeout_s = 60.0
+        mgr._is_mission_running = lambda: True
+
+        handled = mgr._check_auto_resuming_failure_or_timeout()
+
+        self.assertTrue(handled)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._exec_cmds, ["pause"])
+        self.assertEqual(mgr._published_states, ["PAUSED_RECOVERY"])
+        self.assertIn("ack_timeout:60.0s:last_state=RESUME_REQ", mgr._emit_events[-1])
+
+    def test_auto_resuming_matching_failed_state_is_recoverable_pause(self):
+        mgr = self._manager()
+        mgr._phase = "AUTO_RESUMING"
+        mgr._mission_state = "PAUSED"
+        mgr._executor_state = "FAILED"
+        mgr._auto_resume_started_ts = time.time()
+        self._set_executor_progress(mgr, "FAILED")
+
+        handled = mgr._check_auto_resuming_failure_or_timeout()
+
+        self.assertTrue(handled)
+        self.assertEqual(mgr._phase, "IDLE")
+        self.assertEqual(mgr._mission_state, "PAUSED")
+        self.assertEqual(mgr._published_states, ["PAUSED_RECOVERY"])
+        self.assertIn(("run_alpha", "PAUSED", "auto_resume_failed:executor_terminal:FAILED"), mgr._mission_updates)
 
     def test_handle_auto_supply_done_without_repeat_starts_auto_resuming(self):
         mgr = self._manager()
@@ -982,8 +1255,10 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertIn("DOCK_REJECT:ACTUATOR_DEBUG", mgr._emit_events)
 
     @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
-    def test_dock_calibration_gate_accepts_only_complete_exact_live_binding(self, _time):
+    def test_dock_calibration_gate_accepts_revision_matched_runtime_grid_hash(self, _time):
         mgr = self._enable_calibration_gate(self._manager())
+        mgr._dock_calibration_state.msg.runtime_map_id = "runtime-grid-id"
+        mgr._dock_calibration_state.msg.runtime_map_md5 = "f" * 32
 
         ok, message = mgr._dock_calibration_gate()
 
@@ -1001,7 +1276,7 @@ class TaskCommandContractTest(unittest.TestCase):
             "nonfinite stage2": {"stage2_yaw": float("nan")},
             "missing saved md5": {"saved_map_md5": ""},
             "active id mismatch": {"active_map_id": "map-b"},
-            "runtime md5 mismatch": {"runtime_map_md5": "ffffffffffffffffffffffffffffffff"},
+            "runtime name mismatch": {"runtime_map_name": "site-b"},
             "runtime map not ready": {"runtime_map_ready": False},
             "active map not matched": {"active_map_match": False},
             "localization invalid": {"localization_valid": False},
@@ -1038,7 +1313,7 @@ class TaskCommandContractTest(unittest.TestCase):
 
     @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
     def test_supply_dispatch_rechecks_map_binding_after_navigation(self, _time):
-        mgr = self._enable_calibration_gate(self._manager(), runtime_map_id="map-b")
+        mgr = self._enable_calibration_gate(self._manager(), runtime_map_name="site-b")
         mgr._dock_supply_enable = True
         mgr._dock_supply_start_cli = mock.Mock()
         mgr._dock_supply_start_service = "/dock_supply/start"
@@ -1048,7 +1323,7 @@ class TaskCommandContractTest(unittest.TestCase):
         self.assertFalse(started)
         mgr._dock_supply_start_cli.assert_not_called()
         self.assertTrue(
-            any("runtime map id mismatch" in event for event in mgr._emit_events),
+            any("runtime map name mismatch" in event for event in mgr._emit_events),
             msg=mgr._emit_events,
         )
 
@@ -1142,6 +1417,123 @@ class TaskCommandContractTest(unittest.TestCase):
         allowed, reason = mgr._manual_undock_allowed()
         self.assertFalse(allowed)
         self.assertEqual(reason, "actuator_debug_active")
+
+    def test_operator_cancel_manual_return_without_task_closes_to_idle(self):
+        mgr = self._manager()
+        mgr._active_run_id = ""
+        mgr._active_job_id = "post_run_repeat_template"
+        mgr._phase = "MANUAL_SUPPLY"
+        mgr._mission_state = "IDLE"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        def cancel_supply():
+            mgr._dock_supply_state = "CANCELED"
+            return True, "cancel requested"
+
+        mgr._dock_supply_cancel = mock.Mock(side_effect=cancel_supply)
+        mgr._wait = lambda _timeout, cond, sleep_s=0.05: bool(cond())
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual((mgr._mission_state, mgr._phase), ("IDLE", "IDLE"))
+        self.assertEqual(mgr._published_states[-1], "IDLE")
+        self.assertEqual(mgr._reset_job_runner_calls, [True])
+        self.assertEqual(mgr._health_clear_calls, [True])
+        mgr.nav.cancel_all.assert_called_once_with()
+        mgr._dock_stage2_nav.cancel_all.assert_called_once_with()
+        mgr._dock_supply_cancel.assert_called_once_with()
+        self.assertEqual(mgr._charge_faults, [])
+        self.assertIn("RETURN_HOME_CANCELED:idle", mgr._emit_events)
+
+    def test_operator_cancel_auto_return_preserves_paused_task_checkpoint(self):
+        mgr = self._manager()
+        mgr._active_run_id = "run_alpha"
+        mgr._active_job_id = "job_alpha"
+        mgr._phase = "AUTO_SUPPLY"
+        mgr._mission_state = "PAUSED"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        def cancel_supply():
+            mgr._dock_supply_state = "CANCELED"
+            return True, "cancel requested"
+
+        mgr._dock_supply_cancel = mock.Mock(side_effect=cancel_supply)
+        mgr._wait = lambda _timeout, cond, sleep_s=0.05: bool(cond())
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertTrue(ok, msg=message)
+        self.assertEqual((mgr._mission_state, mgr._phase), ("PAUSED", "IDLE"))
+        self.assertEqual(mgr._active_run_id, "run_alpha")
+        self.assertEqual(mgr._active_job_id, "job_alpha")
+        self.assertEqual(mgr._exec_cmds, [])
+        self.assertIn(
+            ("run_alpha", "PAUSED", "operator_cancel_return_home"),
+            mgr._mission_updates,
+        )
+        self.assertEqual(mgr._published_states[-1], "PAUSED")
+        self.assertEqual(mgr._health_clear_calls, [True])
+        self.assertEqual(mgr._charge_faults, [])
+        self.assertIn("RETURN_HOME_CANCELED:task_preserved", mgr._emit_events)
+
+    def test_operator_cancel_failure_is_reported_as_fault(self):
+        mgr = self._manager()
+        mgr._active_run_id = "run_alpha"
+        mgr._phase = "AUTO_SUPPLY"
+        mgr._mission_state = "PAUSED"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr._dock_supply_cancel = mock.Mock(return_value=(False, "rpc rejected"))
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertFalse(ok)
+        self.assertIn("rpc rejected", message)
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_RETURN_HOME_CANCEL", "dock_supply_cancel_failed:rpc rejected", False)],
+        )
+
+    def test_operator_cancel_safety_close_timeout_is_reported_as_fault(self):
+        mgr = self._manager()
+        mgr._active_run_id = ""
+        mgr._phase = "MANUAL_SUPPLY"
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        mgr._return_home_cancel_timeout_s = 2.0
+        mgr._dock_supply_cancel = mock.Mock(return_value=(True, "cancel requested"))
+        mgr._wait = mock.Mock(return_value=False)
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        ok, message = mgr._cancel_return_home()
+
+        self.assertFalse(ok)
+        self.assertIn("timeout", message)
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_RETURN_HOME_CANCEL_TIMEOUT", "dock_supply_cancel_timeout:2.0s", True)],
+        )
+
+    def test_canceled_supply_is_not_faulted_during_operator_cancel_window(self):
+        mgr = self._manager()
+        mgr._phase = "CANCELING_RETURN_HOME"
+        mgr._dock_supply_state = "CANCELED"
+        mgr._is_dock_supply_owner_phase = lambda: TaskManager._is_dock_supply_owner_phase(mgr)
+
+        handled = mgr._handle_dock_supply_phase()
+
+        self.assertFalse(handled)
+        self.assertEqual(mgr._charge_faults, [])
 
     def test_dock_dispatch_rechecks_calibration_immediately_before_send_goal(self):
         mgr = self._enable_calibration_gate(self._manager())

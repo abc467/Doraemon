@@ -5,9 +5,16 @@ global_costmap:
   publish_frequency: 1.0
   static_map: true
   rolling_window: false
+  # Make the master-grid unknown policy explicit instead of relying on the
+  # similarly named ObstacleLayer parameter from costmap_common.yaml.
+  track_unknown_space: true
   transform_tolerance: 1.0
+  # Global topology is deliberately immutable with respect to transient sensor
+  # observations. ROS1 ObstacleLayer has no time decay: a mark left just beyond
+  # raytrace_range can otherwise survive indefinitely and make a physically
+  # free block endpoint lethal. Lidar and all depth cameras remain in the local
+  # rolling costmap where MPPI performs real-time dynamic avoidance.
   plugins:
     - {name: static_layer, type: "costmap_2d::StaticLayer"}
-    - {name: obstacle_layer, type: "costmap_2d::ObstacleLayer"}
     - {name: keepout_constraint_layer, type: "coverage_constraints_nav/KeepoutConstraintLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

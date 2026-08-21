@@ -52,6 +52,13 @@ class OperationsStoreRevisionBindingTest(unittest.TestCase):
             plan_profile_name="cover_standard",
             clean_mode="scrub",
         )
+        self.store.update_run_execution_context(
+            "run_101",
+            plan_id="plan_101",
+            cleaning_distance_m=125.5,
+            cleaning_area_m2=74.045,
+            metrics_source="plan_snapshot",
+        )
         self.store.upsert_robot_runtime_state(
             RobotRuntimeStateRecord(
                 robot_id="local_robot",
@@ -99,6 +106,10 @@ class OperationsStoreRevisionBindingTest(unittest.TestCase):
 
         self.assertEqual(job.map_revision_id, "rev_demo_01")
         self.assertEqual(run.map_revision_id, "rev_demo_01")
+        self.assertEqual(run.plan_id, "plan_101")
+        self.assertAlmostEqual(run.cleaning_distance_m, 125.5)
+        self.assertAlmostEqual(run.cleaning_area_m2, 74.045)
+        self.assertEqual(run.metrics_source, "plan_snapshot")
         self.assertEqual(runtime.map_revision_id, "rev_demo_01")
         self.assertEqual(slam_job.requested_map_revision_id, "rev_demo_01")
         self.assertEqual(slam_job.resolved_map_revision_id, "rev_demo_01")

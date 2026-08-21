@@ -193,6 +193,10 @@ CostmapNavigationServer::CostmapNavigationServer(const TFPtr &tf_listener_ptr) :
 
 CostmapNavigationServer::~CostmapNavigationServer()
 {
+  // Stop and join every planner/controller execution while the derived
+  // costmaps and plugin loaders they reference are still alive.
+  stop();
+
   // remove every plugin before its classLoader goes out of scope.
   controller_plugin_manager_.clearPlugins();
   planner_plugin_manager_.clearPlugins();

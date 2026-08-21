@@ -100,6 +100,21 @@ _OPERATE_MAP_RESPONSE_FIELDS = [
 
 
 class MapAssetServiceNode:
+    TERMINAL_MISSION_STATES = frozenset(
+        {
+            "SUCCEEDED",
+            "COMPLETED",
+            "FAILED",
+            "CANCELED",
+            "CANCELLED",
+            "ABORTED",
+            "STOPPED",
+            "FINISHED",
+            "DONE",
+            "ESTOP",
+        }
+    )
+    RETIRABLE_PAUSED_STATES = frozenset({"PAUSED", "PAUSED_RECOVERY"})
     ACTIVE_SWITCH_REJECT_MESSAGE = (
         "direct map activation is disabled; use the SLAM submit workflow to verify and activate a map revision"
     )
@@ -305,6 +320,20 @@ class MapAssetServiceNode:
     def _hard_delete_confirm_token(revision_id: str) -> str:
         return "DELETE:%s" % str(revision_id or "").strip()
 
+    @classmethod
+    def _mission_run_is_terminal(cls, row) -> bool:
+        state = str((row or {}).get("state") or "").strip().upper()
+        try:
+            if float((row or {}).get("end_ts") or 0.0) > 0.0:
+                return True
+        except Exception:
+            pass
+        return state in cls.TERMINAL_MISSION_STATES or state.startswith("ERROR")
+
+    @classmethod
+    def _mission_run_is_retirable_pause(cls, row) -> bool:
+        return str((row or {}).get("state") or "").strip().upper() in cls.RETIRABLE_PAUSED_STATES
+
     def _ops_business_refs_for_revision(self, revision_id: str):
         revision_id = str(revision_id or "").strip()
         refs = {
@@ -313,6 +342,9 @@ class MapAssetServiceNode:
             "schedule_state": 0,
             "mission_runs": 0,
             "mission_checkpoints": 0,
+            "live_mission_runs": 0,
+            "live_mission_checkpoints": 0,
+            "orphan_mission_checkpoints": 0,
             "robot_runtime_state": 0,
             "unfinished_slam_jobs": 0,
             "operations_db_scan_errors": 0,
@@ -376,7 +408,7 @@ class MapAssetServiceNode:
                         tuple(schedule_ids),
                     )
             run_rows = conn.execute(
-                "SELECT run_id FROM mission_runs WHERE map_revision_id=?;",
+                "SELECT run_id, state, end_ts FROM mission_runs WHERE map_revision_id=?;",
                 (revision_id,),
             ).fetchall()
             run_ids = [
@@ -385,6 +417,14 @@ class MapAssetServiceNode:
                 if str(row["run_id"] or "").strip()
             ]
             refs["mission_runs"] = len(run_ids)
+            live_run_ids = [
+                str(row["run_id"] or "").strip()
+                for row in run_rows or []
+                if str(row["run_id"] or "").strip()
+                and not self._mission_run_is_terminal(dict(row))
+                and not self._mission_run_is_retirable_pause(dict(row))
+            ]
+            refs["live_mission_runs"] = len(live_run_ids)
             checkpoint_predicates = ["map_revision_id=?"]
             checkpoint_args = [revision_id]
             if run_ids:
@@ -398,6 +438,27 @@ class MapAssetServiceNode:
                 % " OR ".join("(%s)" % predicate for predicate in checkpoint_predicates),
                 tuple(checkpoint_args),
             )
+            refs["orphan_mission_checkpoints"] = self._required_count_from_conn(
+                conn,
+                """
+                SELECT COUNT(*) AS count
+                FROM mission_checkpoints AS checkpoint
+                WHERE checkpoint.map_revision_id=?
+                  AND NOT EXISTS(
+                    SELECT 1 FROM mission_runs AS run
+                    WHERE run.run_id=checkpoint.run_id
+                      AND run.map_revision_id=?
+                  );
+                """,
+                (revision_id, revision_id),
+            )
+            if live_run_ids:
+                refs["live_mission_checkpoints"] = self._required_count_from_conn(
+                    conn,
+                    "SELECT COUNT(*) AS count FROM mission_checkpoints WHERE run_id IN (%s);"
+                    % self._sql_placeholders(live_run_ids),
+                    tuple(live_run_ids),
+                )
             refs["robot_runtime_state"] = self._required_count_from_conn(
                 conn,
                 "SELECT COUNT(*) AS count FROM robot_runtime_state WHERE map_revision_id=?;",
@@ -530,13 +591,14 @@ class MapAssetServiceNode:
             blockers.append("cannot hard-delete a pending map switch revision")
 
         business_refs = self._business_refs_for_revision(revision_id)
-        # Mission execution history is audit evidence, not a deletable child
-        # asset. Even an explicitly confirmed cascade may delete task/plan
-        # definitions only when no run/checkpoint/runtime evidence still binds
-        # the revision. This keeps strict revision health checks meaningful.
-        audit_ref_keys = {
-            "mission_runs",
-            "mission_checkpoints",
+        # Explicit cascade deletion archives terminal mission identity snapshots
+        # before removing the physical revision. Live execution evidence remains
+        # a hard blocker; stale PAUSED rows can only be retired by that explicit
+        # cascade when robot_runtime_state no longer references the revision.
+        live_audit_ref_keys = {
+            "live_mission_runs",
+            "live_mission_checkpoints",
+            "orphan_mission_checkpoints",
             "robot_runtime_state",
             "unfinished_slam_jobs",
         }
@@ -545,13 +607,15 @@ class MapAssetServiceNode:
             "planning_db_scan_errors",
         }
         for table, count in sorted((k, v) for k, v in business_refs.items() if int(v or 0) > 0):
-            if table in audit_ref_keys:
+            if table in live_audit_ref_keys:
                 blockers.append("audit-referenced by %s: %d" % (table, count))
             elif table in scan_error_keys:
                 blockers.append("reference scan failed for %s" % table)
         if not bool(cascade):
             for table, count in sorted((k, v) for k, v in business_refs.items() if int(v or 0) > 0):
-                if table not in audit_ref_keys and table not in scan_error_keys:
+                if table in {"mission_runs", "mission_checkpoints"}:
+                    blockers.append("audit-referenced by %s: %d" % (table, count))
+                elif table not in live_audit_ref_keys and table not in scan_error_keys:
                     blockers.append("referenced by %s: %d" % (table, count))
 
         paths = self._revision_file_paths(asset)
@@ -689,6 +753,143 @@ class MapAssetServiceNode:
                 summary[table] = max(0, int(cur.rowcount or 0))
         return summary
 
+    def _archive_mission_audit_refs_for_revision(self, asset):
+        asset = dict(asset or {})
+        revision_id = str(asset.get("revision_id") or "").strip()
+        ops = getattr(self, "ops", None)
+        summary = {}
+        if (not revision_id) or ops is None:
+            return summary
+
+        conn = None
+        try:
+            conn = ops._connect()
+            run_rows = conn.execute(
+                "SELECT run_id, state, end_ts FROM mission_runs WHERE map_revision_id=?;",
+                (revision_id,),
+            ).fetchall()
+            run_ids = [
+                str(row["run_id"] or "").strip()
+                for row in run_rows or []
+                if str(row["run_id"] or "").strip()
+            ]
+            live_run_ids = [
+                str(row["run_id"] or "").strip()
+                for row in run_rows or []
+                if str(row["run_id"] or "").strip()
+                and not self._mission_run_is_terminal(dict(row))
+                and not self._mission_run_is_retirable_pause(dict(row))
+            ]
+            if live_run_ids:
+                raise RuntimeError(
+                    "cannot archive live mission runs: %s" % ",".join(live_run_ids[:5])
+                )
+
+            runtime_args = [revision_id]
+            runtime_predicates = ["map_revision_id=?"]
+            if run_ids:
+                runtime_predicates.append(
+                    "active_run_id IN (%s)" % self._sql_placeholders(run_ids)
+                )
+                runtime_args.extend(run_ids)
+            runtime_refs = self._required_count_from_conn(
+                conn,
+                "SELECT COUNT(*) AS count FROM robot_runtime_state WHERE %s;"
+                % " OR ".join("(%s)" % item for item in runtime_predicates),
+                tuple(runtime_args),
+            )
+            if runtime_refs:
+                raise RuntimeError("cannot archive mission history referenced by robot runtime state")
+
+            orphan_checkpoints = self._required_count_from_conn(
+                conn,
+                """
+                SELECT COUNT(*) AS count
+                FROM mission_checkpoints AS checkpoint
+                WHERE checkpoint.map_revision_id=?
+                  AND NOT EXISTS(
+                    SELECT 1 FROM mission_runs AS run
+                    WHERE run.run_id=checkpoint.run_id
+                      AND run.map_revision_id=?
+                  );
+                """,
+                (revision_id, revision_id),
+            )
+            if orphan_checkpoints:
+                raise RuntimeError(
+                    "cannot archive orphan mission checkpoints: %d" % orphan_checkpoints
+                )
+
+            map_id = str(asset.get("map_id") or "").strip()
+            map_md5 = str(asset.get("map_md5") or "").strip()
+            paused_run_ids = [
+                str(row["run_id"] or "").strip()
+                for row in run_rows or []
+                if str(row["run_id"] or "").strip()
+                and self._mission_run_is_retirable_pause(dict(row))
+            ]
+            with conn:
+                if paused_run_ids:
+                    cur = conn.execute(
+                        """
+                        UPDATE mission_runs
+                        SET state='CANCELED',
+                            reason=CASE
+                              WHEN TRIM(COALESCE(reason, ''))='' THEN 'MAP_REVISION_DELETED'
+                              ELSE reason
+                            END,
+                            end_ts=CASE
+                              WHEN COALESCE(end_ts, 0.0)>0.0 THEN end_ts
+                              ELSE updated_ts
+                            END
+                        WHERE run_id IN (%s);
+                        """ % self._sql_placeholders(paused_run_ids),
+                        tuple(paused_run_ids),
+                    )
+                    summary["retired_paused_mission_runs"] = max(0, int(cur.rowcount or 0))
+
+                if run_ids:
+                    cur = conn.execute(
+                        """
+                        UPDATE mission_checkpoints
+                        SET archived_map_revision_id=COALESCE(
+                              NULLIF(archived_map_revision_id, ''),
+                              NULLIF(map_revision_id, ''),
+                              ?
+                            ),
+                            map_revision_id='',
+                            map_id=COALESCE(NULLIF(map_id, ''), ?),
+                            map_md5=COALESCE(NULLIF(map_md5, ''), ?)
+                        WHERE map_revision_id=? OR run_id IN (%s);
+                        """ % self._sql_placeholders(run_ids),
+                        tuple([revision_id, map_id, map_md5, revision_id] + run_ids),
+                    )
+                    summary["archived_mission_checkpoints"] = max(0, int(cur.rowcount or 0))
+
+                cur = conn.execute(
+                    """
+                    UPDATE mission_runs
+                    SET archived_map_revision_id=COALESCE(
+                          NULLIF(archived_map_revision_id, ''),
+                          NULLIF(map_revision_id, ''),
+                          ?
+                        ),
+                        map_revision_id='',
+                        map_id=COALESCE(NULLIF(map_id, ''), ?),
+                        map_md5=COALESCE(NULLIF(map_md5, ''), ?)
+                    WHERE map_revision_id=?;
+                    """,
+                    (revision_id, map_id, map_md5, revision_id),
+                )
+                summary["archived_mission_runs"] = max(0, int(cur.rowcount or 0))
+            return summary
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
     def _delete_ops_business_refs_for_revision(self, revision_id: str):
         revision_id = str(revision_id or "").strip()
         summary = {}
@@ -747,6 +948,8 @@ class MapAssetServiceNode:
         asset = dict((candidate or {}).get("asset") or {})
         revision_id = str(asset.get("revision_id") or "").strip()
         summary = {}
+        for key, value in self._archive_mission_audit_refs_for_revision(asset).items():
+            summary[key] = int(summary.get(key, 0) or 0) + int(value or 0)
         for key, value in self._delete_ops_business_refs_for_revision(revision_id).items():
             summary[key] = int(summary.get(key, 0) or 0) + int(value or 0)
         for key, value in self._delete_plan_business_refs_for_revision(revision_id).items():
@@ -1280,6 +1483,11 @@ class MapAssetServiceNode:
 
         if op == cleanup_disabled_op:
             dry_run = self._request_bool(req, "dry_run", True)
+            # cleanupDisabled is already protected by a dry-run plus the
+            # CLEANUP_DISABLED confirmation token. Always make it a cascade
+            # operation so older cached frontends cannot accidentally request
+            # the legacy non-cascade mode and get blocked by every child row.
+            cascade = True
             confirm_token = self._request_text(req, "confirm_token", "")
             min_age_days = self._request_uint(req, "min_age_days", 0)
             max_reclaim_bytes = self._request_uint(req, "max_reclaim_bytes", 0)
@@ -1293,7 +1501,11 @@ class MapAssetServiceNode:
                 updated_ts = float(asset.get("updated_ts") or asset.get("created_ts") or 0.0)
                 if min_age_days and updated_ts and (now - updated_ts) < (float(min_age_days) * 86400.0):
                     continue
-                candidate = self._gc_candidate_for_asset(asset, runtime_revision_id=runtime_revision_id)
+                candidate = self._gc_candidate_for_asset(
+                    asset,
+                    runtime_revision_id=runtime_revision_id,
+                    cascade=cascade,
+                )
                 if max_reclaim_bytes and (not candidate["blockers"]):
                     candidate_size = int(candidate.get("reclaimable_bytes") or 0)
                     if selected_bytes + candidate_size > max_reclaim_bytes:
@@ -1327,9 +1539,14 @@ class MapAssetServiceNode:
                 if candidate["blockers"]:
                     continue
                 try:
+                    deleted_business_refs = {}
+                    if cascade:
+                        self._validate_hard_delete_candidate_files(candidate)
+                        deleted_business_refs = self._delete_cascade_business_refs(candidate)
                     paths, size = self._hard_delete_candidate(candidate)
                     deleted_paths.extend(paths)
                     reclaimed_bytes += int(size or 0)
+                    candidate["deleted_business_refs"] = deleted_business_refs
                 except Exception as exc:
                     candidate["blockers"].append(str(exc))
             blocked = [candidate for candidate in candidates if candidate["blockers"]]
@@ -1340,6 +1557,13 @@ class MapAssetServiceNode:
                 candidates=candidates,
                 deleted_paths=deleted_paths,
                 reclaimed_bytes=reclaimed_bytes,
+                deleted_business_refs={
+                    str((candidate.get("asset") or {}).get("revision_id") or ""): (
+                        candidate.get("deleted_business_refs") or {}
+                    )
+                    for candidate in candidates
+                    if candidate.get("deleted_business_refs")
+                },
                 response_cls=response_cls,
                 map_cls=map_cls,
             )

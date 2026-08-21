@@ -1,0 +1,115 @@
+# Exact v9 Standard MPPI parameter set for a temporary module-level A/B test.
+# The launch file deletes the current Standard namespace before loading this
+# file, so parameters absent from v9 retain their v9 code defaults.
+MPPI_Standard_Controller:
+  odom_topic: /odom
+  goal_tolerance: 0.6
+  angle_tolerance: 0.4
+  rotate_to_goal_enabled: false
+  rotate_to_goal_kp: 0.8
+  rotate_to_goal_min_angular_speed: 0.12
+  rotate_to_goal_max_angular_speed: 0.4
+  rotate_to_goal_collision_horizon: 0.5
+  rotate_to_goal_collision_step: 0.05
+
+  time_steps: 30
+  model_dt: 0.10
+  controller_frequency: 10.0
+  batch_size: 2000
+  timing_diagnostics: false
+
+  vx_std: 0.1
+  vy_std: 0.0
+  wz_std: 0.3
+
+  vx_max: 0.3
+  vx_min: 0.0
+  vy_max: 0.0
+  wz_max: 0.6
+  ax_max: 3.0
+  ax_min: -0.6
+  az_max: 1.0
+
+  iteration_count: 1
+  prune_distance: 1.8
+  transform_tolerance: 0.25
+  temperature: 0.3
+  gamma: 0.015
+  motion_model: "DiffDrive"
+  retry_attempt_limit: 2
+
+  visualize: true
+  TrajectoryVisualizer:
+    trajectory_step: 5
+    time_step: 3
+
+  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic",
+            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic",
+            "PreferForwardCritic", "TwirlingCritic"]
+
+  ConstraintCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.0
+
+  CostCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 12.0
+    critical_cost: 300.0
+    consider_footprint: true
+    collision_cost: 1000000.0
+    near_goal_distance: 0.35
+    trajectory_point_step: 1
+    parallel_threads: 1
+
+  GoalAngleCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 3.2
+    threshold_to_consider: 0.6
+
+  GoalCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 5.2
+    threshold_to_consider: 1.0
+
+  PathAlignCritic:
+    enabled: true
+    cost_power: 1
+    cost_weight: 8
+    max_path_occupancy_ratio: 0.03
+    offset_from_furthest: 20
+    trajectory_point_step: 4
+    threshold_to_consider: 0.4
+    use_path_orientations: true
+
+  PathAngleCritic:
+    enabled: true
+    vx_min: -0.35
+    offset_from_furthest: 4
+    cost_power: 1
+    cost_weight: 2.2
+    threshold_to_consider: 0.4
+    max_angle_to_furthest: 0.8
+    mode: 2
+
+  PathFollowCritic:
+    enabled: true
+    threshold_to_consider: 0.4
+    offset_from_furthest: 6.2
+    cost_power: 1
+    cost_weight: 5.0
+
+  PreferForwardCritic:
+    enabled: true
+    threshold_to_consider: 0.4
+    cost_power: 1
+    cost_weight: 4.5
+
+  TwirlingCritic:
+    enabled: true
+    threshold_to_consider: 0.3
+    cost_power: 1
+    cost_weight: 2

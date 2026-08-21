@@ -40,6 +40,8 @@
 
 #include "nav_core_wrapper/wrapper_local_planner.h"
 
+#include <mbf_msgs/ExePathResult.h>
+
 namespace mbf_nav_core_wrapper
 {
 
@@ -50,8 +52,21 @@ uint32_t WrapperLocalPlanner::computeVelocityCommands(
     std::string &message)
 {
   bool success = nav_core_plugin_->computeVelocityCommands(cmd_vel.twist);
-  message = success ? "Goal reached" : "Controller failed";
-  return success ? 0 : 100;  // SUCCESS | FAILURE
+  if (success)
+  {
+    message = "Controller produced a command";
+    return mbf_msgs::ExePathResult::SUCCESS;
+  }
+  auto * status_aware = dynamic_cast<
+      mbf_abstract_core::ControllerExecutionStatusAware *>(
+          nav_core_plugin_.get());
+  if (status_aware && status_aware->hasLatchedSafetyFailure())
+  {
+    message = "Controller completed a physical stop and latched a safety failure";
+    return mbf_msgs::ExePathResult::LATCHED_SAFETY_FAILURE;
+  }
+  message = "Controller failed";
+  return mbf_msgs::ExePathResult::FAILURE;
 }
 
 bool WrapperLocalPlanner::isGoalReached()
@@ -61,12 +76,37 @@ bool WrapperLocalPlanner::isGoalReached()
 
 bool WrapperLocalPlanner::isGoalReached(double xy_tolerance, double yaw_tolerance)
 {
+  auto * tolerance_aware = dynamic_cast<
+      mbf_abstract_core::ControllerGoalToleranceAware *>(nav_core_plugin_.get());
+  if (tolerance_aware)
+  {
+    return tolerance_aware->isGoalReachedWithTolerances(
+        xy_tolerance, yaw_tolerance);
+  }
   return isGoalReached();
+}
+
+bool WrapperLocalPlanner::usesInternalGoalReachedPolicy() const
+{
+  return dynamic_cast<
+      mbf_abstract_core::ControllerGoalToleranceAware *>(
+          nav_core_plugin_.get()) != nullptr;
 }
 
 bool WrapperLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped> &plan)
 {
   return nav_core_plugin_->setPlan(plan);
+}
+
+void WrapperLocalPlanner::setPlanExecutionContext(
+    const mbf_abstract_core::PlanExecutionContext &context)
+{
+  auto * lifecycle_aware = dynamic_cast<
+      mbf_abstract_core::PlanExecutionContextAware *>(nav_core_plugin_.get());
+  if (lifecycle_aware)
+  {
+    lifecycle_aware->setPlanExecutionContext(context);
+  }
 }
 
 bool WrapperLocalPlanner::cancel()

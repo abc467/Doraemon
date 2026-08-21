@@ -529,8 +529,10 @@ lsusb
 最终插拔一次 USB 设备，确认别名重建。不要只依赖当前 `/dev/ttyUSBN` 顺序。
 
 `[停止条件]` 任一 `REPLACE_*` 未替换、IMU/里程计别名不是本机插拔确认的设备、
-串口权限不符、三台 Orbbec 的序列号与本机 USB3 拓扑未逐台确认，或插拔后身份不能
-稳定重建时停止。不得复制旧主板的 `ID_PATH` 或按 `/dev/ttyUSBN` 顺序猜测。
+串口权限不符、三台 Orbbec 序列号未逐台确认、任一相机没有稳定的 USB3 链路，或
+插拔后身份不能稳定重建时停止。Orbbec 拓扑值用于记录调试时的物理接线；驱动按
+序列号绑定，拓扑变化会告警但不单独阻断启动。不得复制旧主板的串口 `ID_PATH` 或
+按 `/dev/ttyUSBN` 顺序猜测。
 
 ## 10. 阶段 G：后端配置和持久化数据
 
@@ -674,8 +676,8 @@ RUNTIME_ORBBEC_CAMERA1_USB_PORT=<本主板现场路径>
 RUNTIME_ORBBEC_CAMERA2_USB_PORT=<本主板现场路径>
 RUNTIME_ORBBEC_CAMERA3_USB_PORT=<本主板现场路径>
 RUNTIME_START_DEPTH_CAMERAS=true
-RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=true
-DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=true
+RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=false
+DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=false
 RESTART_SITE_GATEWAY_AFTER_ROSBRIDGE=false
 DORAEMON_NO_ACTION_ACCEPTANCE=true
 DORAEMON_ACTION_TEST_APPROVED=false
@@ -692,14 +694,13 @@ ROSBRIDGE_ADDRESS=127.0.0.1
 DOCK_CALIBRATION_STORAGE_PATH=/data/coverage/dock_calibration.yaml
 ```
 
-模板中的 `REPLACE_*` 是有意保留的停止门。只要车辆编号、任一相机序列号或
-USB3 拓扑仍为占位符，服务必须拒绝启动。相机在生产入口始终按序列号绑定；
-USB3 拓扑用于独立审计，启动前还会用目标版本内的 Orbbec SDK 验证
-`序列号 ↔ 拓扑` 配对、厂商和 SuperSpeed，不允许在失败时自动降级到另一个设备。
-v9 延续 v8 的枚举器：只输出版本化机器记录，异常时非零退出且不输出部分快照；启动门禁在阶段共用
-的超时预算内重试，并要求连续两次都得到恰好三条、唯一且与本车配置完全相同的配对。
-空、部分、额外、重复、畸形或超时快照都会清零连续成功计数并继续等待，直至预算耗尽后
-fail closed。原始 SDK stdout/stderr 不得直接写入 systemd journal。
+车辆编号和内部网口的 `REPLACE_*` 是有意保留的停止门。商业三相机模式会用目标
+版本内的 Orbbec SDK 连续两次确认恰好三台配置序列号，并核实每台当前实际连接的
+厂商和 SuperSpeed（至少 5000 Mbps）。空、部分、额外、重复、串号不符、USB2
+降速、畸形或超时快照都会 fail closed。`RUNTIME_ORBBEC_CAMERA*_USB_PORT` 是装车
+接线提示；实际拓扑改变但三台序列号和USB3链路连续稳定时只告警，不阻断启动。
+随后仍按左、右、前顺序启动，每台必须连续输出深度图和点云才能启动下一台。
+原始 SDK stdout/stderr 不得直接写入 systemd journal。
 
 保留当前已经验证的底盘方向、轮径、轮距、编码器和停靠参数，除非机械/算法负责人
 有带版本的变更单。不得通过修改源码给单车做参数差异。
@@ -1783,7 +1784,7 @@ sudo journalctl --disk-usage
 第一项 release 禁止生成物检查和第二项全机 bag 检查都应无输出。生产车默认不保存测试
 bag。确需现场录包时，应设置工单、最大时长、脱敏要求、
 转移位置和自动清理期限。显式运行 `record_localization_debug_bag.sh` 时默认输出到
-`/var/log/doraemon/debug-bags`，不得写回代码仓库。
+`/home/a/test_bag`，不得写回代码仓库。
 
 ## 23. 常见故障
 

@@ -88,9 +88,15 @@ void CostmapWrapper::reconfigure(double shutdown_costmap, double shutdown_costma
 
 void CostmapWrapper::clear()
 {
-  // lock and clear costmap
-  boost::unique_lock<costmap_2d::Costmap2D::mutex_t> lock(*getCostmap()->getMutex());
-  resetLayers();
+  // Reset under the map mutex, then synchronously rebuild the layered master
+  // before returning. Previously the clear_costmaps service returned with an
+  // empty/stale master and a planner could lock it before the update thread's
+  // next cycle, producing a path against a transient map.
+  {
+    boost::unique_lock<costmap_2d::Costmap2D::mutex_t> lock(*getCostmap()->getMutex());
+    resetLayers();
+  }
+  updateMap();
 }
 
 void CostmapWrapper::checkActivate()

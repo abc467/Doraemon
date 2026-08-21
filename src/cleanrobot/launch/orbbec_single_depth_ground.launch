@@ -1,0 +1,78 @@
+<launch>
+  <!-- One camera instance used by production sequential bringup. Stream
+       settings intentionally match orbbec_dual_depth_ground.launch. -->
+  <arg name="camera_name"/>
+  <arg name="bind_by_usb_port" default="false"/>
+  <arg name="serial_number" default=""/>
+  <arg name="usb_port" default=""/>
+  <arg name="device_num" default="3"/>
+  <arg name="connection_delay" default="800"/>
+
+  <arg name="depth_width" default="640"/>
+  <arg name="depth_height" default="400"/>
+  <arg name="depth_fps" default="15"/>
+  <arg name="depth_format" default="Y11"/>
+  <arg name="enable_color" default="false"/>
+  <arg name="enable_soft_filter" default="true"/>
+  <arg name="color_width" default="640"/>
+  <arg name="color_height" default="400"/>
+  <arg name="color_fps" default="30"/>
+  <arg name="color_format" default="MJPG"/>
+  <arg name="sync_mode" default="standalone"/>
+  <arg name="enable_frame_sync" default="false"/>
+  <arg name="log_level" default="none"/>
+
+  <group unless="$(arg bind_by_usb_port)">
+    <include file="$(find orbbec_camera)/launch/gemini.launch">
+      <arg name="camera_name" value="$(arg camera_name)"/>
+      <arg name="serial_number" value="$(arg serial_number)"/>
+      <arg name="connection_delay" value="$(arg connection_delay)"/>
+      <arg name="device_num" value="$(arg device_num)"/>
+      <arg name="enable_color" value="$(arg enable_color)"/>
+      <arg name="enable_ir" value="false"/>
+      <arg name="enable_depth" value="true"/>
+      <arg name="enable_point_cloud" value="true"/>
+      <arg name="enable_colored_point_cloud" value="false"/>
+      <arg name="enable_soft_filter" value="$(arg enable_soft_filter)"/>
+      <arg name="publish_tf" value="true"/>
+      <arg name="depth_width" value="$(arg depth_width)"/>
+      <arg name="depth_height" value="$(arg depth_height)"/>
+      <arg name="depth_fps" value="$(arg depth_fps)"/>
+      <arg name="depth_format" value="$(arg depth_format)"/>
+      <arg name="color_width" value="$(arg color_width)"/>
+      <arg name="color_height" value="$(arg color_height)"/>
+      <arg name="color_fps" value="$(arg color_fps)"/>
+      <arg name="color_format" value="$(arg color_format)"/>
+      <arg name="sync_mode" value="$(arg sync_mode)"/>
+      <arg name="enable_frame_sync" value="$(arg enable_frame_sync)"/>
+      <arg name="log_level" value="$(arg log_level)"/>
+    </include>
+  </group>
+
+  <group if="$(arg bind_by_usb_port)">
+    <include file="$(find orbbec_camera)/launch/gemini.launch">
+      <arg name="camera_name" value="$(arg camera_name)"/>
+      <arg name="usb_port" value="$(arg usb_port)"/>
+      <arg name="connection_delay" value="$(arg connection_delay)"/>
+      <arg name="device_num" value="$(arg device_num)"/>
+      <arg name="enable_color" value="$(arg enable_color)"/>
+      <arg name="enable_ir" value="false"/>
+      <arg name="enable_depth" value="true"/>
+      <arg name="enable_point_cloud" value="true"/>
+      <arg name="enable_colored_point_cloud" value="false"/>
+      <arg name="enable_soft_filter" value="$(arg enable_soft_filter)"/>
+      <arg name="publish_tf" value="true"/>
+      <arg name="depth_width" value="$(arg depth_width)"/>
+      <arg name="depth_height" value="$(arg depth_height)"/>
+      <arg name="depth_fps" value="$(arg depth_fps)"/>
+      <arg name="depth_format" value="$(arg depth_format)"/>
+      <arg name="color_width" value="$(arg color_width)"/>
+      <arg name="color_height" value="$(arg color_height)"/>
+      <arg name="color_fps" value="$(arg color_fps)"/>
+      <arg name="color_format" value="$(arg color_format)"/>
+      <arg name="sync_mode" value="$(arg sync_mode)"/>
+      <arg name="enable_frame_sync" value="$(arg enable_frame_sync)"/>
+      <arg name="log_level" value="$(arg log_level)"/>
+    </include>
+  </group>
+</launch>

@@ -28,19 +28,19 @@ class PlannerParams:
     mute_stderr: bool = False
     validate_effective_region_path: bool = True
 
-    wall_margin_m: float = 0.05
+    wall_margin_m: float = 0.38
     turn_margin_m: float = 0.0
     min_plannable_span_m: float = 0.0
 
-    edge_corner_radius_m: float = -1.0
-    edge_corner_pull: float = 1.35
+    edge_corner_radius_m: float = 0.45
+    edge_corner_pull: float = 0.20
     edge_corner_min_pts: int = 36
 
-    pre_proj_min: float = 0.5
-    pre_proj_max: float = 0.6
-    pre_prefix_max: float = 1.0
-    e_pre_min: float = 0.4
-    e_pre_max: float = 0.5
+    pre_proj_min: float = 0.9
+    pre_proj_max: float = 1.0
+    pre_prefix_max: float = 1.4
+    e_pre_min: float = 0.9
+    e_pre_max: float = 1.0
 
     # Appended for positional-constructor compatibility with older callers.
     min_swath_length_m: float = 0.0

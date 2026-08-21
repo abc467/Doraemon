@@ -322,6 +322,7 @@ _GET_ZONE_PLAN_PATH_RESPONSE_FIELDS = [
     "storage_frame",
     "display_path",
     "map_path",
+    "block_ids",
     "display_paths",
     "map_paths",
     "display_entry_pose",
@@ -457,10 +458,10 @@ class SiteEditorServiceNode:
             rospy.get_param("~default_no_go_buffer_m", 0.30)
         )
         self.default_no_go_long_edge_normal_buffer_m = float(
-            rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.15)
+            rospy.get_param("~default_no_go_long_edge_normal_buffer_m", 0.115)
         )
         self.default_no_go_short_edge_normal_buffer_m = float(
-            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.40)
+            rospy.get_param("~default_no_go_short_edge_normal_buffer_m", 0.115)
         )
         self.default_plan_profile_name = str(rospy.get_param("~default_plan_profile_name", "cover_standard")).strip() or "cover_standard"
         self.planner_worker_timeout_s = _positive_float(rospy.get_param("~planner_worker_timeout_s", 45.0), 45.0)
@@ -1928,6 +1929,7 @@ class SiteEditorServiceNode:
             storage_frame="",
             display_path=PolygonRing(),
             map_path=PolygonRing(),
+            block_ids=[],
             display_paths=[],
             map_paths=[],
             display_entry_pose=Pose2D(),
@@ -1950,6 +1952,7 @@ class SiteEditorServiceNode:
             order = [int(row["block_id"]) for row in (rows or [])]
 
         path_xy: List[XY] = []
+        block_ids: List[int] = []
         paths_xy: List[List[XY]] = []
         entry_pose = Pose2D()
         first_entry = True
@@ -1961,6 +1964,7 @@ class SiteEditorServiceNode:
             pts_xy = [(float(p[0]), float(p[1])) for p in pts_xyyaw if len(p) >= 2]
             if not pts_xy:
                 continue
+            block_ids.append(int(block_id))
             paths_xy.append(pts_xy)
             if first_entry:
                 fallback_yaw = float(pts_xyyaw[0][2]) if len(pts_xyyaw[0]) >= 3 else 0.0
@@ -1980,6 +1984,7 @@ class SiteEditorServiceNode:
 
         return {
             "path_xy": path_xy,
+            "block_ids": block_ids,
             "paths_xy": paths_xy,
             "entry_pose": entry_pose,
             "estimated_length_m": float(plan_meta.get("total_length_m") or 0.0),
@@ -2761,8 +2766,9 @@ class SiteEditorServiceNode:
 
             overlay = self._load_plan_overlay(active_plan_id)
             map_path = list(overlay.get("path_xy") or [])
+            block_ids = [int(block_id) for block_id in (overlay.get("block_ids") or [])]
             map_paths = [list(path) for path in (overlay.get("paths_xy") or [])]
-            if not map_path or not map_paths:
+            if not map_path or not map_paths or len(block_ids) != len(map_paths):
                 return self._empty_zone_plan_path_resp(False, "active plan path is empty")
 
             alignment_version = str(zone_msg.alignment_version or "").strip()
@@ -2802,6 +2808,7 @@ class SiteEditorServiceNode:
                 storage_frame=storage_frame,
                 display_path=_xy_to_ring(display_path),
                 map_path=_xy_to_ring(map_path),
+                block_ids=block_ids,
                 display_paths=_xy_paths_to_rings(display_paths),
                 map_paths=_xy_paths_to_rings(map_paths),
                 display_entry_pose=display_entry_pose,

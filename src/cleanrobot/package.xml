@@ -16,6 +16,12 @@
   <exec_depend>rospy</exec_depend>
   <exec_depend>rosparam</exec_depend>
   <exec_depend>std_srvs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>cleanrobot_app_msgs</exec_depend>
+  <exec_depend>coverage_msgs</exec_depend>
   <exec_depend>robot_runtime_flags</exec_depend>
   <exec_depend>cartographer_ros</exec_depend>
   <exec_depend>cleanrobot_description</exec_depend>
@@ -29,6 +35,7 @@
   <exec_depend>my_planner</exec_depend>
   <exec_depend>mppi_controller</exec_depend>
   <exec_depend>theta_star_planner_mbf</exec_depend>
+  <exec_depend>smac_lattice_planner_mbf</exec_depend>
   <exec_depend>mbf_costmap_nav</exec_depend>
   <export/>
 </package>

@@ -62,6 +62,8 @@ class ControllerAction :
   ControllerAction(const std::string &name,
                    const mbf_utility::RobotInformation &robot_info);
 
+  ~ControllerAction() override;
+
   /**
    * @brief Start controller action.
    * Override abstract action version to allow updating current plan without stopping execution.
@@ -72,6 +74,18 @@ class ControllerAction :
       GoalHandle &goal_handle,
       typename AbstractControllerExecution::Ptr execution_ptr
   );
+
+  /**
+   * Atomically hand a periodic plan to the currently running controller.
+   *
+   * Unlike sending another ExePath action goal, this keeps the original action
+   * goal handle (and therefore its terminal callback) authoritative.  A plan
+   * arriving as the execution enters a terminal state is simply rejected and
+   * cannot turn an already successful navigation into recovery.
+   */
+  bool tryUpdateContinuousPlan(
+      const mbf_msgs::ExePathGoal &goal,
+      std::string &reason);
 
   void runImpl(GoalHandle &goal_handle, AbstractControllerExecution& execution);
 

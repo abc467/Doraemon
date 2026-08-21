@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <vector>
 #include <queue>
@@ -87,6 +88,22 @@ public:
   bool generatePath(std::vector<coordsW> & raw_path);
 
   /**
+   * @brief Check every costmap cell touched by the segment joining two cell
+   *        centres. Corner crossings use supercover semantics, so a diagonal
+   *        cannot pass between blocked cells.
+   *
+   * This is the canonical centre-line clearance check used by both Theta*
+   * line-of-sight expansion and the final path validator. Keeping the two
+   * users on the same traversal prevents a raw Theta* edge from being
+   * accepted and then rejected after world-coordinate interpolation.
+   */
+  bool isLineSafe(
+    int x0, int y0, int x1, int y1,
+    double * traversal_cost = nullptr,
+    coordsM * blocked_cell = nullptr,
+    unsigned char * blocked_cost = nullptr) const;
+
+  /**
    * @brief 该函数检查成本图中某点 (cx, cy) 的成本是否小于 LETHAL_COST
    * @return 返回检查结果
    */
@@ -97,6 +114,20 @@ public:
       return allow_unknown_;
     }
     return static_cast<int>(raw_cost) <= max_allowed_cost_;
+  }
+
+  /**
+   * @brief A Connect start may legitimately be inside the stricter soft-cost
+   *        clearance band after FOLLOW.  It is traversable only while it is
+   *        still outside lethal/inscribed hard collision cost.
+   */
+  inline bool isStartTraversable(const int & cx, const int & cy) const
+  {
+    const unsigned char raw_cost = costmap_->getCost(cx, cy);
+    if (raw_cost == UNKNOWN_COST) {
+      return allow_unknown_;
+    }
+    return raw_cost < costmap_2d::INSCRIBED_INFLATED_OBSTACLE;
   }
 
   /**
@@ -112,7 +143,8 @@ public:
    */
   bool isUnsafeToPlan() const
   {
-    return !(isSafe(src_.x, src_.y)) || !(isSafe(dst_.x, dst_.y));
+    return !(isStartTraversable(src_.x, src_.y)) ||
+      !(isSafe(dst_.x, dst_.y));
   }
 
   /**
@@ -168,6 +200,9 @@ protected:
    * @param curr_id 用于传递当前节点在 nodes_position_ 中的索引
    */
   void setNeighbors(const tree_node * curr_data);
+
+  bool isStartEscapeTransition(
+    int current_x, int current_y, int next_x, int next_y) const;
 
   /**
    * @brief 使用 Bresenham 算法执行视线检查，并计算两点 (x0, y0) 和 (x1, y1) 之间直线路径的遍历成本

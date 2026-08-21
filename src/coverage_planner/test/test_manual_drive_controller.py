@@ -127,6 +127,29 @@ class ManualDriveSafetyControllerTest(unittest.TestCase):
         blockers = self._blockers(controller=self.strict_controller, combined_status=status)
         self.assertIn("emergency stop 1 is active", blockers)
 
+    def test_remote_control_ignores_business_state_but_keeps_platform_safety(self):
+        controller = ManualDriveSafetyController(
+            ManualDriveConfig(require_combined_status=True)
+        )
+        slam = _ready_slam_state()
+        slam.localization_state = "manual_assist_required"
+        slam.localization_valid = False
+        slam.active_map_match = False
+        task = _idle_task_state()
+        task.mission_state = "RUNNING"
+        task.active_job_id = "job-1"
+        odometry = types.SimpleNamespace(odom_valid=False, error_code="stale", message="stale")
+
+        blockers = self._blockers(
+            controller=controller,
+            slam_state=slam,
+            task_state=task,
+            odometry_state=odometry,
+            caller_role="",
+        )
+
+        self.assertEqual(blockers, [])
+
     def test_velocity_mapping_and_limits(self):
         self.assertEqual(self.controller.velocity_for_request(direction="forward", linear_mps=9.0), (0.3, 0.0, 0.0))
         self.assertEqual(self.controller.velocity_for_request(direction="backward", linear_mps=9.0), (-0.3, 0.0, 0.0))

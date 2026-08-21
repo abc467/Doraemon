@@ -40,6 +40,8 @@ using ::cartographer::transform::Rigid3d;
 constexpr double kTrajectoryLineStripMarkerScale = 0.07;
 constexpr double kLandmarkMarkerScale = 0.2;
 constexpr double kConstraintMarkerScale = 0.025;
+constexpr char kMapScanDistanceFieldLayoutVersion[] =
+    "global_from_trajectory_local_v1";
 
 ::std_msgs::ColorRGBA ToMessage(const cartographer::io::FloatColor& color) {
   ::std_msgs::ColorRGBA result;
@@ -162,7 +164,8 @@ std::string MapScanDistanceFieldCacheKey(const std::string& pbstream_filename) {
   if (!fingerprint.ok) {
     return "";
   }
-  return absl::StrCat("md5:", fingerprint.md5_hex, ":size:",
+  return absl::StrCat("layout:", kMapScanDistanceFieldLayoutVersion,
+                      ":md5:", fingerprint.md5_hex, ":size:",
                       fingerprint.size);
 }
 

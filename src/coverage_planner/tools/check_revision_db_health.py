@@ -49,9 +49,13 @@ REQUIRED_OPS_SCHEMA = {
     "job_schedules": {"schedule_id", "job_id"},
     "mission_runs": {
         "run_id", "job_id", "map_name", "map_revision_id", "zone_id",
-        "plan_profile_name", "plan_id", "state", "end_ts", "updated_ts",
+        "archived_map_revision_id", "plan_profile_name", "plan_id", "state",
+        "end_ts", "updated_ts",
     },
-    "mission_checkpoints": {"run_id", "zone_id", "plan_id", "map_revision_id"},
+    "mission_checkpoints": {
+        "run_id", "zone_id", "plan_id", "map_revision_id",
+        "archived_map_revision_id",
+    },
     "robot_runtime_state": {
         "robot_id", "active_run_id", "active_job_id", "map_name", "map_revision_id",
         "mission_state", "phase", "public_state", "executor_state",
@@ -915,6 +919,14 @@ def _check_ops_scope(
         plan_id = _nonempty(row.get("plan_id"))
         severity = "error" if _run_is_active(row) else "warning"
         if (zone_id or plan_id or _nonempty(row.get("map_name"))) and not map_revision_id:
+            archived_revision_id = _nonempty(row.get("archived_map_revision_id"))
+            has_identity_snapshot = bool(
+                archived_revision_id
+                and _nonempty(row.get("map_id"))
+                and _nonempty(row.get("map_md5"))
+            )
+            if not _run_is_active(row) and has_identity_snapshot:
+                continue
             _append(findings, severity, "run_missing_revision", scope, "mission_run is missing map_revision_id", run_id=run_id)
             continue
         if not map_revision_id:

@@ -118,6 +118,29 @@ _SLAM_LOSS_SAFE_EXECUTOR_STATES = frozenset(
 _SLAM_LOSS_PUBLIC_TERMINAL_STATES = frozenset(
     {"IDLE", "DONE", "FAILED", "CANCELED", "CANCELLED", "ESTOP", "STOPPED"}
 )
+_RESUMING_PHASES = frozenset({"AUTO_RESUMING", "RESUMING"})
+_RETURN_HOME_PHASES = frozenset(
+    {
+        "AUTO_DOCKING",
+        "MANUAL_DOCKING",
+        "AUTO_DOCKING_STAGE1",
+        "MANUAL_DOCKING_STAGE1",
+        "AUTO_DOCKING_STAGE2",
+        "MANUAL_DOCKING_STAGE2",
+        "AUTO_SUPPLY",
+        "MANUAL_SUPPLY",
+        "AUTO_CHARGING",
+        "MANUAL_CHARGING",
+        "AUTO_UNDOCKING",
+        "MANUAL_UNDOCKING",
+        "AUTO_RELOCALIZING",
+        "PAUSED_AUTO_CHARGE",
+        "CANCELING_RETURN_HOME",
+    }
+)
+_DOCK_SUPPLY_QUIESCENT_STATES = frozenset(
+    {"", "IDLE", "DONE", "FAILED", "CANCELED", "CANCELLED", "RECOVERY_BACK_DONE"}
+)
 
 
 def _slam_loss_episode_from_state(msg: SlamState, reason: str) -> str:
@@ -373,6 +396,8 @@ class TaskManager:
         cmd_topic: str = "~cmd",
         app_exe_task_service_name: str = "/coverage_task_manager/app/exe_task_server",
         app_exe_task_contract_param_ns: str = "/coverage_task_manager/contracts/app/exe_task_server",
+        app_cancel_return_home_service_name: str = "/coverage_task_manager/app/cancel_return_home",
+        return_home_cancel_timeout_s: float = 15.0,
         battery_topic: str = "/battery_state",
         battery_stale_timeout_s: float = 5.0,
 
@@ -396,6 +421,7 @@ class TaskManager:
         undock_forward_m: float = 0.6,
         dock_timeout_s: float = 600.0,
         wait_executor_paused_s: float = 20.0,
+        auto_resume_timeout_s: float = 60.0,
         charge_timeout_s: float = 14400.0,
         charge_battery_stale_timeout_s: float = 300.0,
 
@@ -608,6 +634,15 @@ class TaskManager:
             str(app_exe_task_contract_param_ns or "/coverage_task_manager/contracts/app/exe_task_server").strip()
             or "/coverage_task_manager/contracts/app/exe_task_server"
         )
+        self._app_cancel_return_home_service_name = (
+            str(
+                app_cancel_return_home_service_name
+                or "/coverage_task_manager/app/cancel_return_home"
+            ).strip()
+            or "/coverage_task_manager/app/cancel_return_home"
+        )
+        self._return_home_cancel_timeout_s = max(1.0, float(return_home_cancel_timeout_s))
+        self._return_home_cancel_lock = threading.Lock()
         self._app_readiness_contract_report = self._prepare_readiness_contract_report()
         self._app_exe_task_contract_report = self._prepare_exe_task_contract_report()
 
@@ -659,6 +694,7 @@ class TaskManager:
         self.undock_forward_m = float(undock_forward_m)
         self.dock_timeout_s = float(dock_timeout_s)
         self.wait_executor_paused_s = float(wait_executor_paused_s)
+        self.auto_resume_timeout_s = max(1.0, float(auto_resume_timeout_s))
         self.charge_timeout_s = float(charge_timeout_s)
         self.charge_battery_stale_timeout_s = float(charge_battery_stale_timeout_s)
 
@@ -732,10 +768,13 @@ class TaskManager:
         self._last_exec_state_seen: str = ""
         self._last_run_progress: Optional[RunProgressMsg] = None
         self._last_run_progress_ts: float = 0.0
+        self._last_run_progress_msg_ts: float = 0.0
         self._phase = "IDLE"  # IDLE/AUTO_*/MANUAL_*/PAUSED_AUTO_CHARGE
         self._stop = False
         self._dock_nav_started_ts: float = 0.0
         self._undock_nav_started_ts: float = 0.0
+        self._auto_resume_started_ts: float = 0.0
+        self._auto_resume_run_id: str = ""
         self._charge_started_ts: float = 0.0
         self._charge_last_soc: Optional[float] = None
         self._charge_last_fresh_ts: float = 0.0
@@ -923,6 +962,11 @@ class TaskManager:
             AppExeTask,
             self._on_exe_task_app,
         )
+        self._app_cancel_return_home_srv = rospy.Service(
+            self._app_cancel_return_home_service_name,
+            Trigger,
+            self._on_cancel_return_home_app,
+        )
         publish_contract_param(rospy, self._app_readiness_contract_param_ns, self._app_readiness_contract_report, enabled=True)
         publish_contract_param(rospy, self._app_exe_task_contract_param_ns, self._app_exe_task_contract_report, enabled=True)
 
@@ -1055,8 +1099,6 @@ class TaskManager:
     # ------------------- ROS callbacks -------------------
     def _on_executor_state(self, msg: String):
         s = str(msg.data or "")
-        rid = ""
-        need_mark_paused_recovery = False
         executor_state_changed = False
 
         with self._lock:
@@ -1071,24 +1113,88 @@ class TaskManager:
                     str(s or "").strip().upper() in _SLAM_LOSS_SAFE_EXECUTOR_STATES
                 )
 
-            if s == "PAUSED_RECOVERY" and prev != "PAUSED_RECOVERY":
-                self._mission_state = "PAUSED"
-                self._phase = "IDLE"
-                rid = str(self._active_run_id or "")
-                need_mark_paused_recovery = True
-
         if executor_state_changed:
             self._persist_if_changed()
-
-        if need_mark_paused_recovery:
-            self._mission_update_state(rid, "PAUSED", reason="exec_paused_recovery")
-            self._emit("EXEC_PAUSED_RECOVERY")
-            self._publish_state("PAUSED_RECOVERY")
+        # The legacy state String has no run identity.  Consume it only after
+        # the matching structured heartbeat is also present; otherwise a late
+        # PAUSED_RECOVERY from run A can pause a newly started run B.
+        self._consume_correlated_paused_recovery()
 
     def _on_executor_progress(self, msg: RunProgressMsg):
+        message_ts = 0.0
+        try:
+            message_ts = float(msg.stamp.to_sec())
+        except Exception:
+            message_ts = 0.0
         with self._lock:
             self._last_run_progress = msg
             self._last_run_progress_ts = time.time()
+            self._last_run_progress_msg_ts = message_ts
+        # State and progress topics are independent ROS callbacks and may arrive
+        # in either order.  Re-evaluate here as well as in _on_executor_state.
+        self._consume_correlated_paused_recovery()
+
+    def _consume_correlated_paused_recovery(self) -> bool:
+        if str(self._get_exec_state() or "").strip().upper() != "PAUSED_RECOVERY":
+            return False
+        with self._lock:
+            rid = str(self._active_run_id or "")
+            phase = str(self._phase or "").strip().upper()
+            already_consumed = bool(
+                self._mission_state == "PAUSED"
+                and str(self._public_state or "").strip().upper() == "PAUSED_RECOVERY"
+            )
+        # Resume phases have their own bounded acknowledgement/failure transition
+        # and must retain that phase until it records the resume failure reason.
+        if phase in _RESUMING_PHASES:
+            return False
+        if already_consumed:
+            return True
+        if not rid or not self._executor_progress_matches_active_run(
+            expected_state="PAUSED_RECOVERY"
+        ):
+            return False
+
+        # Recheck ownership after the unlocked correlation read.  A concurrent
+        # new task must win over this delayed callback.
+        with self._lock:
+            if (
+                str(self._active_run_id or "") != rid
+                or str(self._executor_state or "").strip().upper() != "PAUSED_RECOVERY"
+                or str(self._phase or "").strip().upper() in _RESUMING_PHASES
+            ):
+                return False
+            self._mission_state = "PAUSED"
+            self._phase = "IDLE"
+            self._auto_resume_started_ts = 0.0
+            self._auto_resume_run_id = ""
+
+        failure_reason = "exec_paused_recovery"
+        if self._mission_store is not None:
+            try:
+                latest_error = self._mission_store.get_latest_error_event(rid)
+                event_ts = float((latest_error or {}).get("ts", 0.0) or 0.0)
+                # _enter_paused_recovery commits its ERROR event before it
+                # publishes PAUSED_RECOVERY. Do not accidentally bind an older,
+                # unrelated error from the same long-running run.
+                if latest_error and 0.0 <= time.time() - event_ts <= 5.0:
+                    code = str(latest_error.get("code", "") or "").strip()
+                    message = str(latest_error.get("message", "") or "").strip()
+                    if code and message:
+                        failure_reason = "%s:%s" % (code, message)
+                    elif code or message:
+                        failure_reason = code or message
+            except Exception as e:
+                rospy.logwarn(
+                    "[TASK] failed to resolve PAUSED_RECOVERY root cause "
+                    "run=%s err=%s",
+                    rid,
+                    str(e),
+                )
+        self._mission_update_state(rid, "PAUSED", reason=failure_reason)
+        self._emit("EXEC_PAUSED_RECOVERY")
+        self._publish_state("PAUSED_RECOVERY")
+        return True
 
     def _on_battery(self, msg: BatteryState):
         soc = _soc_from_battery(msg)
@@ -1657,9 +1763,8 @@ class TaskManager:
                 or item.startswith("task manager busy:")
             )
         ]
-        active_task_runtime_healthy = bool(
-            task_active
-            and slam_task_running
+        task_occupied_runtime_healthy = bool(
+            slam_task_running
             and slam_runtime_authoritative
             and slam_runtime_mode == "localization"
             and result.active_map_name
@@ -1711,7 +1816,7 @@ class TaskManager:
                 summary="slam state stale age=%.1fs" % slam_age,
             ))
         else:
-            if (not slam_task_ready) and (not active_task_runtime_healthy):
+            if (not slam_task_ready) and (not task_occupied_runtime_healthy):
                 appended = False
                 for item in slam_blocking_reasons:
                     before = len(result.blockers)
@@ -1723,12 +1828,18 @@ class TaskManager:
                     appended = appended or len(result.blockers) != before
                 if not appended:
                     self._append_unique_readiness_text(result.blockers, "slam runtime not ready")
-            slam_runtime_ok = bool(slam_task_ready or active_task_runtime_healthy)
-            if active_task_runtime_healthy:
+            slam_runtime_ok = bool(slam_task_ready or task_occupied_runtime_healthy)
+            if task_occupied_runtime_healthy:
+                occupancy_summary = (
+                    "occupied by active task"
+                    if task_active
+                    else "blocked by task manager state"
+                )
                 slam_runtime_summary = (
-                    "runtime healthy; occupied by active task; "
-                    "workflow=%s phase=%s task_running=true task_ready=%s busy=%s manual_assist=%s"
+                    "runtime healthy; %s; workflow=%s phase=%s "
+                    "task_running=true task_ready=%s busy=%s manual_assist=%s"
                 ) % (
+                    occupancy_summary,
                     str(getattr(slam_state, "workflow_state", "") or "-"),
                     str(getattr(slam_state, "workflow_phase", "") or "-"),
                     str(bool(slam_task_ready)).lower(),
@@ -1820,16 +1931,43 @@ class TaskManager:
             ),
         ))
 
-        if mission_state != "IDLE":
+        mission_idle = str(mission_state or "").strip().upper() == "IDLE"
+        phase_name = str(phase or "").strip().upper()
+        public_name = str(public_state or "").strip().upper()
+        task_fault = bool(phase_name == "FAULT" or public_name.startswith("ERROR"))
+        task_manager_ready = bool(mission_idle and not task_fault)
+        if task_fault:
+            result.blockers.append(
+                "task manager fault: mission=%s phase=%s public=%s"
+                % (mission_state, phase, public_state)
+            )
+        elif not mission_idle:
             result.blockers.append("task manager busy: mission=%s phase=%s public=%s" % (mission_state, phase, public_state))
         result.checks.append(self._make_readiness_check(
             key="task_manager",
-            level="OK" if mission_state == "IDLE" else "ERROR",
-            ok=bool(mission_state == "IDLE"),
+            level="OK" if task_manager_ready else "ERROR",
+            ok=task_manager_ready,
             summary="mission=%s phase=%s public=%s" % (mission_state, phase, public_state),
         ))
 
-        exec_idle = str(executor_state or "").strip().upper() in ("", "IDLE")
+        exec_state_name = str(executor_state or "").strip().upper()
+        # FAILED/ERROR are terminal execution results, not live worker states.
+        # Keeping the diagnostic latched must not make every later START fail
+        # readiness forever; the new start will replace the terminal state.
+        exec_idle = bool(
+            exec_state_name
+            in {
+                "",
+                "IDLE",
+                "DONE",
+                "FAILED",
+                "CANCELED",
+                "CANCELLED",
+                "ESTOP",
+                "STOPPED",
+            }
+            or exec_state_name.startswith("ERROR")
+        )
         if not exec_idle:
             result.blockers.append("executor not idle: %s" % (executor_state or "UNKNOWN"))
         result.checks.append(self._make_readiness_check(
@@ -2280,12 +2418,22 @@ class TaskManager:
                 return False, "task manager busy: %s" % summary
             return True, ""
         if command == int(AppExeTaskRequest.PAUSE):
-            if mission != "RUNNING":
+            executor_actively_running = bool(self._is_mission_running())
+            fail_safe_pause = bool(active_run and executor_actively_running)
+            if mission != "RUNNING" and not fail_safe_pause:
                 return False, "pause requires running mission: %s" % summary
+            if mission != "RUNNING" and fail_safe_pause:
+                rospy.logwarn(
+                    "[TASK] accepting fail-safe pause while executor is active "
+                    "but mission/phase state is stale or resuming: %s",
+                    summary,
+                )
             return True, ""
         if command == int(AppExeTaskRequest.CONTINUE):
             if mission != "PAUSED":
                 return False, "continue requires paused mission: %s" % summary
+            if phase in _RESUMING_PHASES:
+                return False, "continue already pending: %s" % summary
             return True, ""
         if command == int(AppExeTaskRequest.STOP):
             if mission not in ("RUNNING", "PAUSED"):
@@ -3142,7 +3290,7 @@ class TaskManager:
         elif self._phase == "FAULT":
             self._emit("RESTORE:FAULT")
             self._publish_state(self._public_state or "FAULT")
-        elif self._phase == "AUTO_RESUMING":
+        elif self._phase in _RESUMING_PHASES:
             self._emit("RESTORE:RESUME")
             if self._complete_auto_resuming_if_executor_done():
                 return
@@ -3157,11 +3305,16 @@ class TaskManager:
             if not ok:
                 self._block_restore_auto_resume(str(msg or "relocalize required"))
                 return
-            self._resume_executor_with_current_intent(
-                run_id=self._active_run_id,
-                context="restore_auto_resume",
-                fault_public_state="ERROR_RESTORE_RESUME_CONTEXT",
-            )
+            if self._phase == "RESUMING":
+                self._start_manual_resuming(
+                    context="restore_manual_resume",
+                    missing_reason="missing active_run_id during restore manual resume",
+                )
+            else:
+                self._start_auto_resuming(
+                    context="restore_auto_resume",
+                    missing_reason="missing active_run_id during restore auto resume",
+                )
 
     def _battery_ok(self) -> Tuple[Optional[float], bool]:
         with self._lock:
@@ -3290,8 +3443,12 @@ class TaskManager:
                 continue
             if active.get(key) != expected:
                 return False, "dock calibration active map %s mismatch" % key
-            if runtime.get(key) != expected:
-                return False, "dock calibration runtime map %s mismatch" % key
+        # SlamState.active_map_match is the authoritative revision-aware
+        # active/runtime comparison. Runtime id/md5 can be the hash of the
+        # live OccupancyGrid representation and legitimately differ from the
+        # verified asset identity stored with this calibration.
+        if runtime.get("name") != saved.get("name"):
+            return False, "dock calibration runtime map name mismatch"
         if not bool(getattr(state, "runtime_map_ready", False)):
             return False, "dock calibration runtime map is not ready"
         if not bool(getattr(state, "active_map_match", False)):
@@ -3382,9 +3539,9 @@ class TaskManager:
         st = str(self._dock_supply_state or "").strip().upper()
         if st in ["RUNNING", "LOCK_DOCK_POSE", "SEARCH_DOCK_POSE", "PRECISE_DOCKING", "WAIT_STATION_IN_PLACE", "SEARCH_STATION_IN_PLACE", "MECHANICAL_CONNECT"]:
             return f"{prefix}_DOCKING_PRECISE"
-        if st in ["DRAINING", "DRAIN_SETTLING"]:
+        if st == "DRAINING":
             return f"{prefix}_SUPPLY_DRAIN"
-        if st == "REFILLING":
+        if st in ["REFILLING", "REFILL_SETTLING"]:
             return f"{prefix}_SUPPLY_REFILL"
         if st in ["CHARGING", "CHARGE_CMD_SENT", "CHARGE_CONFIRMED", "DISABLE_CHARGING"]:
             return f"{prefix}_CHARGING"
@@ -4032,6 +4189,8 @@ class TaskManager:
         self._clear_charge_monitor()
         self._dock_nav_started_ts = 0.0
         self._undock_nav_started_ts = 0.0
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
         self._dock_supply_exit_inflight = False
         self._armed = True
         self._mission_state = "IDLE"
@@ -4428,6 +4587,10 @@ class TaskManager:
         return ok, msg
 
     def _pause_current_task(self) -> Tuple[bool, str]:
+        if self._phase in _RESUMING_PHASES:
+            self._phase = "IDLE"
+            self._auto_resume_started_ts = 0.0
+            self._auto_resume_run_id = ""
         self._send_exec_cmd("pause")
         self._mission_update_state(self._active_run_id, "PAUSED")
         self._mission_state = "PAUSED"
@@ -4457,20 +4620,48 @@ class TaskManager:
         self._publish_state("RUNNING")
         self._push_task_intent_to_executor()
 
-    def _start_auto_resuming(self, *, context: str, missing_reason: str) -> bool:
+    def _start_resuming(
+        self,
+        *,
+        phase: str,
+        context: str,
+        missing_reason: str,
+        fault_public_state: str,
+    ) -> bool:
         if not self._active_run_id:
             self._enter_blocking_fault(
-                "ERROR_AUTO_RESUME_CONTEXT",
+                str(fault_public_state or "ERROR_RESUME_CONTEXT"),
                 str(missing_reason or "missing active_run_id during auto resume"),
             )
             return False
-        self._set_phase_and_publish("AUTO_RESUMING")
-        self._resume_executor_with_current_intent(
+        self._auto_resume_started_ts = time.time()
+        self._auto_resume_run_id = str(self._active_run_id)
+        self._set_phase_and_publish(str(phase or "RESUMING"))
+        if not self._resume_executor_with_current_intent(
             run_id=self._active_run_id,
             context=str(context or "auto_resume"),
+            fault_public_state=str(fault_public_state or "ERROR_RESUME_CONTEXT"),
+        ):
+            self._auto_resume_started_ts = 0.0
+            self._auto_resume_run_id = ""
+            return False
+        return True
+
+    def _start_auto_resuming(self, *, context: str, missing_reason: str) -> bool:
+        return self._start_resuming(
+            phase="AUTO_RESUMING",
+            context=context,
+            missing_reason=missing_reason,
             fault_public_state="ERROR_AUTO_RESUME_CONTEXT",
         )
-        return True
+
+    def _start_manual_resuming(self, *, context: str, missing_reason: str) -> bool:
+        return self._start_resuming(
+            phase="RESUMING",
+            context=context,
+            missing_reason=missing_reason,
+            fault_public_state="ERROR_RESUME_CONTEXT",
+        )
 
     def _arm_auto_relocalizing(self):
         self._emit_auto_recovery_armed("AUTO_RELOCALIZING")
@@ -4518,7 +4709,30 @@ class TaskManager:
         st = self._get_exec_state()
         if not (st.startswith("CONNECT") or st.startswith("FOLLOW")):
             return False
-        self._emit_auto_resume_confirmed(st)
+        if not self._executor_progress_matches_active_run(
+            expected_state=st,
+            not_before_ts=self._auto_resume_started_ts,
+        ):
+            return False
+        resume_phase = str(self._phase or "").strip().upper()
+        is_manual_resume = resume_phase == "RESUMING"
+        if is_manual_resume:
+            self._emit("MANUAL_RESUME_CONFIRMED:exec_state=%s" % str(st or "-"))
+        else:
+            self._emit_auto_resume_confirmed(st)
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
+        self._mission_state = "RUNNING"
+        self._mission_update_state(
+            self._active_run_id,
+            "RUNNING",
+            reason=(
+                "manual_resume_confirmed:%s"
+                if is_manual_resume
+                else "auto_resume_confirmed:%s"
+            )
+            % str(st or "").strip(),
+        )
         self._set_phase_and_publish("IDLE", public_state="RUNNING")
         return True
 
@@ -4526,12 +4740,126 @@ class TaskManager:
         st = self._get_exec_state()
         if str(st or "").strip().upper() != "DONE":
             return False
+        if not self._executor_progress_matches_active_run(
+            expected_state=st,
+            not_before_ts=self._auto_resume_started_ts,
+        ):
+            return False
         self._emit(f"AUTO_RESUME_EXECUTOR_DONE:run={self._active_run_id or '-'}")
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
         self._phase = "IDLE"
         self._mission_state = "RUNNING"
         self._last_exec_state_seen = ""
         self._tick_exec_terminal_and_loops()
         return True
+
+    def _executor_progress_matches_active_run(
+        self,
+        *,
+        expected_state: str = "",
+        max_age_s: float = 3.0,
+        not_before_ts: float = 0.0,
+    ) -> bool:
+        """Correlate the legacy String state with the structured run heartbeat.
+
+        The state topic has no run id.  Refusing to consume it until a fresh
+        RunProgress for the active run reports the same state prevents a late
+        terminal/active state from the previous run from completing or
+        resuming the current mission.
+        """
+        with self._lock:
+            active_run_id = str(self._active_run_id or "")
+            progress = getattr(self, "_last_run_progress", None)
+            progress_ts = float(getattr(self, "_last_run_progress_ts", 0.0) or 0.0)
+            progress_msg_ts = float(
+                getattr(self, "_last_run_progress_msg_ts", 0.0) or 0.0
+            )
+        if not active_run_id or progress is None or progress_ts <= 0.0:
+            return False
+        if progress_ts < max(0.0, float(not_before_ts)):
+            return False
+        # Receipt time alone cannot distinguish a stale latched heartbeat that
+        # is delivered after a resume command.  When available, require the
+        # executor's own generation timestamp to be post-dispatch as well.
+        if (
+            progress_msg_ts > 0.0
+            and progress_msg_ts < max(0.0, float(not_before_ts))
+        ):
+            return False
+        if (time.time() - progress_ts) > max(0.1, float(max_age_s)):
+            return False
+        if str(getattr(progress, "run_id", "") or "") != active_run_id:
+            return False
+        expected = str(expected_state or "").strip().upper()
+        actual = str(getattr(progress, "state", "") or "").strip().upper()
+        return (not expected) or actual == expected
+
+    def _fail_auto_resuming(self, reason: str) -> bool:
+        resume_phase = str(self._phase or "").strip().upper()
+        if resume_phase not in _RESUMING_PHASES:
+            return False
+        is_manual_resume = resume_phase == "RESUMING"
+        reason_s = str(reason or "auto_resume_failed").strip() or "auto_resume_failed"
+        exec_state = self._get_exec_state()
+        if self._is_mission_running():
+            # Preserve the executor checkpoint and request a controlled stop.
+            self._send_exec_cmd("pause")
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
+        self._mission_state = "PAUSED"
+        self._phase = "IDLE"
+        self._mission_update_state(
+            self._active_run_id,
+            "PAUSED",
+            reason=("manual_resume_failed:%s" if is_manual_resume else "auto_resume_failed:%s")
+            % reason_s,
+        )
+        self._emit(
+            ("MANUAL_RESUME_FAILED:exec_state=%s reason=%s" if is_manual_resume
+             else "AUTO_RESUME_FAILED:exec_state=%s reason=%s")
+            % (str(exec_state or "-").strip() or "-", reason_s)
+        )
+        self._publish_state("PAUSED_RECOVERY")
+        return True
+
+    def _check_auto_resuming_failure_or_timeout(self) -> bool:
+        if str(self._phase or "").strip().upper() not in _RESUMING_PHASES:
+            return False
+        st = str(self._get_exec_state() or "").strip().upper()
+        terminal_failure = (
+            st
+            in {
+                "IDLE",
+                "PAUSED",
+                "PAUSED_RECOVERY",
+                "FAILED",
+                "CANCELED",
+                "CANCELLED",
+                "ESTOP",
+                "STOPPED",
+            }
+            or st.startswith("ERROR")
+        )
+        if terminal_failure and self._executor_progress_matches_active_run(
+            expected_state=st,
+            not_before_ts=self._auto_resume_started_ts,
+        ):
+            return self._fail_auto_resuming("executor_terminal:%s" % st)
+
+        started = float(getattr(self, "_auto_resume_started_ts", 0.0) or 0.0)
+        timeout_s = max(1.0, float(getattr(self, "auto_resume_timeout_s", 60.0)))
+        if started <= 0.0:
+            # Restored legacy state did not persist a timestamp; start a fresh,
+            # bounded acknowledgement window instead of waiting forever.
+            self._auto_resume_started_ts = time.time()
+            self._auto_resume_run_id = str(self._active_run_id or "")
+            return False
+        if (time.time() - started) >= timeout_s:
+            return self._fail_auto_resuming(
+                "ack_timeout:%.1fs:last_state=%s" % (timeout_s, st or "-")
+            )
+        return False
 
     def _handle_dock_supply_phase(self) -> bool:
         if not self._is_dock_supply_owner_phase():
@@ -4710,10 +5038,12 @@ class TaskManager:
             if not ok:
                 self._enter_blocking_fault("ERROR_REDISPATCH", msg)
             return
-        if self._phase == "AUTO_RESUMING":
+        if self._phase in _RESUMING_PHASES:
             if self._complete_auto_resuming_if_executor_done():
                 return
-            self._complete_auto_resuming_if_executor_running()
+            if self._complete_auto_resuming_if_executor_running():
+                return
+            self._check_auto_resuming_failure_or_timeout()
 
     def _resume_current_task(self, *, run_id: str = "", map_name: str = "") -> Tuple[bool, str]:
         if self._executor_in_actuator_debug():
@@ -4753,10 +5083,11 @@ class TaskManager:
         if not ok:
             return False, str(msg or "resume map prepare failed")
 
-        self._enter_running_dispatch_state()
-        self._mission_update_state(self._active_run_id, "RUNNING", reason="manual_resume")
-        if not self._resume_executor_with_current_intent(run_id=self._active_run_id, context="manual_resume"):
-            return False, "run_id is required for resume"
+        if not self._start_manual_resuming(
+            context="manual_resume",
+            missing_reason="missing active_run_id during manual resume",
+        ):
+            return False, "failed to dispatch manual resume"
         return True, ""
 
     def _stop_current_task(self) -> Tuple[bool, str]:
@@ -4774,12 +5105,142 @@ class TaskManager:
         self._reset_dock_retry_state()
         self._dock_nav_started_ts = 0.0
         self._undock_nav_started_ts = 0.0
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
 
         if self._active_schedule_id:
             self._sched_store_mark_done(self._active_schedule_id, "CANCELED")
         self._clear_health_auto_recover(reset_count=True)
         self._enter_idle_state(reset_job_runner=True)
         return True, ""
+
+    def _dock_supply_is_quiescent(self, state: str = "") -> bool:
+        state_name = str(state or self._dock_supply_state or "").strip().upper()
+        return bool(
+            state_name in _DOCK_SUPPLY_QUIESCENT_STATES
+            or state_name.startswith("FAILED")
+        )
+
+    def _return_home_cancel_is_active(self) -> bool:
+        phase = str(self._phase or "").strip().upper()
+        if phase in _RETURN_HOME_PHASES:
+            return True
+        return bool(
+            self._dock_supply_enable
+            and not self._dock_supply_is_quiescent()
+        )
+
+    def _complete_operator_return_home_cancel(self) -> Tuple[bool, str]:
+        self._restore_dock_stage2_replanning(reason="operator_cancel_return_home")
+        self._clear_charge_monitor()
+        self._reset_dock_retry_state()
+        self._dock_nav_started_ts = 0.0
+        self._undock_nav_started_ts = 0.0
+        self._dock_supply_exit_inflight = False
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
+        # An explicit operator cancel must not be followed by a previously
+        # armed health-recovery timer that silently resumes the paused run.
+        self._clear_health_auto_recover(reset_count=True)
+
+        active_run_id = str(self._active_run_id or "").strip()
+        if active_run_id:
+            self._mission_state = "PAUSED"
+            self._phase = "IDLE"
+            self._mission_update_state(
+                active_run_id,
+                "PAUSED",
+                reason="operator_cancel_return_home",
+            )
+            self._emit("RETURN_HOME_CANCELED:task_preserved")
+            self._publish_state("PAUSED")
+            return True, "return-home canceled; task remains paused"
+
+        self._mission_state = "IDLE"
+        self._phase = "IDLE"
+        # A post-run return/repeat cycle intentionally keeps the job template
+        # but clears active_run_id.  Operator cancellation means that cycle is
+        # over as well; clear the retained template so IDLE is genuinely free
+        # for a new task or schedule.
+        self._reset_job_runner()
+        self._emit("RETURN_HOME_CANCELED:idle")
+        self._publish_state("IDLE")
+        return True, "return-home canceled; robot is idle"
+
+    def _cancel_return_home(self) -> Tuple[bool, str]:
+        cancel_lock = getattr(self, "_return_home_cancel_lock", None)
+        if cancel_lock is None:
+            cancel_lock = threading.Lock()
+            self._return_home_cancel_lock = cancel_lock
+        if not cancel_lock.acquire(False):
+            return False, "return-home cancel already pending"
+
+        try:
+            if not self._return_home_cancel_is_active():
+                return False, "return-home workflow is not active"
+
+            phase_before = str(self._phase or "").strip().upper()
+            supply_state_before = str(self._dock_supply_state or "").strip().upper()
+            self._emit(
+                "RETURN_HOME_CANCEL_REQUESTED:phase=%s supply=%s"
+                % (phase_before or "-", supply_state_before or "-")
+            )
+            self._phase = "CANCELING_RETURN_HOME"
+            self._publish_state("CANCELING_RETURN_HOME")
+
+            self._restore_dock_stage2_replanning(reason="operator_cancel_return_home")
+            self.nav.cancel_all()
+            self._dock_stage2_nav.cancel_all()
+
+            supply_cancel_required = bool(
+                self._dock_supply_enable
+                and (
+                    not self._dock_supply_is_quiescent(supply_state_before)
+                    or phase_before in {
+                        "AUTO_SUPPLY",
+                        "MANUAL_SUPPLY",
+                        "AUTO_UNDOCKING",
+                        "MANUAL_UNDOCKING",
+                    }
+                )
+            )
+            if supply_cancel_required:
+                cancel_ok, cancel_msg = self._dock_supply_cancel()
+                if not cancel_ok:
+                    reason = "dock_supply_cancel_failed:%s" % (
+                        str(cancel_msg or "unknown").strip() or "unknown"
+                    )
+                    self._enter_charge_fault(
+                        "ERROR_RETURN_HOME_CANCEL",
+                        reason=reason,
+                        manual=(not self._active_run_id),
+                    )
+                    return False, reason
+
+                timeout_s = max(
+                    1.0,
+                    float(getattr(self, "_return_home_cancel_timeout_s", 15.0)),
+                )
+                if not self._wait(
+                    timeout_s,
+                    self._dock_supply_is_quiescent,
+                    sleep_s=0.05,
+                ):
+                    reason = "dock_supply_cancel_timeout:%.1fs" % timeout_s
+                    self._enter_charge_fault(
+                        "ERROR_RETURN_HOME_CANCEL_TIMEOUT",
+                        reason=reason,
+                        manual=(not self._active_run_id),
+                    )
+                    return False, reason
+
+            return self._complete_operator_return_home_cancel()
+        finally:
+            cancel_lock.release()
+
+    def _on_cancel_return_home_app(self, _req):
+        ok, message = self._cancel_return_home()
+        return TriggerResponse(success=bool(ok), message=str(message or ""))
 
     def _start_manual_return(self) -> Tuple[bool, str]:
         if self._executor_in_actuator_debug():
@@ -5597,6 +6058,8 @@ class TaskManager:
     def _reset_run_context(self):
         self._active_run_id = ""
         self._active_run_loop_index = 0
+        self._auto_resume_started_ts = 0.0
+        self._auto_resume_run_id = ""
 
     def _reset_job_runner(self):
         self._active_job_id = ""
@@ -5795,6 +6258,20 @@ class TaskManager:
         self._last_exec_state_seen = st
 
         if self._is_terminal_state(st):
+            if self._active_run_id and not self._executor_progress_matches_active_run(
+                expected_state=st
+            ):
+                # Do not bind a late terminal String from run A to run B.  Put
+                # it back into the unconsumed state so the next fresh,
+                # run-correlated heartbeat can confirm it.
+                self._last_exec_state_seen = ""
+                rospy.logwarn_throttle(
+                    2.0,
+                    "[TASK] defer uncorrelated executor terminal state=%s active_run=%s",
+                    str(st),
+                    str(self._active_run_id),
+                )
+                return
             st_up = str(st or "").upper()
 
             if st_up == "DONE":
@@ -6432,15 +6909,22 @@ class TaskManager:
             self._emit_supply_command_failure("START", str(e))
             return False
 
-    def _dock_supply_cancel(self):
+    def _dock_supply_cancel(self) -> Tuple[bool, str]:
         if not self._dock_supply_enable or self._dock_supply_cancel_cli is None:
-            return
+            return False, "dock_supply cancel service is unavailable"
         try:
             rospy.wait_for_service(self._dock_supply_cancel_service, timeout=1.0)
-            _ = self._dock_supply_cancel_cli()
+            resp = self._dock_supply_cancel_cli()
+            success = bool(getattr(resp, "success", False))
+            message = str(getattr(resp, "message", "") or "")
+            if not success:
+                self._emit_supply_command_failure("CANCEL", message or "rejected")
+                return False, message or "dock_supply cancel rejected"
             self._emit("SUPPLY_CANCEL")
+            return True, message
         except Exception as e:
             rospy.logwarn("[TASK] dock_supply cancel failed: %s", str(e))
+            return False, str(e)
 
     def _begin_charge_monitor(self, soc: Optional[float] = None, fresh: bool = False):
         now = time.time()

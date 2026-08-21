@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>smac_lattice_planner_mbf</name>
+  <version>0.1.0</version>
+  <description>ROS1 Move Base Flex port of the Nav2 Smac State Lattice planner for differential-drive robots.</description>
+  <maintainer email="dev@company.com">Clean Robot Navigation Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>angles</depend>
+  <depend>base_local_planner</depend>
+  <depend>costmap_2d</depend>
+  <depend>geometry_msgs</depend>
+  <depend>mbf_costmap_core</depend>
+  <depend>mbf_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>ompl</depend>
+  <depend>pluginlib</depend>
+  <depend>rosbag</depend>
+  <depend>roscpp</depend>
+  <depend>roslib</depend>
+  <depend>sqlite3</depend>
+  <depend>theta_star_planner_mbf</depend>
+  <depend>tf</depend>
+  <depend>tf2</depend>
+  <build_depend>nlohmann-json-dev</build_depend>
+  <build_export_depend>nlohmann-json-dev</build_export_depend>
+  <exec_depend>nlohmann-json-dev</exec_depend>
+  <test_depend>gtest</test_depend>
+
+  <export>
+    <mbf_costmap_core plugin="${prefix}/smac_lattice_plugin.xml"/>
+  </export>
+</package>

@@ -88,6 +88,44 @@ class SiteEditorVerifiedMapGuardTest(unittest.TestCase):
             [[(0.0, 0.0), (1.0, 0.0)], [(10.0, 1.0), (11.0, 1.0)]],
         )
 
+    def test_plan_overlay_pairs_sparse_block_ids_with_paths_in_execution_order(self):
+        node = SITE_EDITOR_MODULE.SiteEditorServiceNode.__new__(
+            SITE_EDITOR_MODULE.SiteEditorServiceNode
+        )
+        blocks = {
+            2: {
+                "block_id": 2,
+                "path_xyyaw": [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)],
+                "entry_x": 0.0,
+                "entry_y": 0.0,
+                "entry_yaw": 0.0,
+            },
+            4: {
+                "block_id": 4,
+                "path_xyyaw": [(10.0, 1.0, 0.0), (11.0, 1.0, 0.0)],
+                "entry_x": 10.0,
+                "entry_y": 1.0,
+                "entry_yaw": 0.0,
+            },
+        }
+        node.store = SimpleNamespace(
+            load_plan_meta=lambda _plan_id: {
+                "exec_order_json": [2, 4],
+                "total_length_m": 2.0,
+                "plan_profile_name": "cover_standard",
+                "zone_version": 1,
+            },
+            load_block=lambda _plan_id, block_id: blocks[int(block_id)],
+        )
+
+        overlay = node._load_plan_overlay("plan-sparse")
+
+        self.assertEqual(overlay["block_ids"], [2, 4])
+        self.assertEqual(
+            overlay["paths_xy"],
+            [[(0.0, 0.0), (1.0, 0.0)], [(10.0, 1.0), (11.0, 1.0)]],
+        )
+
     def test_site_axis_plan_is_converted_back_to_raw_map(self):
         node = SITE_EDITOR_MODULE.SiteEditorServiceNode.__new__(
             SITE_EDITOR_MODULE.SiteEditorServiceNode

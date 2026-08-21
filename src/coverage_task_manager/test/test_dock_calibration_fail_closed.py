@@ -66,9 +66,11 @@ class DockCalibrationFailClosedTest(unittest.TestCase):
         values = {
             "robot_id": "CR-001",
             "active_map_name": "site-%s" % map_suffix,
+            "active_map_revision_id": "rev-site-%s" % map_suffix,
             "active_map_id": "map-%s" % map_suffix,
             "active_map_md5": ("a" if map_suffix == "a" else "b") * 32,
             "runtime_map_name": "site-%s" % map_suffix,
+            "runtime_map_revision_id": "rev-site-%s" % map_suffix,
             "runtime_map_id": "map-%s" % map_suffix,
             "runtime_map_md5": ("a" if map_suffix == "a" else "b") * 32,
             "runtime_map_ready": True,
@@ -277,9 +279,10 @@ class DockCalibrationFailClosedTest(unittest.TestCase):
         self.assertNotIn(node.stage1_param_name, params)
         self.assertNotIn(node.stage2_param_name, params)
 
-    def test_map_binding_requires_name_id_md5_and_exact_active_runtime_match(self):
+    def test_map_binding_prefers_revision_scope_over_runtime_grid_hash(self):
         full = {
             "name": "site-a",
+            "revision_id": "rev-site-a",
             "id": "map-a",
             "md5": "0123456789abcdef0123456789abcdef",
         }
@@ -299,6 +302,32 @@ class DockCalibrationFailClosedTest(unittest.TestCase):
         )
         wrong_runtime = dict(full)
         wrong_runtime["id"] = "map-b"
+        wrong_runtime["md5"] = "ffffffffffffffffffffffffffffffff"
+        self.assertEqual(
+            dock_calibration._map_identity_match_issue(
+                saved=full,
+                active=full,
+                runtime=wrong_runtime,
+            ),
+            "",
+        )
+        wrong_runtime["revision_id"] = "rev-site-b"
+        self.assertIn(
+            "revision ids",
+            dock_calibration._map_identity_match_issue(
+                saved=full,
+                active=full,
+                runtime=wrong_runtime,
+            ),
+        )
+
+    def test_map_binding_keeps_exact_legacy_fallback_without_revision_ids(self):
+        full = {
+            "name": "site-a",
+            "id": "map-a",
+            "md5": "0123456789abcdef0123456789abcdef",
+        }
+        wrong_runtime = dict(full, id="map-b")
         self.assertIn(
             "runtime map",
             dock_calibration._map_identity_match_issue(
@@ -337,11 +366,11 @@ class DockCalibrationFailClosedTest(unittest.TestCase):
         self.assertFalse(fresh)
         self.assertEqual((x, y, yaw), (0.0, 0.0, 0.0))
 
-    def test_live_identity_requires_fresh_matching_robot_and_ready_exact_map(self):
+    def test_live_identity_requires_fresh_matching_robot_and_revision_scope(self):
         cases = {
             "wrong robot": {"robot_id": "CR-999"},
             "missing active md5": {"active_map_md5": ""},
-            "runtime mismatch": {"runtime_map_id": "map-b"},
+            "runtime revision mismatch": {"runtime_map_revision_id": "rev-site-b"},
             "runtime not ready": {"runtime_map_ready": False},
             "active mismatch flag": {"active_map_match": False},
             "localization invalid": {"localization_valid": False},
@@ -352,6 +381,26 @@ class DockCalibrationFailClosedTest(unittest.TestCase):
                 self._set_live_map(node, **changes)
                 with self.assertRaises(ValueError):
                     node._current_calibration_map_identity()
+
+        node = self._node("/unused")
+        self._set_live_map(
+            node,
+            runtime_map_id="runtime-grid-id",
+            runtime_map_md5="f" * 32,
+        )
+        identity = node._current_calibration_map_identity()
+        self.assertEqual(identity["id"], "map-a")
+        self.assertEqual(identity["revision_id"], "rev-site-a")
+
+        node = self._node("/unused")
+        self._set_live_map(
+            node,
+            active_map_revision_id="",
+            runtime_map_revision_id="",
+            runtime_map_id="runtime-grid-id",
+        )
+        with self.assertRaisesRegex(ValueError, "legacy map identities"):
+            node._current_calibration_map_identity()
 
         node = self._node("/unused")
         self._set_live_map(node)

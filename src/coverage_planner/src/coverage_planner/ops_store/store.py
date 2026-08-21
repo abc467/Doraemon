@@ -200,6 +200,9 @@ class MissionRunRecord:
     reason: str = ""
     map_id: str = ""
     map_md5: str = ""
+    cleaning_distance_m: float = 0.0
+    cleaning_area_m2: float = 0.0
+    metrics_source: str = ""
     created_ts: float = 0.0
     start_ts: float = 0.0
     end_ts: float = 0.0
@@ -444,6 +447,7 @@ class OperationsStore:
               job_id TEXT,
               map_name TEXT,
               map_revision_id TEXT,
+              archived_map_revision_id TEXT,
               zone_id TEXT,
               plan_profile_name TEXT,
               plan_id TEXT,
@@ -460,6 +464,9 @@ class OperationsStore:
               reason TEXT,
               map_id TEXT,
               map_md5 TEXT,
+              cleaning_distance_m REAL NOT NULL DEFAULT 0.0,
+              cleaning_area_m2 REAL NOT NULL DEFAULT 0.0,
+              metrics_source TEXT,
               created_ts REAL NOT NULL,
               start_ts REAL NOT NULL,
               end_ts REAL NOT NULL DEFAULT 0.0,
@@ -483,6 +490,7 @@ class OperationsStore:
               state TEXT,
               water_off_latched INTEGER NOT NULL DEFAULT 0,
               map_revision_id TEXT,
+              archived_map_revision_id TEXT,
               map_id TEXT,
               map_md5 TEXT,
               updated_ts REAL NOT NULL
@@ -570,7 +578,12 @@ class OperationsStore:
         self._ensure_column(conn, "jobs", "repeat_after_full_charge", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column(conn, "jobs", "map_revision_id", "TEXT")
         self._ensure_column(conn, "mission_runs", "map_revision_id", "TEXT")
+        self._ensure_column(conn, "mission_runs", "archived_map_revision_id", "TEXT")
+        self._ensure_column(conn, "mission_runs", "cleaning_distance_m", "REAL NOT NULL DEFAULT 0.0")
+        self._ensure_column(conn, "mission_runs", "cleaning_area_m2", "REAL NOT NULL DEFAULT 0.0")
+        self._ensure_column(conn, "mission_runs", "metrics_source", "TEXT")
         self._ensure_column(conn, "mission_checkpoints", "map_revision_id", "TEXT")
+        self._ensure_column(conn, "mission_checkpoints", "archived_map_revision_id", "TEXT")
         self._ensure_column(conn, "robot_runtime_state", "map_revision_id", "TEXT")
         self._ensure_column(conn, "slam_jobs", "requested_map_revision_id", "TEXT")
         self._ensure_column(conn, "slam_jobs", "resolved_map_revision_id", "TEXT")
@@ -742,16 +755,17 @@ class OperationsStore:
                 cur.execute(
                     """
                     INSERT OR REPLACE INTO mission_runs(
-                      run_id, job_id, map_name, map_revision_id, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
+                      run_id, job_id, map_name, map_revision_id, archived_map_revision_id, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
                       mbf_controller_name, actuator_profile_name, clean_mode, loops_total, loop_index,
                       trigger_source, state, reason, map_id, map_md5, created_ts, start_ts, end_ts, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("run_id") or ""),
                         str(row.get("job_id") or ""),
                         map_name,
                         str(row.get("map_revision_id") or ""),
+                        str(row.get("archived_map_revision_id") or ""),
                         str(row.get("zone_id") or ""),
                         str(row.get("plan_profile_name") or ""),
                         str(row.get("plan_id") or ""),
@@ -779,8 +793,8 @@ class OperationsStore:
                     """
                     INSERT OR REPLACE INTO mission_checkpoints(
                       run_id, zone_id, plan_id, zone_version, exec_index, block_id, path_index, path_s,
-                      state, water_off_latched, map_revision_id, map_id, map_md5, updated_ts
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                      state, water_off_latched, map_revision_id, archived_map_revision_id, map_id, map_md5, updated_ts
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                     """,
                     (
                         str(row.get("run_id") or ""),
@@ -794,6 +808,7 @@ class OperationsStore:
                         str(row.get("state") or ""),
                         int(row.get("water_off_latched", 0) or 0),
                         str(row.get("map_revision_id") or ""),
+                        str(row.get("archived_map_revision_id") or ""),
                         str(row.get("map_id") or ""),
                         str(row.get("map_md5") or ""),
                         float(row.get("updated_ts") or _now_ts()),
@@ -1487,6 +1502,9 @@ class OperationsStore:
         reason: str = "",
         map_id: str = "",
         map_md5: str = "",
+        cleaning_distance_m: float = 0.0,
+        cleaning_area_m2: float = 0.0,
+        metrics_source: str = "",
         created_ts: Optional[float] = None,
         start_ts: Optional[float] = None,
     ):
@@ -1500,8 +1518,10 @@ class OperationsStore:
                 INSERT OR REPLACE INTO mission_runs(
                   run_id, job_id, map_name, map_revision_id, zone_id, plan_profile_name, plan_id, zone_version, constraint_version, sys_profile_name,
                   mbf_controller_name, actuator_profile_name, clean_mode, loops_total, loop_index,
-                  trigger_source, state, reason, map_id, map_md5, created_ts, start_ts, end_ts, updated_ts
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                  trigger_source, state, reason, map_id, map_md5,
+                  cleaning_distance_m, cleaning_area_m2, metrics_source,
+                  created_ts, start_ts, end_ts, updated_ts
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
                 """,
                 (
                     str(run_id or "").strip(),
@@ -1524,6 +1544,9 @@ class OperationsStore:
                     str(reason or "").strip(),
                     str(map_id or "").strip(),
                     str(map_md5 or "").strip(),
+                    max(0.0, float(cleaning_distance_m or 0.0)),
+                    max(0.0, float(cleaning_area_m2 or 0.0)),
+                    str(metrics_source or "").strip(),
                     cts,
                     sts,
                     0.0,
@@ -1565,19 +1588,63 @@ class OperationsStore:
 
     def update_run_state(self, run_id: str, state: str, *, reason: str = "", set_end: bool = False):
         now = _now_ts()
+        state_s = str(state or "").strip()
+        reason_s = str(reason or "").strip()
+        run_id_s = str(run_id or "").strip()
         conn = self._connect()
         try:
-            if set_end:
+            preserve_paused_failure = state_s.upper() == "CANCELED" and not reason_s
+            if set_end and preserve_paused_failure:
+                # A later manual cancel is bookkeeping, not a replacement for
+                # the failure that put the run into PAUSED/FAILED. Keep that
+                # diagnostic while recording the terminal CANCELED state.
+                conn.execute(
+                    """
+                    UPDATE mission_runs
+                    SET state=?,
+                        reason=CASE
+                          WHEN UPPER(COALESCE(state, '')) IN ('PAUSED', 'FAILED')
+                               OR UPPER(COALESCE(state, '')) LIKE 'ERROR%'
+                            THEN reason
+                          ELSE ''
+                        END,
+                        end_ts=?, updated_ts=?
+                    WHERE run_id=?;
+                    """,
+                    (state_s, now, now, run_id_s),
+                )
+            elif set_end:
                 conn.execute(
                     "UPDATE mission_runs SET state=?, reason=?, end_ts=?, updated_ts=? WHERE run_id=?;",
-                    (str(state or "").strip(), str(reason or "").strip(), now, now, str(run_id or "").strip()),
+                    (state_s, reason_s, now, now, run_id_s),
                 )
             else:
                 conn.execute(
                     "UPDATE mission_runs SET state=?, reason=?, updated_ts=? WHERE run_id=?;",
-                    (str(state or "").strip(), str(reason or "").strip(), now, str(run_id or "").strip()),
+                    (state_s, reason_s, now, run_id_s),
                 )
             conn.commit()
+        finally:
+            conn.close()
+
+    def get_latest_run_error_event(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Return the latest committed ERROR/FATAL event for one mission run."""
+        run_id_s = str(run_id or "").strip()
+        if not run_id_s:
+            return None
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT event_id, ts, component, level, code, message, data_json
+                FROM robot_events
+                WHERE run_id=? AND UPPER(COALESCE(level, '')) IN ('ERROR', 'FATAL')
+                ORDER BY ts DESC, event_id DESC
+                LIMIT 1;
+                """,
+                (run_id_s,),
+            ).fetchone()
+            return dict(row) if row is not None else None
         finally:
             conn.close()
 
@@ -1598,6 +1665,9 @@ class OperationsStore:
         clean_mode: Optional[str] = None,
         map_id: Optional[str] = None,
         map_md5: Optional[str] = None,
+        cleaning_distance_m: Optional[float] = None,
+        cleaning_area_m2: Optional[float] = None,
+        metrics_source: Optional[str] = None,
     ):
         run = self.get_run(run_id)
         if run is None:
@@ -1610,7 +1680,7 @@ class OperationsStore:
                 UPDATE mission_runs
                 SET map_name=?, map_revision_id=?, zone_id=?, plan_profile_name=?, plan_id=?, zone_version=?, constraint_version=?, sys_profile_name=?,
                     mbf_controller_name=?, actuator_profile_name=?, clean_mode=?,
-                    map_id=?, map_md5=?, updated_ts=?
+                    map_id=?, map_md5=?, cleaning_distance_m=?, cleaning_area_m2=?, metrics_source=?, updated_ts=?
                 WHERE run_id=?;
                 """,
                 (
@@ -1627,6 +1697,9 @@ class OperationsStore:
                     str(clean_mode if clean_mode is not None else run.clean_mode),
                     str(map_id if map_id is not None else run.map_id),
                     str(map_md5 if map_md5 is not None else run.map_md5),
+                    max(0.0, float(cleaning_distance_m if cleaning_distance_m is not None else run.cleaning_distance_m)),
+                    max(0.0, float(cleaning_area_m2 if cleaning_area_m2 is not None else run.cleaning_area_m2)),
+                    str(metrics_source if metrics_source is not None else run.metrics_source),
                     now,
                     str(run_id or "").strip(),
                 ),
@@ -1661,6 +1734,9 @@ class OperationsStore:
             reason=str(row["reason"] or ""),
             map_id=str(row["map_id"] or ""),
             map_md5=str(row["map_md5"] or ""),
+            cleaning_distance_m=float(row["cleaning_distance_m"] or 0.0),
+            cleaning_area_m2=float(row["cleaning_area_m2"] or 0.0),
+            metrics_source=str(row["metrics_source"] or ""),
             created_ts=float(row["created_ts"] or 0.0),
             start_ts=float(row["start_ts"] or 0.0),
             end_ts=float(row["end_ts"] or 0.0),

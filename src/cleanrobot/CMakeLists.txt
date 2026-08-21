@@ -5,6 +5,11 @@ find_package(catkin REQUIRED)
 
 catkin_package()
 
+catkin_install_python(PROGRAMS
+  scripts/orbbec_camera_watchdog_node.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 install(DIRECTORY launch/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/launch
   USE_SOURCE_PERMISSIONS
@@ -18,3 +23,7 @@ install(DIRECTORY config
   USE_SOURCE_PERMISSIONS
   OPTIONAL
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_orbbec_runtime_contract.py)
+endif()

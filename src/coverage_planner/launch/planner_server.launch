@@ -76,7 +76,7 @@
   <arg name="manual_drive_require_slam_state" default="false"/>
   <arg name="manual_drive_require_task_state" default="false"/>
   <arg name="manual_drive_require_odometry_state" default="false"/>
-  <arg name="manual_drive_require_combined_status" default="false"/>
+  <arg name="manual_drive_require_combined_status" default="true"/>
   <arg name="manual_drive_linear_mps_limit" default="0.3"/>
   <arg name="manual_drive_angular_radps_limit" default="0.5"/>
   <arg name="manual_drive_watchdog_timeout_ms" default="1000"/>
@@ -94,6 +94,7 @@
 
   <group if="$(arg enable_rect_zone_planner)">
     <node pkg="coverage_planner" type="rect_zone_planner_node.py" name="rect_zone_planner" output="screen" respawn="true" respawn_delay="2.0">
+      <rosparam command="load" file="$(arg planner_defaults_yaml)"/>
       <param name="plan_db_path" value="$(arg plan_db_path)"/>
       <param name="robot_id" value="$(arg robot_id)"/>
       <param name="map_topic" value="$(arg map_topic)"/>

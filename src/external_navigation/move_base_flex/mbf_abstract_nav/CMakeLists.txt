@@ -87,6 +87,12 @@ install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
 )
 
+# Keep the new lifecycle contract regression runnable even though the upstream
+# package disables its old, environment-dependent rostest suite below.
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_nosetests(test/test_lifecycle_source_contract.py)
+endif()
+
 set(CATKIN_ENABLE_TESTING OFF)
 if(CATKIN_ENABLE_TESTING)
   find_package(rostest REQUIRED)

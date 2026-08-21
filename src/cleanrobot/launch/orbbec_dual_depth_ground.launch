@@ -30,6 +30,10 @@
   <arg name="depth_height" default="400"/>
   <arg name="depth_fps" default="15"/>
   <arg name="front_depth_format" default="Y16"/>
+  <arg name="front_color_width" default="640"/>
+  <arg name="front_color_height" default="400"/>
+  <arg name="front_color_fps" default="30"/>
+  <arg name="front_color_format" default="MJPG"/>
   <arg name="sync_mode" default="standalone"/>
   <arg name="enable_frame_sync" default="false"/>
   <arg name="log_level" default="none"/>
@@ -124,7 +128,7 @@
       <arg name="serial_number" value="$(arg camera3_serial_number)"/>
       <arg name="connection_delay" value="$(arg camera3_connection_delay)"/>
       <arg name="device_num" value="$(arg device_num)"/>
-      <arg name="enable_color" value="false"/>
+      <arg name="enable_color" value="true"/>
       <arg name="enable_ir" value="false"/>
       <arg name="enable_depth" value="true"/>
       <arg name="enable_point_cloud" value="true"/>
@@ -134,6 +138,10 @@
       <arg name="depth_height" value="$(arg depth_height)"/>
       <arg name="depth_fps" value="$(arg depth_fps)"/>
       <arg name="depth_format" value="$(arg front_depth_format)"/>
+      <arg name="color_width" value="$(arg front_color_width)"/>
+      <arg name="color_height" value="$(arg front_color_height)"/>
+      <arg name="color_fps" value="$(arg front_color_fps)"/>
+      <arg name="color_format" value="$(arg front_color_format)"/>
       <arg name="sync_mode" value="$(arg sync_mode)"/>
       <arg name="enable_frame_sync" value="$(arg enable_frame_sync)"/>
       <arg name="log_level" value="$(arg log_level)"/>
@@ -146,7 +154,7 @@
       <arg name="usb_port" value="$(arg camera3_usb_port)"/>
       <arg name="connection_delay" value="$(arg camera3_connection_delay)"/>
       <arg name="device_num" value="$(arg device_num)"/>
-      <arg name="enable_color" value="false"/>
+      <arg name="enable_color" value="true"/>
       <arg name="enable_ir" value="false"/>
       <arg name="enable_depth" value="true"/>
       <arg name="enable_point_cloud" value="true"/>
@@ -156,6 +164,10 @@
       <arg name="depth_height" value="$(arg depth_height)"/>
       <arg name="depth_fps" value="$(arg depth_fps)"/>
       <arg name="depth_format" value="$(arg front_depth_format)"/>
+      <arg name="color_width" value="$(arg front_color_width)"/>
+      <arg name="color_height" value="$(arg front_color_height)"/>
+      <arg name="color_fps" value="$(arg front_color_fps)"/>
+      <arg name="color_format" value="$(arg front_color_format)"/>
       <arg name="sync_mode" value="$(arg sync_mode)"/>
       <arg name="enable_frame_sync" value="$(arg enable_frame_sync)"/>
       <arg name="log_level" value="$(arg log_level)"/>

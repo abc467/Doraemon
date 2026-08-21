@@ -13,7 +13,7 @@
 # limitations under the License.
 
 if(NOT GMock_FOUND)
-  find_path(GMOCK_INCLUDE_DIRS gmock/gmock.h
+  find_path(GMOCK_INCLUDE_DIR gmock/gmock.h
     HINTS
       ENV GMOCK_DIR
     PATH_SUFFIXES include
@@ -21,8 +21,11 @@ if(NOT GMock_FOUND)
       /usr
   )
 
-  # Find system-wide installed gmock.
-  find_library(GMOCK_LIBRARIES
+  # Find system-wide installed gmock. Keep the individual cache variables
+  # separate from GMOCK_LIBRARIES: Catkin caches GMOCK_LIBRARIES as a list
+  # after the first configure, so reusing it in find_library() makes a later
+  # configure mistake a target list for an installed gmock_main library.
+  find_library(GMOCK_MAIN_LIBRARY
     NAMES gmock_main
     HINTS
       ENV GMOCK_DIR
@@ -30,37 +33,46 @@ if(NOT GMock_FOUND)
     PATHS
       /usr
   )
-  if(GMOCK_LIBRARIES)
-    find_library(GMOCK_LIBRARY
-      NAMES gmock
-      HINTS
-        ENV GMOCK_DIR
-      PATH_SUFFIXES lib
-      PATHS
-        /usr
-    )
-    find_library(GTEST_LIBRARY
-      NAMES gtest
-      HINTS
-        ENV GMOCK_DIR
-      PATH_SUFFIXES lib
-      PATHS
-        /usr
-    )
-    list(APPEND GMOCK_LIBRARIES ${GMOCK_LIBRARY} ${GTEST_LIBRARY})
-  endif()
+  find_library(GMOCK_LIBRARY
+    NAMES gmock
+    HINTS
+      ENV GMOCK_DIR
+    PATH_SUFFIXES lib
+    PATHS
+      /usr
+  )
+  find_library(GTEST_LIBRARY
+    NAMES gtest
+    HINTS
+      ENV GMOCK_DIR
+    PATH_SUFFIXES lib
+    PATHS
+      /usr
+  )
 
   # Find system-wide gtest header.
-  find_path(GTEST_INCLUDE_DIRS gtest/gtest.h
+  find_path(GTEST_INCLUDE_DIR gtest/gtest.h
     HINTS
       ENV GTEST_DIR
     PATH_SUFFIXES include
     PATHS
       /usr
   )
-  list(APPEND GMOCK_INCLUDE_DIRS ${GTEST_INCLUDE_DIRS})
 
-  if(NOT GMOCK_LIBRARIES)
+  if(GMOCK_MAIN_LIBRARY AND GMOCK_LIBRARY AND GTEST_LIBRARY
+      AND GMOCK_INCLUDE_DIR AND GTEST_INCLUDE_DIR)
+    set(GMOCK_LIBRARIES
+      ${GMOCK_MAIN_LIBRARY}
+      ${GMOCK_LIBRARY}
+      ${GTEST_LIBRARY}
+    )
+    set(GMOCK_INCLUDE_DIRS ${GMOCK_INCLUDE_DIR} ${GTEST_INCLUDE_DIR})
+  else()
+    # A partial system installation is not usable. Clear any plural list
+    # cached by Catkin so the source fallback remains deterministic across
+    # repeated CMake configure/check cycles.
+    set(GMOCK_LIBRARIES "")
+
     # If no system-wide gmock found, then find src version.
     # Ubuntu might have this.
     find_path(GMOCK_SRC_DIR src/gmock.cc
@@ -76,8 +88,25 @@ if(NOT GMock_FOUND)
         add_subdirectory(${GMOCK_SRC_DIR} "${CMAKE_CURRENT_BINARY_DIR}/gmock"
           EXCLUDE_FROM_ALL)
       endif()
-      set(GMOCK_LIBRARIES gmock_main)
-      set(GMOCK_INCLUDE_DIRS ${GMOCK_SRC_DIR}/include)
+      set(GMOCK_MAIN_LIBRARY gmock_main)
+      set(GMOCK_LIBRARY gmock)
+      set(GTEST_LIBRARY gtest)
+      set(GMOCK_LIBRARIES ${GMOCK_MAIN_LIBRARY})
+      set(GMOCK_INCLUDE_DIRS
+        ${GMOCK_SRC_DIR}/include
+        ${GMOCK_SRC_DIR}/../googletest/include
+      )
+
+      # Keep the source targets above as normal variables, but remove failed
+      # system probes and stale plural variables from CMakeCache. Otherwise a
+      # dependency audit can report GMOCK_LIBRARY-NOTFOUND even though this
+      # valid source fallback is selected.
+      unset(GMOCK_INCLUDE_DIR CACHE)
+      unset(GMOCK_INCLUDE_DIRS CACHE)
+      unset(GMOCK_MAIN_LIBRARY CACHE)
+      unset(GMOCK_LIBRARY CACHE)
+      unset(GMOCK_LIBRARIES CACHE)
+      unset(GTEST_LIBRARY CACHE)
     endif()
   endif()
 

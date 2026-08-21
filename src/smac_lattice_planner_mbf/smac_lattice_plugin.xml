@@ -1,0 +1,10 @@
+<library path="lib/libsmac_lattice_planner_mbf">
+  <class
+      name="smac_lattice_planner_mbf/SmacLatticePlanner"
+      type="smac_lattice_planner_mbf::SmacLatticePlanner"
+      base_class_type="mbf_costmap_core::CostmapPlanner">
+    <description>
+      ROS1/MBF State Lattice planner adapted from Nav2 Smac Planner 1.5.0.
+    </description>
+  </class>
+</library>

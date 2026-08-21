@@ -14,6 +14,8 @@ SERVICE_GROUP="${DORAEMON_SERVICE_GROUP:-$(id -gn "${SERVICE_USER}")}"
 SERVICE_NAME="${DORAEMON_SERVICE_NAME:-doraemon-runtime.service}"
 ENABLE_SERVICE="${DORAEMON_ENABLE_SERVICE:-0}"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}"
+ORBBEC_USB_SERVICE_NAME="doraemon-orbbec-usb-preflight.service"
+ORBBEC_USB_UNIT_PATH="/etc/systemd/system/${ORBBEC_USB_SERVICE_NAME}"
 RUNTIME_ENV="/etc/doraemon/runtime.env"
 DEPS_ENV="/etc/doraemon/deps.env"
 VERSIONS_FILE="${REPO_ROOT}/deploy/manifests/x86_ubuntu20_versions.env"
@@ -332,8 +334,9 @@ trap 'rm -f "${unit_file}"' EXIT
 cat >"${unit_file}" <<EOF
 [Unit]
 Description=Doraemon Robot Runtime
-After=local-fs.target network-online.target systemd-udev-settle.service
+After=local-fs.target network-online.target systemd-udev-settle.service ${ORBBEC_USB_SERVICE_NAME}
 Wants=network-online.target systemd-udev-settle.service
+Requires=${ORBBEC_USB_SERVICE_NAME}
 
 [Service]
 Type=oneshot
@@ -375,6 +378,9 @@ WantedBy=multi-user.target
 EOF
 
 sudo install -m 0644 "${unit_file}" "${UNIT_PATH}"
+sudo install -m 0644 \
+  "${REPO_ROOT}/deploy/systemd/${ORBBEC_USB_SERVICE_NAME}" \
+  "${ORBBEC_USB_UNIT_PATH}"
 sudo systemctl daemon-reload
 
 sudo systemctl disable "${SERVICE_NAME}"

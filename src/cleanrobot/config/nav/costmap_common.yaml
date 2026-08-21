@@ -1,7 +1,7 @@
 # A26022 body: length 0.85 m, width 0.65 m. The base_link origin is at the wheel
 # axle center; rear overhang is 0.2185 m and front overhang is 0.6315 m.
 footprint: [[-0.2185, -0.325], [-0.2185, 0.325], [0.6315, 0.325], [0.6315, -0.325]]
-footprint_padding: 0.05
+footprint_padding: 0.0
 
 transform_tolerance: 1.0
 
@@ -14,7 +14,10 @@ obstacle_layer:
   raytrace_range: 5.0
   track_unknown_space: true
   combination_method: 1
-  observation_sources: laser_scan_sensor left_cam_source right_cam_source up_cam_source
+  # This shared source is instantiated by the local ObstacleLayer only. The
+  # global costmap has no dynamic-obstacle plugin, preventing non-decaying ROS1
+  # marks from contaminating State Lattice topology.
+  observation_sources: laser_scan_sensor
 
   laser_scan_sensor:
     data_type: LaserScan
@@ -22,50 +25,33 @@ obstacle_layer:
     marking: true
     clearing: true
     inf_is_valid: true
-
-  left_cam_source:
-    data_type: PointCloud2
-    topic: /left/obstacle_2d
-    marking: true
-    # obstacle_2d is an obstacle-only synthetic cloud; keep laser as the
-    # free-space clearing source so sparse projected obstacle points do not
-    # accidentally raytrace away other obstacles.
-    clearing: false
-    min_obstacle_height: -0.5
-    max_obstacle_height: 2.0
-    obstacle_range: 2.5
-    raytrace_range: 3.0
-
-  right_cam_source:
-    data_type: PointCloud2
-    topic: /right/obstacle_2d
-    marking: true
-    clearing: false
-    min_obstacle_height: -0.5
-    max_obstacle_height: 2.0
-    obstacle_range: 2.5
-    raytrace_range: 3.0
-
-  up_cam_source:
-    data_type: PointCloud2
-    topic: /up/obstacle_2d
-    marking: true
-    clearing: false
-    min_obstacle_height: -0.5
-    max_obstacle_height: 2.0
-    obstacle_range: 2.5
-    raytrace_range: 3.0
+    # Laser is the required local safety source. If it stops updating for
+    # 0.5 s, ObstacleLayer becomes non-current and MBF holds zero velocity.
+    # Depth cameras remain optional and therefore do not gate robot startup.
+    expected_update_rate: 0.5
 
 inflation_layer:
   enabled: true
-  # The padded front overhang is 0.6815 m from the planning origin. Keep the
+  # The physical front overhang is 0.6315 m from the planning origin. Keep the
   # inflation field beyond the body so MPPI starts reacting before contact.
-  cost_scaling_factor: 2.5
+  # 当前共享参数：10.0 相比 12.0 延缓软代价衰减，让 MPPI 更早感知障碍；
+  # 转角安全仍由预生成路径、MPPI 运行时完整 footprint 检查和前视共同约束。
+  # 1.0 m 已覆盖该梯度量化后的有效非零代价范围。
+  # 该组合必须在重启后重新核验完整 footprint 检查门槛。
+  # 原始障碍/禁行区仍为 254，完整 footprint 硬碰撞边界不变。
+  cost_scaling_factor: 10.0
   inflation_radius: 1.0
 
 keepout_constraint_layer:
   enabled: true
+  # Navigation hard view: stored/raw no-go polygons only. Never subscribe the
+  # Coverage planning view published on /map_constraints/effective here.
   constraints_topic: /map_constraints/current
+  # The publisher sends a 1 Hz identity-bearing heartbeat. A stale, invalid or
+  # wrong-revision snapshot makes the layer non-current and navigation stops;
+  # it is never silently treated as an empty keepout set.
+  require_map_identity_match: true
+  max_message_age: 5.0
 
 static_layer:
   enabled: true

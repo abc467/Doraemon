@@ -63,7 +63,12 @@ AbstractNavigationServer::AbstractNavigationServer(const TFPtr &tf_listener_ptr)
       controller_action_(name_action_exe_path, robot_info_),
       planner_action_(name_action_get_path, robot_info_),
       recovery_action_(name_action_recovery, robot_info_),
-      move_base_action_(name_action_move_base, robot_info_, recovery_plugin_manager_.getLoadedNames())
+      move_base_action_(
+          name_action_move_base, robot_info_,
+          recovery_plugin_manager_.getLoadedNames(),
+          boost::bind(
+              &ControllerAction::tryUpdateContinuousPlan,
+              &controller_action_, _1, _2))
 {
   ros::NodeHandle nh;
 
@@ -305,7 +310,7 @@ void AbstractNavigationServer::callActionMoveBase(ActionServerMoveBase::GoalHand
 void AbstractNavigationServer::cancelActionMoveBase(ActionServerMoveBase::GoalHandle goal_handle)
 {
   ROS_INFO_STREAM_NAMED("move_base", "Cancel action \"move_base\"");
-  move_base_action_.cancel();
+  move_base_action_.cancel(goal_handle);
   ROS_DEBUG_STREAM_NAMED("move_base", "Cancel action \"move_base\" completed");
 }
 
@@ -374,10 +379,12 @@ void AbstractNavigationServer::reconfigure(
 }
 
 void AbstractNavigationServer::stop(){
+  // Invalidate the composite action first so its replanning worker cannot
+  // submit another child goal while the execution groups are being joined.
+  move_base_action_.cancel();
   planner_action_.cancelAll();
   controller_action_.cancelAll();
   recovery_action_.cancelAll();
-  move_base_action_.cancel();
 }
 
 } /* namespace mbf_abstract_nav */

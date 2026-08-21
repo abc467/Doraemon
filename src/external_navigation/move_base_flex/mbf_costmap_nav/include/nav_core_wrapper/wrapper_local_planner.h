@@ -86,12 +86,17 @@ namespace mbf_nav_core_wrapper {
        */
       virtual bool isGoalReached(double xy_tolerance, double yaw_tolerance);
 
+      bool usesInternalGoalReachedPolicy() const override;
+
       /**
        * @brief  Set the plan that the local planner is following
        * @param plan The plan to pass to the local planner
        * @return True if the plan was updated successfully, false otherwise
        */
       virtual bool setPlan(const std::vector<geometry_msgs::PoseStamped> &plan);
+
+      virtual void setPlanExecutionContext(
+          const mbf_abstract_core::PlanExecutionContext &context);
 
       /**
        * @brief Requests the planner to cancel, e.g. if it takes too much time

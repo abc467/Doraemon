@@ -1,9 +1,13 @@
 <launch>
   <arg name="mbf_nav_yaml" default="$(find cleanrobot)/config/nav/mbf_nav.yaml"/>
+  <!-- Temporary module-level A/B: exact v9 MPPI code and Standard parameters. -->
+  <arg name="mppi_v9_ab_enabled" default="true"/>
+  <arg name="mppi_v9_ab_yaml" default="$(find cleanrobot)/launch/mppi_v9_ab.yaml"/>
   <arg name="mbf_timing_yaml" default="$(find cleanrobot)/config/nav/mbf_timing.yaml"/>
   <arg name="costmap_common_yaml" default="$(find cleanrobot)/config/nav/costmap_common.yaml"/>
   <arg name="global_costmap_yaml" default="$(find cleanrobot)/config/nav/global_costmap.yaml"/>
   <arg name="local_costmap_yaml" default="$(find cleanrobot)/config/nav/local_costmap.yaml"/>
+  <arg name="planner_defaults_yaml" default="$(find coverage_planner)/config/planner_server_defaults.yaml"/>
   <arg name="enable_depth_obstacle_tracking" default="true"/>
   <arg name="enable_depth_left_cam" default="true"/>
   <arg name="enable_depth_right_cam" default="true"/>
@@ -24,25 +28,29 @@
 
   <node pkg="mbf_costmap_nav" type="mbf_costmap_nav" name="move_base_flex" output="screen" clear_params="true">
     <rosparam command="load" file="$(arg mbf_nav_yaml)"/>
+    <rosparam if="$(arg mppi_v9_ab_enabled)" command="delete" param="MPPI_Standard_Controller"/>
+    <rosparam if="$(arg mppi_v9_ab_enabled)" command="load" file="$(arg mppi_v9_ab_yaml)"/>
     <rosparam command="load" file="$(arg mbf_timing_yaml)"/>
     <rosparam command="load" file="$(arg costmap_common_yaml)" ns="global_costmap"/>
     <rosparam command="load" file="$(arg costmap_common_yaml)" ns="local_costmap"/>
     <rosparam command="load" file="$(arg global_costmap_yaml)"/>
     <rosparam command="load" file="$(arg local_costmap_yaml)"/>
-    <param name="global_costmap/obstacle_layer/left_cam_source/topic" value="/left/$(arg depth_left_obstacle_topic)"/>
-    <param name="global_costmap/obstacle_layer/right_cam_source/topic" value="/right/$(arg depth_right_obstacle_topic)"/>
-    <param name="global_costmap/obstacle_layer/up_cam_source/topic" value="/up/$(arg depth_up_obstacle_topic)"/>
     <param name="local_costmap/obstacle_layer/left_cam_source/topic" value="/left/$(arg depth_left_obstacle_topic)"/>
     <param name="local_costmap/obstacle_layer/right_cam_source/topic" value="/right/$(arg depth_right_obstacle_topic)"/>
     <param name="local_costmap/obstacle_layer/up_cam_source/topic" value="/up/$(arg depth_up_obstacle_topic)"/>
   </node>
 
   <node pkg="coverage_planner" type="map_constraints_node.py" name="map_constraints" output="screen">
+    <!-- Shared no-go buffers are used only for the effective Coverage view. -->
+    <rosparam command="load" file="$(arg planner_defaults_yaml)"/>
     <param name="plan_db_path" value="$(arg plan_db_path)"/>
     <param name="robot_id" value="$(arg robot_id)"/>
     <param name="map_topic" value="/map"/>
     <param name="frame_id" value="map"/>
+    <!-- Both costmaps subscribe only to this normalized raw/hard view. -->
     <param name="constraints_topic" value="/map_constraints/current"/>
+    <!-- Observation/debug view; never connect this topic to a Keepout layer. -->
+    <param name="effective_constraints_topic" value="/map_constraints/effective"/>
     <param name="publish_markers" value="true"/>
   </node>
 

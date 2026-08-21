@@ -16,18 +16,23 @@
 
 #include "cartographer/mapping/internal/2d/pose_graph_2d.h"
 
-#include <cmath>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
 #include <future>
 #include <memory>
 #include <random>
+#include <string>
 
 #include "absl/memory/memory.h"
 #include "cartographer/common/internal/testing/lua_parameter_dictionary_test_helpers.h"
+#include "cartographer/common/math.h"
 #include "cartographer/common/thread_pool.h"
 #include "cartographer/common/time.h"
 #include "cartographer/mapping/2d/probability_grid_range_data_inserter_2d.h"
 #include "cartographer/mapping/2d/submap_2d.h"
+#include "cartographer/mapping/internal/2d/map_scan_distance_field.h"
 #include "cartographer/transform/rigid_transform.h"
 #include "cartographer/transform/rigid_transform_test_helpers.h"
 #include "cartographer/transform/transform.h"
@@ -36,6 +41,74 @@
 namespace cartographer {
 namespace mapping {
 namespace {
+
+TEST(ActiveFrozenQualityGateTest,
+     CorrectionAboveRecoveryThresholdCannotBypassValidation) {
+  EXPECT_FALSE(NeedsActiveFrozenRecoveryValidation(
+      0.50, 0., 0.10, false, false, false));
+  EXPECT_TRUE(NeedsActiveFrozenRecoveryValidation(
+      0.75, 0., 0.10, false, false, false));
+  EXPECT_TRUE(NeedsActiveFrozenRecoveryValidation(
+      0.10, 0.04, 0.10, false, false, false));
+}
+
+TEST(ActiveFrozenQualityGateTest,
+     HighSingleSubmapConflictRoutesToFullMapValidation) {
+  EXPECT_TRUE(NeedsActiveFrozenRecoveryValidation(
+      0.20, 0., 0.30, false, false, false));
+}
+
+TEST(ActiveFrozenQualityGateTest, RecoveryEndpointUsesJointGeometry) {
+  EXPECT_TRUE(IsActiveFrozenRecoveryEndpointValid(0.68, 0.28, 0.65));
+  EXPECT_FALSE(IsActiveFrozenRecoveryEndpointValid(0.67, 0.10, 0.90));
+  EXPECT_FALSE(IsActiveFrozenRecoveryEndpointValid(0.90, 0.29, 0.90));
+  EXPECT_FALSE(IsActiveFrozenRecoveryEndpointValid(0.90, 0.10, 0.64));
+}
+
+TEST(ActiveFrozenQualityGateTest, HardCorrectionLimitIsAlwaysEnforced) {
+  EXPECT_TRUE(IsActiveFrozenCorrectionWithinHardLimits(
+      3.0, common::DegToRad(5.0)));
+  EXPECT_FALSE(IsActiveFrozenCorrectionWithinHardLimits(
+      3.01, common::DegToRad(1.0)));
+  EXPECT_FALSE(IsActiveFrozenCorrectionWithinHardLimits(
+      1.0, common::DegToRad(5.01)));
+}
+
+TEST(ActiveFrozenQualityGateTest, CorrectLargeCorrectionPassesSameFrameGate) {
+  const ActiveFrozenFullMapQuality current{0.682, 0.158, 0.90, true};
+  const ActiveFrozenFullMapQuality candidate{0.919, 0.075, 0.90, true};
+  std::string reject_reason;
+  EXPECT_TRUE(PassesActiveFrozenSameFrameFullMapGate(
+      current, candidate, &reject_reason));
+  EXPECT_TRUE(reject_reason.empty());
+}
+
+TEST(ActiveFrozenQualityGateTest, GoodCurrentPoseWithoutImprovementIsRejected) {
+  const ActiveFrozenFullMapQuality current{0.90, 0.08, 0.95, true};
+  const ActiveFrozenFullMapQuality candidate{0.95, 0.04, 0.95, true};
+  std::string reject_reason;
+  EXPECT_FALSE(PassesActiveFrozenSameFrameFullMapGate(
+      current, candidate, &reject_reason));
+  EXPECT_EQ(reject_reason, "candidate_full_map_not_improved");
+}
+
+TEST(ActiveFrozenQualityGateTest, BadCandidateFullMapIsRejected) {
+  const ActiveFrozenFullMapQuality current{0.60, 0.30, 0.90, true};
+  const ActiveFrozenFullMapQuality candidate{0.81, 0.15, 0.90, true};
+  std::string reject_reason;
+  EXPECT_FALSE(PassesActiveFrozenSameFrameFullMapGate(
+      current, candidate, &reject_reason));
+  EXPECT_EQ(reject_reason, "candidate_full_map_bad");
+}
+
+TEST(ActiveFrozenQualityGateTest, CurrentQualityMustComeFromSameFrame) {
+  const ActiveFrozenFullMapQuality unavailable_current{-1., -1., -1., false};
+  const ActiveFrozenFullMapQuality candidate{0.98, 0.02, 0.95, true};
+  std::string reject_reason;
+  EXPECT_FALSE(PassesActiveFrozenSameFrameFullMapGate(
+      unavailable_current, candidate, &reject_reason));
+  EXPECT_EQ(reject_reason, "current_full_map_unavailable");
+}
 
 class PoseGraph2DTest : public ::testing::Test {
  protected:
@@ -276,6 +349,52 @@ TEST_F(PoseGraph2DTest, FlirtSerializationGateKeepsNodeSetStable) {
             std::future_status::ready);
   add_finished.get();
   EXPECT_EQ(pose_graph_->GetTrajectoryNodes().SizeOfTrajectoryOrZero(0), 1u);
+}
+
+TEST_F(PoseGraph2DTest,
+       MapScanDistanceFieldKeepsTrajectoryLocalGridCoordinates) {
+  MoveRelative(transform::Rigid2d::Translation({10., 0.}));
+  MoveRelative(transform::Rigid2d::Identity());
+  pose_graph_->FinishTrajectory(0);
+  pose_graph_->RunFinalOptimization();
+
+  const auto submap_data = pose_graph_->GetSubmapData(SubmapId{0, 0});
+  ASSERT_NE(submap_data.submap, nullptr);
+  EXPECT_NEAR(submap_data.pose.translation().x(), 10., 1e-2);
+  EXPECT_NEAR(submap_data.submap->local_pose().translation().x(), 10., 1e-2);
+
+  const std::string cache_key = "pose_graph_2d_coordinate_frame_test";
+  const std::string cache_filename =
+      ::testing::TempDir() + "/pose_graph_2d_coordinate_frame.map_scan_df";
+  std::remove(cache_filename.c_str());
+  ASSERT_TRUE(pose_graph_->BuildAndSaveMapScanDistanceFieldCache(
+      cache_filename, cache_key));
+
+  map_scan_distance_field::CacheOptions cache_options;
+  cache_options.cache_key = cache_key;
+  cache_options.max_distance_m = 1.;
+  cache_options.occupied_probability_threshold = 0.55;
+  map_scan_distance_field::Field field;
+  map_scan_distance_field::CacheFormat format;
+  std::string error;
+  ASSERT_TRUE(map_scan_distance_field::LoadCache(
+      cache_filename, cache_options, &field, &format, &error))
+      << error;
+  EXPECT_EQ(format, map_scan_distance_field::CacheFormat::kV2);
+
+  const auto occupied_point = std::max_element(
+      point_cloud_.begin(), point_cloud_.end(),
+      [](const sensor::RangefinderPoint& lhs,
+         const sensor::RangefinderPoint& rhs) {
+        return lhs.position.squaredNorm() < rhs.position.squaredNorm();
+      });
+  ASSERT_NE(occupied_point, point_cloud_.end());
+  const auto sample = map_scan_distance_field::Sample(
+      field, occupied_point->position.x(), occupied_point->position.y());
+  EXPECT_TRUE(sample.in_bounds);
+  EXPECT_TRUE(sample.known);
+  EXPECT_LE(sample.distance_m, 0.1f);
+  std::remove(cache_filename.c_str());
 }
 
 TEST_F(PoseGraph2DTest, NoMovement) {
