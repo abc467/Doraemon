@@ -9,10 +9,7 @@ planners:
     type: "mbf_global_planner/ThetaStarPlanner"
 
 controllers:
-  # 当前调试阶段只加载 Standard MPPI；点对点与覆盖跟踪统一使用它。
-  # State 实例暂时停用。不要只删参数而保留注册，否则误调用时会加载默认值。
-  # - name: MPPI_State_Lattice_Controller
-  #   type: "local_planner/MPPIController"
+  # 点对点与覆盖路径统一由唯一的 Standard MPPI 实例跟踪。
   - name: MPPI_Standard_Controller
     type: "local_planner/MPPIController"
   - name: MyPlanner
@@ -115,6 +112,10 @@ SmacLatticePlanner:
   # 以当地切线接入；失败才扩大到80/120/160点。主路径只接受连续
   # 前进、无原地旋转的State前缀。每档预算与后缀共享180秒总期限。
   theta_prefix_candidate_max_planning_time: 20.0
+  # 精确实车航向与离散State首条前进原语允许的最大短程切入偏差。
+  # 该门槛只规范化图搜索起点，不放宽Theta/State接缝，也不替代
+  # 完整车身连续碰撞复核。0.30rad允许MPPI吸收约17度的平顺切入。
+  state_start_max_heading_error: 0.30
   # 接点必须同位置/同航向，且前后几何切线和局部曲率连续。0.20rad
   # 覆盖32航向格的单格量化误差，2.5rad/m对应0.4m原语曲率尺度。
   theta_prefix_join_max_heading_error: 0.20
@@ -257,7 +258,7 @@ MyPlanner:
 # MPPI 局部控制器（实例 1：全覆盖清扫）
 # =========================
 # 参数语义以 Nav2 MPPI 官方文档为基线；标有“本项目扩展”的参数由
-# ROS1/MBF 适配层实现。Standard 与 State 保持独立完整配置，不继承。
+# ROS1/MBF 适配层实现。工程只保留这一套生产 MPPI 配置。
 # 官方参数说明：https://docs.nav2.org/configuration/packages/configuring-mppic.html
 # 官方调参指南：https://github.com/ros-navigation/navigation2/tree/main/nav2_mppi_controller
 MPPI_Standard_Controller:
@@ -322,6 +323,10 @@ MPPI_Standard_Controller:
   # --- 诊断与最终轨迹复核 ---
   # 本项目扩展；true时每50次评分输出rollout/Critic/update平均耗时到rosout。
   timing_diagnostics: false
+  # 仅有订阅者（例如故障bag）时才计算并发布各Critic的实际增量、命中比例和
+  # 耗时；没有订阅者时不复制候选代价数组，不改变v9控制结果。
+  publish_critic_stats: true
+  critic_stats_publish_period: 10
   # 关闭候选轨迹Marker构造/发布，减少计算与通信负载；Critic统计不受影响。
   visualize: true
   TrajectoryVisualizer:
@@ -385,7 +390,7 @@ MPPI_Standard_Controller:
     cost_power: 1
     # 候选轨迹按自身累计行程与路径累计弧长配对，惩罚平均位置误差；
     # use_path_orientations=true时把航向误差也并入该距离项。
-    cost_weight: 8.5
+    cost_weight: 9.5
     # 在候选达到的最远路径段之前，中心点无效姿态比例超过该值（且无效点>2）时，
     # 整个PathAlign本周期退出，让Cost/PathFollow引导绕障。
     max_path_occupancy_ratio: 0.07
@@ -437,130 +442,3 @@ MPPI_Standard_Controller:
     # 惩罚候选全时域|wz|均值，抑制不必要旋转；本地实现用局部路径弧长与顶层
     # goal_tolerance比较，弧长<0.60m时退出，避免妨碍终点航向收敛。
     cost_weight: 2.0
-
-# =========================
-# MPPI 局部控制器（停用存档：State Lattice 点对点）
-# =========================
-# 当前未在controllers中注册，下面参数不会创建控制器实例；保留用于后续对照恢复。
-MPPI_State_Lattice_Controller:
-  # --- ROS1/MBF 适配层：里程计与到达判定（本项目扩展） ---
-  odom_topic: /odom
-  # 只作用于整条State路径的最终目标。外层MBF/Executor仍独立复核任务目标。
-  goal_tolerance: 0.50
-  angle_tolerance: 0.40
-  trans_stopped_velocity: 0.02
-  rot_stopped_velocity: 0.03
-  goal_stopped_time: 0.30
-  speed_limit_topic: "/coverage_executor/speed_limit_scale"
-
-  # --- 官方 MPPI：预测模型与采样 ---
-  motion_model: "DiffDrive"
-  controller_frequency: 10.0
-  time_steps: 60              # 预测时域 = 60 x 0.10 = 6.0 s
-  model_dt: 0.10
-  batch_size: 1800
-  iteration_count: 1
-
-  vx_std: 0.15
-  vy_std: 0.0
-  wz_std: 0.35
-
-  vx_min: 0.0
-  vx_max: 0.38
-  vy_max: 0.0
-  wz_max: 0.80
-  ax_max: 3.0
-  ax_min: -0.6
-  az_max: 1.0
-
-  temperature: 0.30
-  gamma: 0.015
-  open_loop: false
-  regenerate_noises: false
-  clamp_raw_controls: false
-  model_delay_vx: 0.0
-  model_delay_vy: 0.0
-  model_delay_wz: 0.0
-  sgf_order: 2
-  retry_attempt_limit: 2
-
-  # --- 官方 PathHandler ---
-  prune_distance: 2.50
-  max_robot_pose_search_dist: 3.00
-  transform_tolerance: 0.25
-
-  # --- 诊断与最终轨迹复核 ---
-  timing_diagnostics: false
-  publish_critic_stats: true
-  critic_stats_publish_period: 10
-  visualize: false
-  # visualize=false时使用默认降采样值；需要调试时打开即可。
-  TrajectoryVisualizer:
-    trajectory_step: 5
-    time_step: 3
-  TrajectoryValidator:
-    enabled: false
-    plugin: "mppi::DefaultOptimalTrajectoryValidator"
-    maximum_corner_motion: 0.025
-
-  # State路径已由全局规划器按前进语义生成，因此不再叠加
-  # PreferForwardCritic；也不使用TwirlingCritic压制必要的路径转向。
-  critics: ["ConstraintCritic", "CostCritic", "GoalAngleCritic", "GoalCritic",
-            "PathAlignCritic", "PathAngleCritic", "PathFollowCritic"]
-
-  ConstraintCritic:
-    enabled: true
-    cost_power: 1
-    cost_weight: 5.0
-
-  CostCritic:
-    enabled: true
-    allow_unknown: false
-    cost_power: 1
-    cost_weight: 10.0
-    critical_cost: 300.0
-    consider_footprint: true
-    collision_cost: 1000000.0
-    near_goal_distance: 0.10
-    trajectory_point_step: 1
-    parallel_threads: 10
-
-  GoalAngleCritic:
-    enabled: true
-    cost_power: 1
-    cost_weight: 8.0
-    threshold_to_consider: 0.80
-
-  GoalCritic:
-    enabled: true
-    cost_power: 1
-    cost_weight: 4.0
-    threshold_to_consider: 0.60
-
-  PathAlignCritic:
-    enabled: true
-    cost_power: 1
-    cost_weight: 10.0
-    max_path_occupancy_ratio: 0.03
-    offset_from_furthest: 6
-    trajectory_point_step: 4
-    threshold_to_consider: 0.025
-    # 仅做位置对齐；动态避障时允许临时偏航。
-    use_path_orientations: false
-    # 与PathFollow共享同一份完整车体路径有效性缓存。
-
-  PathAngleCritic:
-    enabled: true
-    cost_power: 1
-    cost_weight: 2.5
-    offset_from_furthest: 8
-    threshold_to_consider: 0.025
-    max_angle_to_furthest: 0.65
-    mode: 2
-
-  PathFollowCritic:
-    enabled: true
-    cost_power: 1
-    cost_weight: 5.0
-    offset_from_furthest: 8
-    threshold_to_consider: 0.025

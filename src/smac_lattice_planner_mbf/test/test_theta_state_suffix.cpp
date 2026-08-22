@@ -376,6 +376,60 @@ TEST(ThetaStateSuffixCanonicalStart, DoesNotHideARealMisalignedStartSeed)
   EXPECT_FALSE(containsContinuousForwardOnly(path, reason, 1e-4, 1e-6, 0.20));
 }
 
+TEST(ThetaStateSuffixCanonicalStart, ConvertsObservedBlock7SeedIntoForwardDeparture)
+{
+  using smac_lattice_planner_mbf::theta_state_suffix::
+    canonicalizeInitialLatticeMotion;
+  using smac_lattice_planner_mbf::theta_state_suffix::containsContinuousForwardOnly;
+  constexpr double kExactStartYaw = 1.7374455913685833;
+  constexpr double kSeedYaw = M_PI_2;
+  constexpr double kFirstMotionBearing = 1.5094272504807273;
+  PosePath strict_path{
+    makePose(0.0, 0.0, kExactStartYaw),
+    makePose(8.531822600397195e-7, 0.0, kSeedYaw),
+    makePose(
+      0.05 * std::cos(kFirstMotionBearing),
+      0.05 * std::sin(kFirstMotionBearing), kSeedYaw),
+    makePose(
+      0.10 * std::cos(kFirstMotionBearing),
+      0.10 * std::sin(kFirstMotionBearing), kSeedYaw)};
+
+  // The former 0.20 rad join threshold was incorrectly reused at the exact
+  // robot start and left the graph-only seed as an apparent in-place turn.
+  EXPECT_EQ(canonicalizeInitialLatticeMotion(
+      strict_path, 0.30, 0.20, 1e-4, 0.02), 0u);
+  std::string reason;
+  EXPECT_FALSE(containsContinuousForwardOnly(
+      strict_path, reason, 1e-4, 1e-6, 0.20));
+
+  PosePath executable_path = strict_path;
+  EXPECT_EQ(canonicalizeInitialLatticeMotion(
+      executable_path, 0.30, 0.30, 1e-4, 0.02), 1u);
+  ASSERT_EQ(executable_path.size(), 3u);
+  EXPECT_TRUE(containsContinuousForwardOnly(
+      executable_path, reason, 1e-4, 1e-6, 0.30)) << reason;
+}
+
+TEST(ThetaStateSuffixHeadingBins, UsesActualNonuniformDirectionalHalfCell)
+{
+  using smac_lattice_planner_mbf::theta_state_suffix::
+    directionalHeadingResidualLimit;
+  const std::vector<float> headings{
+    1.3258176636680326f,
+    1.5707963267948966f,
+    1.8157749899217608f};
+  constexpr double kRequestedYaw = 1.68370370962443;
+  const double residual = std::abs(angles::shortest_angular_distance(
+      static_cast<double>(headings[1]), kRequestedYaw));
+  const double limit = directionalHeadingResidualLimit(
+    headings, 1u, kRequestedYaw, 0.002);
+
+  EXPECT_NEAR(residual, 0.11290738282953328, 1e-7);
+  EXPECT_NEAR(limit, 0.12448933156343211, 1e-7);
+  EXPECT_LT(residual, limit);
+  EXPECT_GT(residual, M_PI / 32.0 + 0.002);
+}
+
 TEST(ThetaStateSuffixDirection, RejectsReverseAndSidewaysTranslation)
 {
   using smac_lattice_planner_mbf::theta_state_suffix::containsOnlyForwardOrRotation;

@@ -106,6 +106,7 @@ private:
   bool theta_reference_smoothing_enabled_{true};
   double theta_suffix_candidate_max_planning_time_{60.0};
   double theta_prefix_candidate_max_planning_time_{20.0};
+  double state_start_max_heading_error_{0.30};
   double theta_prefix_join_max_heading_error_{0.20};
   double theta_prefix_join_max_curvature_jump_{2.5};
   int theta_unsafe_segment_lookback_points_{30};

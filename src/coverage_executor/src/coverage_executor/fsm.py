@@ -172,6 +172,17 @@ class ExecutorFSM:
         retry_pause_recovery_on_exhausted: bool = True,
         retry_clear_costmaps: bool = False,
 
+        # A failed FOLLOW/CONNECT must not blindly retry the same footprint-
+        # invalid checkpoint.  Recovery first verifies the current footprint,
+        # then searches the saved block path for a nearby, stable global-
+        # costmap pose that satisfies the State planner's goal contract.
+        recovery_rejoin_enable: bool = True,
+        recovery_rejoin_back_search_m: float = 1.5,
+        recovery_rejoin_forward_search_m: float = 3.0,
+        recovery_rejoin_stable_span_m: float = 0.30,
+        recovery_rejoin_sample_step_m: float = 0.10,
+        recovery_rejoin_allow_inscribed_goal: bool = False,
+
         # keep future unknown kwargs from crashing
         **_ignored,
     ):
@@ -294,6 +305,12 @@ class ExecutorFSM:
         self.follow_retry_reconnect_on_fail = bool(follow_retry_reconnect_on_fail)
         self.retry_pause_recovery_on_exhausted = bool(retry_pause_recovery_on_exhausted)
         self.retry_clear_costmaps = bool(retry_clear_costmaps)
+        self.recovery_rejoin_enable = bool(recovery_rejoin_enable)
+        self.recovery_rejoin_back_search_m = max(0.0, float(recovery_rejoin_back_search_m))
+        self.recovery_rejoin_forward_search_m = max(0.0, float(recovery_rejoin_forward_search_m))
+        self.recovery_rejoin_stable_span_m = max(0.0, float(recovery_rejoin_stable_span_m))
+        self.recovery_rejoin_sample_step_m = max(0.02, float(recovery_rejoin_sample_step_m))
+        self.recovery_rejoin_allow_inscribed_goal = bool(recovery_rejoin_allow_inscribed_goal)
 
         # configure cleaning interlock (last safety net; thresholds are meant to be conservative)
         try:
@@ -3048,6 +3065,168 @@ class ExecutorFSM:
 
         return {"cut_path_xyyaw": path[cut_idx:], "cut_start_idx": cut_idx, "cut_start_s": float(follow_s), "need_connect": False}
 
+    def _prepare_safe_rejoin(self, blk: LoadedBlock, anchor_idx: int) -> Dict[str, Any]:
+        """Resolve a footprint-valid block pose for post-failure reconnect.
+
+        This is deliberately a recovery-only operation.  Normal block starts
+        keep their planned entry point.  After a controller/planner failure we
+        first verify that the *current* complete footprint is not in a hard
+        collision.  If it is, autonomous motion is stopped because no State
+        plan starting from that pose has a verified escape direction.
+
+        The reconnect goal is stricter than ordinary MPPI trajectory scoring:
+        by default it must be FREE (not merely INSCRIBED) on MBF's global
+        costmap, matching the State planner goal-validity contract.  A short
+        stable arc-length neighbourhood is checked so a one-cell free island
+        cannot become the next reconnect target.
+        """
+        path = list(getattr(blk, "path_xyyaw", None) or [])
+        if len(path) < 2:
+            return {
+                "ok": False,
+                "code": "RECOVERY_REJOIN_EMPTY_PATH",
+                "reason": "block path has fewer than two poses",
+            }
+
+        checker = getattr(self.mbf, "check_global_pose", None)
+        if checker is None:
+            return {
+                "ok": False,
+                "code": "RECOVERY_POSE_CHECK_UNAVAILABLE",
+                "reason": "MBF adapter has no complete-footprint pose checker",
+            }
+
+        current_ok, current_state, current_cost, current_error = checker(
+            None,
+            current_pose=True,
+        )
+        if not current_ok:
+            return {
+                "ok": False,
+                "code": "RECOVERY_POSE_CHECK_UNAVAILABLE",
+                "reason": "current footprint check failed: %s" % str(current_error or "unknown"),
+            }
+        if int(current_state) >= 2:
+            return {
+                "ok": False,
+                "code": "RECOVERY_CURRENT_POSE_UNSAFE",
+                "reason": "current footprint state=%d cost=%d" % (
+                    int(current_state),
+                    int(current_cost),
+                ),
+            }
+
+        xy = [(float(p[0]), float(p[1])) for p in path]
+        arclen = build_arclen(xy)
+        total_s = float(arclen[-1]) if arclen else 0.0
+        anchor_idx = max(0, min(int(anchor_idx), len(path) - 1))
+        anchor_s = float(arclen[anchor_idx])
+        sample_step = float(self.recovery_rejoin_sample_step_m)
+        max_back = float(self.recovery_rejoin_back_search_m)
+        max_forward = float(self.recovery_rejoin_forward_search_m)
+        stable_half = 0.5 * float(self.recovery_rejoin_stable_span_m)
+        max_goal_state = 1 if self.recovery_rejoin_allow_inscribed_goal else 0
+
+        # Nearest-first and no-forward-skip-first: for equal displacement the
+        # earlier path pose is tried before the later one.  This preserves
+        # coverage whenever a safe backtracked target exists.
+        candidate_s = [anchor_s]
+        steps = int(math.ceil(max(max_back, max_forward) / sample_step))
+        for step in range(1, steps + 1):
+            delta = float(step) * sample_step
+            if delta <= max_back + 1e-9:
+                candidate_s.append(max(0.0, anchor_s - delta))
+            if delta <= max_forward + 1e-9:
+                candidate_s.append(min(total_s, anchor_s + delta))
+
+        pose_state_cache: Dict[int, Tuple[bool, int, int, str]] = {}
+
+        def check_idx(index: int) -> Tuple[bool, int, int, str]:
+            index = max(0, min(int(index), len(path) - 1))
+            if index not in pose_state_cache:
+                px, py, pyaw = path[index]
+                # Cost checking is against the latest global costmap snapshot;
+                # stamp zero also keeps this helper deterministic in tests.
+                pose = make_pose(
+                    self.frame_id,
+                    float(px),
+                    float(py),
+                    float(pyaw),
+                    stamp=rospy.Time(0),
+                )
+                pose_state_cache[index] = checker(pose, current_pose=False)
+            return pose_state_cache[index]
+
+        seen_candidates = set()
+        for requested_s in candidate_s:
+            candidate_idx = int(index_from_s(arclen, requested_s))
+            candidate_idx = max(0, min(candidate_idx, len(path) - 1))
+            if candidate_idx in seen_candidates:
+                continue
+            seen_candidates.add(candidate_idx)
+
+            stable_indices = {candidate_idx}
+            if stable_half > 1e-6:
+                stable_indices.add(int(index_from_s(arclen, max(0.0, arclen[candidate_idx] - stable_half))))
+                stable_indices.add(int(index_from_s(arclen, min(total_s, arclen[candidate_idx] + stable_half))))
+
+            candidate_valid = True
+            candidate_state = -1
+            candidate_cost = 0
+            for stable_idx in sorted(stable_indices):
+                service_ok, state, cost, error = check_idx(stable_idx)
+                if not service_ok:
+                    return {
+                        "ok": False,
+                        "code": "RECOVERY_POSE_CHECK_UNAVAILABLE",
+                        "reason": "target footprint check failed at idx=%d: %s" % (
+                            int(stable_idx),
+                            str(error or "unknown"),
+                        ),
+                    }
+                if stable_idx == candidate_idx:
+                    candidate_state = int(state)
+                    candidate_cost = int(cost)
+                if int(state) > max_goal_state:
+                    candidate_valid = False
+                    break
+
+            if not candidate_valid:
+                continue
+
+            selected_s = float(arclen[candidate_idx])
+            rospy.logwarn(
+                "[RECOVERY_REJOIN] block=%d anchor_idx=%d anchor_s=%.2f -> "
+                "selected_idx=%d selected_s=%.2f delta_s=%.2f state=%d cost=%d checked=%d",
+                int(blk.block_id),
+                int(anchor_idx),
+                anchor_s,
+                int(candidate_idx),
+                selected_s,
+                selected_s - anchor_s,
+                candidate_state,
+                candidate_cost,
+                len(pose_state_cache),
+            )
+            return {
+                "ok": True,
+                "cut_path_xyyaw": path[candidate_idx:],
+                "cut_start_idx": int(candidate_idx),
+                "cut_start_s": selected_s,
+                "state": candidate_state,
+                "cost": candidate_cost,
+            }
+
+        return {
+            "ok": False,
+            "code": "RECOVERY_REJOIN_NOT_FOUND",
+            "reason": (
+                "no stable footprint-valid goal around idx=%d "
+                "(back=%.2fm forward=%.2fm checked=%d)"
+                % (anchor_idx, max_back, max_forward, len(pose_state_cache))
+            ),
+        }
+
     # ---------- block execution ----------
     def _enter_follow_cleaning(self):
         """Enter FOLLOW: enable cleaning according to current clean_mode."""
@@ -3171,6 +3350,8 @@ class ExecutorFSM:
         cur_cut_start_s = float(self._block_cut_s0 or 0.0)
         cur_force_connect = force_connect
         cur_transit = bool(transit)
+        recovery_rejoin_pending = False
+        recovery_rejoin_context = ""
 
         while not rospy.is_shutdown():
             if not cur_cut_path:
@@ -3182,6 +3363,48 @@ class ExecutorFSM:
                     data={"block_id": int(blk.block_id)},
                 )
                 return False
+
+            if recovery_rejoin_pending and self.recovery_rejoin_enable:
+                rejoin = self._prepare_safe_rejoin(blk, cur_cut_start_idx)
+                recovery_rejoin_pending = False
+                if not bool(rejoin.get("ok", False)):
+                    code = str(rejoin.get("code", "RECOVERY_REJOIN_FAILED"))
+                    reason = str(rejoin.get("reason", "unknown"))
+                    msg = (
+                        "block=%d recovery rejoin rejected after %s: %s"
+                        % (int(blk.block_id), recovery_rejoin_context or "navigation failure", reason)
+                    )
+                    rospy.logerr("[EXEC] %s", msg)
+                    self._enter_paused_recovery(
+                        zone_id,
+                        plan.plan_id,
+                        code=code,
+                        msg=msg,
+                        data={
+                            "block_id": int(blk.block_id),
+                            "anchor_idx": int(cur_cut_start_idx),
+                            "context": str(recovery_rejoin_context),
+                            "reason": reason,
+                        },
+                    )
+                    return False
+
+                old_idx = int(cur_cut_start_idx)
+                cur_cut_path = list(rejoin["cut_path_xyyaw"])
+                cur_cut_start_idx = int(rejoin["cut_start_idx"])
+                cur_cut_start_s = float(rejoin["cut_start_s"])
+                cur_force_connect = True
+                cur_transit = True
+                self._emit(
+                    "RECOVERY_REJOIN:block=%d context=%s old_idx=%d new_idx=%d new_s=%.3f"
+                    % (
+                        int(blk.block_id),
+                        recovery_rejoin_context or "navigation_failure",
+                        old_idx,
+                        cur_cut_start_idx,
+                        cur_cut_start_s,
+                    )
+                )
 
             self._block_cut_idx0 = int(cur_cut_start_idx)
             self._block_cut_s0 = float(cur_cut_start_s)
@@ -3331,6 +3554,8 @@ class ExecutorFSM:
                             self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
                             return False
 
+                        recovery_rejoin_pending = True
+                        recovery_rejoin_context = "connect_failure:%s" % connect_reason
                         cur_force_connect = True
                         cur_transit = True
                         continue
@@ -3526,6 +3751,8 @@ class ExecutorFSM:
                         cur_force_connect = True if bool(res.get("need_connect", False)) else False
 
                     cur_transit = True
+                    recovery_rejoin_pending = True
+                    recovery_rejoin_context = "follow_failure:%s" % follow_reason
                     continue
 
                 if self.retry_pause_recovery_on_exhausted:

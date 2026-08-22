@@ -420,7 +420,17 @@ bool validateContinuousPath(
   float previous_y = exact_start_y;
   double previous_yaw = exact_start_yaw;
   std::size_t forward_segment = 0u;
-  for (auto iterator = reverse_path.rbegin(); iterator != reverse_path.rend(); ++iterator) {
+  auto iterator = reverse_path.rbegin();
+  while (iterator != reverse_path.rend() &&
+    std::hypot(iterator->x - exact_start_x, iterator->y - exact_start_y) <= 1e-4)
+  {
+    ++iterator;
+  }
+  if (iterator == reverse_path.rend()) {
+    reason = "candidate contains no translated motion";
+    return false;
+  }
+  for (; iterator != reverse_path.rend(); ++iterator) {
     if (deadline != nullptr && SteadyClock::now() >= *deadline) {
       reason = "continuous candidate proof exceeded its deadline";
       return false;
@@ -597,6 +607,7 @@ int main(int argc, char ** argv)
   bool theta_reference_smoothing_enabled = true;
   double theta_suffix_candidate_max_planning_time = 60.0;
   double theta_prefix_candidate_max_planning_time = 20.0;
+  double state_start_max_heading_error = 0.30;
   double theta_prefix_join_max_heading_error = 0.20;
   double theta_prefix_join_max_curvature_jump = 2.5;
   int theta_unsafe_segment_lookback_points = 30;
@@ -721,6 +732,10 @@ int main(int argc, char ** argv)
     "theta_prefix_candidate_max_planning_time",
     theta_prefix_candidate_max_planning_time,
     theta_prefix_candidate_max_planning_time);
+  private_nh.param(
+    "state_start_max_heading_error",
+    state_start_max_heading_error,
+    state_start_max_heading_error);
   private_nh.param(
     "theta_prefix_join_max_heading_error",
     theta_prefix_join_max_heading_error,
@@ -872,8 +887,6 @@ int main(int argc, char ** argv)
       nav2_smac_planner::LatticeMotionTable::getLatticeMetadata(lattice_filepath);
     const double max_lattice_position_residual =
       std::sqrt(2.0) * costmap->getResolution() + 1e-3;
-    const double max_nearest_bin_yaw_residual =
-      M_PI / static_cast<double>(metadata.number_of_headings) + 0.002;
     start_heading_seed_span = std::max(
       0, std::min(
         start_heading_seed_span,
@@ -899,6 +912,10 @@ int main(int argc, char ** argv)
     theta_reference_spacing = std::max(0.005, std::abs(theta_reference_spacing));
     theta_suffix_candidate_max_planning_time = std::max(
       0.05, theta_suffix_candidate_max_planning_time);
+    theta_prefix_candidate_max_planning_time = std::max(
+      0.05, theta_prefix_candidate_max_planning_time);
+    state_start_max_heading_error = std::clamp(
+      std::abs(state_start_max_heading_error), 0.01, M_PI_2);
     theta_unsafe_segment_lookback_points = std::max(
       1, theta_unsafe_segment_lookback_points);
     diagnostic_min_suffix_cut_points = std::max(0, diagnostic_min_suffix_cut_points);
@@ -984,7 +1001,7 @@ int main(int argc, char ** argv)
         return smac_lattice_planner_mbf::theta_state_suffix::
           canonicalizeInitialLatticeMotion(
             state_path, largest_seed_quantization,
-            theta_prefix_join_max_heading_error, 1e-4,
+            state_start_max_heading_error, 1e-4,
             0.1 * bin_width + 1e-3);
       };
 
@@ -1172,6 +1189,13 @@ int main(int argc, char ** argv)
               reason = "segment start is outside the costmap";
               return false;
             }
+            if (checker.inCollisionContinuous(
+                map_x, map_y, exact_yaw,
+                map_x, map_y, exact_yaw, allow_unknown))
+            {
+              reason = "exact segment-start footprint is in collision";
+              return false;
+            }
             const unsigned int start_bin =
               planner.getContext()->motion_table.getClosestAngularBin(exact_yaw);
             seeds.reserve(static_cast<std::size_t>(1 + 2 * start_heading_seed_span));
@@ -1188,7 +1212,7 @@ int main(int argc, char ** argv)
                 const double candidate_yaw =
                   planner.getContext()->motion_table.getAngleFromBin(candidate_bin);
                 if (checker.inCollisionContinuous(
-                    map_x, map_y, exact_yaw,
+                    map_x, map_y, candidate_yaw,
                     map_x, map_y, candidate_yaw, allow_unknown))
                 {
                   continue;
@@ -1323,16 +1347,32 @@ int main(int argc, char ** argv)
               const HeadingSeeds * active_start_bins = &segment_start_bins;
               if (search_goal.continuous_forward_only) {
                 planner.setTransitionValidator(
-                  [](const nav2_smac_planner::NodeLattice::Coordinates & from,
+                  [segment_start_x, segment_start_y, segment_start_yaw,
+                  state_start_max_heading_error](
+                    const nav2_smac_planner::NodeLattice::Coordinates & from,
                     const nav2_smac_planner::NodeLattice::Coordinates & to) {
-                    return std::hypot(to.x - from.x, to.y - from.y) > 1e-4f;
+                    const double dx = to.x - from.x;
+                    const double dy = to.y - from.y;
+                    if (std::hypot(dx, dy) <= 1e-4) {
+                      return false;
+                    }
+                    if (std::hypot(
+                        from.x - segment_start_x,
+                        from.y - segment_start_y) <= 1e-4)
+                    {
+                      const double departure = std::atan2(dy, dx);
+                      return std::abs(angles::shortest_angular_distance(
+                          segment_start_yaw, departure)) <=
+                             state_start_max_heading_error + 1e-9;
+                    }
+                    return true;
                   });
                 for (const auto & seed : segment_start_bins) {
                   const double seed_yaw =
                     planner.getContext()->motion_table.getAngleFromBin(seed.first);
                   const double seed_error = std::abs(
                     angles::shortest_angular_distance(segment_start_yaw, seed_yaw));
-                  if (seed_error <= theta_prefix_join_max_heading_error + 1e-9) {
+                  if (seed_error <= state_start_max_heading_error + 1e-9) {
                     admissible_start_bins.push_back(seed);
                   }
                 }
@@ -1535,9 +1575,13 @@ int main(int argc, char ** argv)
               const double terminal_yaw_error = std::abs(
                 angles::shortest_angular_distance(
                   tf::getYaw(state_prefix.back().pose.orientation), join_yaw));
+              const double terminal_yaw_limit =
+                smac_lattice_planner_mbf::theta_state_suffix::
+                directionalHeadingResidualLimit(
+                  metadata.heading_angles, join_bin, join_yaw, 0.002);
               if (terminal_position_error >
                 std::sqrt(2.0) * costmap->getResolution() + 1e-3 ||
-                terminal_yaw_error > M_PI / metadata.number_of_headings + 0.002)
+                terminal_yaw_error > terminal_yaw_limit)
               {
                 continue;
               }
@@ -1547,7 +1591,7 @@ int main(int argc, char ** argv)
               if (!smac_lattice_planner_mbf::theta_state_suffix::
                 containsContinuousForwardOnly(
                   state_prefix, prefix_reason, 1e-4, 1e-6,
-                  theta_prefix_join_max_heading_error) ||
+                  state_start_max_heading_error) ||
                 !smac_lattice_planner_mbf::theta_state_suffix::
                 joinIsPositionHeadingCurvatureContinuous(
                   state_prefix, prefix_selection.theta_from_join, prefix_reason,
@@ -1571,7 +1615,7 @@ int main(int argc, char ** argv)
                 (!smac_lattice_planner_mbf::theta_state_suffix::
                 containsContinuousForwardOnly(
                   state_prefix, prefix_reason, 1e-4, 1e-6,
-                  theta_prefix_join_max_heading_error) ||
+                  state_start_max_heading_error) ||
                 !smac_lattice_planner_mbf::theta_state_suffix::
                 joinIsPositionHeadingCurvatureContinuous(
                   state_prefix, prefix_selection.theta_from_join, prefix_reason,
@@ -1869,6 +1913,10 @@ int main(int argc, char ** argv)
               angles::shortest_angular_distance(path.front().theta, next.entry_yaw);
             const double lattice_goal_yaw_error =
               std::abs(lattice_goal_signed_yaw_delta);
+            const double max_nearest_bin_yaw_residual =
+              smac_lattice_planner_mbf::theta_state_suffix::
+              directionalHeadingResidualLimit(
+                metadata.heading_angles, goal_bin, next.entry_yaw, 0.002);
             const std::string terminal_append_kind = "none";
             const std::string mppi_terminal_phase = "non_rotation";
 
@@ -1910,7 +1958,7 @@ int main(int argc, char ** argv)
             if (!smac_lattice_planner_mbf::theta_state_suffix::
               containsContinuousForwardOnly(
                 state_suffix, state_contract_reason, 1e-4, 1e-6,
-                theta_prefix_join_max_heading_error) ||
+                state_start_max_heading_error) ||
               !smac_lattice_planner_mbf::theta_state_suffix::
               terminalAvoidsStationaryYawRepair(state_suffix, state_contract_reason))
             {
@@ -2248,7 +2296,7 @@ int main(int argc, char ** argv)
                 smac_lattice_planner_mbf::theta_state_suffix::
                 containsContinuousForwardOnly(
                   fallback_pose_path, state_contract_reason, 1e-4, 1e-6,
-                  theta_prefix_join_max_heading_error) &&
+                  state_start_max_heading_error) &&
                 smac_lattice_planner_mbf::theta_state_suffix::
                 terminalAvoidsStationaryYawRepair(
                   fallback_pose_path, state_contract_reason);
@@ -2264,6 +2312,14 @@ int main(int argc, char ** argv)
                 angles::shortest_angular_distance(
                   tf::getYaw(fallback_pose_path.back().pose.orientation),
                   next.entry_yaw));
+              const unsigned int fallback_terminal_bin =
+                planner.getContext()->motion_table.getClosestAngularBin(
+                tf::getYaw(fallback_pose_path.back().pose.orientation));
+              const double max_nearest_bin_yaw_residual =
+                smac_lattice_planner_mbf::theta_state_suffix::
+                directionalHeadingResidualLimit(
+                  metadata.heading_angles, fallback_terminal_bin,
+                  next.entry_yaw, 0.002);
               continuously_safe =
                 terminal_position_error <= max_lattice_position_residual &&
                 terminal_yaw_error <= 0.20 &&

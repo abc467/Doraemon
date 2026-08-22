@@ -23,6 +23,7 @@ from cleanrobot_app_msgs.srv import (
 from coverage_msgs.msg import TaskState as TaskStateMsg
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import String
 
 
 def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
@@ -163,6 +164,19 @@ class SlamRuntimeNodeWiring:
             backend._runtime_context.runtime_param("mapping_session_id"),
             "",
         )
+        backend._audit_event_topic_name = str(
+            rospy_module.get_param(
+                "~slam_audit_event_topic_name",
+                "/clean_robot_server/slam_audit_events",
+            )
+            or "/clean_robot_server/slam_audit_events"
+        ).strip()
+        backend._audit_event_pub = rospy_module.Publisher(
+            backend._audit_event_topic_name,
+            String,
+            queue_size=100,
+            latch=False,
+        )
         rospy_module.Subscriber(backend.map_topic, OccupancyGrid, self.on_map, queue_size=2)
         rospy_module.Subscriber(backend.tracked_pose_topic, PoseStamped, self.on_tracked_pose, queue_size=20)
         backend._initial_pose_pub = rospy_module.Publisher(
@@ -195,11 +209,12 @@ class SlamRuntimeNodeWiring:
         if getattr(backend, "_runtime_adapter", None) is not None:
             backend._runtime_adapter.reconcile_pending_map_switch(robot_id=backend.robot_id)
         rospy_module.loginfo(
-            "[slam_runtime_manager] ready app_operate=%s app_submit_job=%s app_get_job=%s job_state=%s runtime_ns=%s map_topic=%s tracked_pose_topic=%s",
+            "[slam_runtime_manager] ready app_operate=%s app_submit_job=%s app_get_job=%s job_state=%s audit=%s runtime_ns=%s map_topic=%s tracked_pose_topic=%s",
             backend.app_service_name,
             backend.app_submit_job_service_name,
             backend.app_get_job_service_name,
             backend.job_state_topic_name,
+            backend._audit_event_topic_name,
             backend.runtime_ns,
             backend.map_topic,
             backend.tracked_pose_topic,

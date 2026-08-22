@@ -11,7 +11,7 @@ find_package(catkin REQUIRED COMPONENTS
   nav_core
   nav_msgs
   roscpp
-  roscpp
+  std_msgs
   tf
 )
 find_package(Eigen3 REQUIRED)
@@ -88,7 +88,12 @@ install(DIRECTORY include/
 
 ######TEST######
 
-# add_executable(tf_test
-#   test/tf_test.cpp
-# )
-# target_link_libraries(tf_test ${catkin_LIBRARIES})
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_optimizer_retry_policy
+    test/optimizer_retry_policy_test.cpp)
+  if(TARGET test_optimizer_retry_policy)
+    target_link_libraries(test_optimizer_retry_policy
+      mppi_controller_lib
+      ${catkin_LIBRARIES})
+  endif()
+endif()

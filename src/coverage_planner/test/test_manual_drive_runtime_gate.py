@@ -250,9 +250,11 @@ if assert_no_action_runtime_isolated; then exit 33; fi
 
         common = read_repo_file("scripts/runtime_common.sh")
         self.assertIn("--exclude-manual-drive", common)
+        self.assertIn("--exclude-slam", common)
         checker = read_repo_file("src/coverage_planner/tools/check_ros_contracts.py")
         self.assertIn('local_contracts.pop("manual_drive_command_app", None)', checker)
         self.assertIn('local_contracts.pop("get_manual_drive_status_app", None)', checker)
+        self.assertIn("SLAM_CONTRACT_NAMES", checker)
 
 
 if __name__ == "__main__":

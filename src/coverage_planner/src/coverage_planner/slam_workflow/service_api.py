@@ -31,6 +31,10 @@ from coverage_planner.slam_workflow.api import (
     normalize_map_name,
 )
 from coverage_planner.slam_workflow.executor import LocalizationRequest
+from coverage_planner.slam_workflow.job_events import (
+    decode_submit_audit_description,
+    infer_submit_source,
+)
 
 
 class SlamRuntimeServiceController:
@@ -489,6 +493,10 @@ class SlamRuntimeServiceController:
                 job=job,
             )
         requested_map_name = save_map_name if operation == int(req.save_mapping) and save_map_name else map_name
+        encoded_description = str(req.description or "")
+        submit_source, clean_description = decode_submit_audit_description(encoded_description)
+        if not submit_source:
+            submit_source = infer_submit_source(clean_description)
 
         def make_job():
             return job_state.make_job_record(
@@ -497,7 +505,7 @@ class SlamRuntimeServiceController:
                 map_name=requested_map_name,
                 map_revision_id=map_revision_id,
                 set_active=bool(getattr(req, "set_active_on_save", False) or req.set_active),
-                description=str(req.description or ""),
+                description=clean_description,
                 frame_id=str(getattr(req, "frame_id", "map") or "map"),
                 has_initial_pose=bool(getattr(req, "has_initial_pose", False)),
                 initial_pose_x=float(getattr(req, "initial_pose_x", 0.0) or 0.0),
@@ -508,6 +516,7 @@ class SlamRuntimeServiceController:
                     getattr(req, "switch_to_localization_after_save", False)
                 ),
                 relocalize_after_switch=bool(getattr(req, "relocalize_after_switch", False)),
+                submit_source=submit_source,
             )
 
         snapshot, active = job_state.try_reserve_and_publish_job(
@@ -526,6 +535,10 @@ class SlamRuntimeServiceController:
                 map_name=map_name,
                 job=active_msg,
             )
+
+        event_logger = getattr(backend, "_job_events", None)
+        if event_logger is not None:
+            event_logger.job_submitted(snapshot)
 
         worker = threading.Thread(
             target=backend._job_runner.run_job,

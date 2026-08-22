@@ -10,6 +10,7 @@ import rospy
 from cleanrobot_app_msgs.srv import SubmitSlamCommand
 
 from coverage_planner.slam_workflow.job_state import CartographerSlamJobController
+from coverage_planner.slam_workflow.job_events import encode_submit_audit_description
 from coverage_planner.slam_workflow.service_api import SlamRuntimeServiceController
 
 
@@ -115,6 +116,26 @@ def _backend():
 
 
 class SlamJobSubmissionAtomicTest(unittest.TestCase):
+    def test_runtime_extracts_source_marker_without_exposing_it_as_description(self):
+        backend, _token_writes = _backend()
+        controller = SlamRuntimeServiceController(backend)
+        request = _submit_request()
+        request.description = encode_submit_audit_description(
+            "slam_api_service",
+            "operator retry",
+        )
+
+        with mock.patch(
+            "coverage_planner.slam_workflow.job_state.rospy.get_param",
+            side_effect=lambda _name, default=None: default,
+        ):
+            response = controller.handle_submit_job_app(request)
+
+        self.assertTrue(response.accepted)
+        snapshot = backend._job_state.get_job_snapshot(response.job_id)
+        self.assertEqual(snapshot["submit_source"], "slam_api_service")
+        self.assertEqual(snapshot["description"], "operator retry")
+
     def test_two_concurrent_submits_accept_exactly_one_and_start_one_worker(self):
         backend, token_writes = _backend()
         controller = _BarrierServiceController(backend, threading.Barrier(2))
@@ -161,6 +182,8 @@ class SlamJobSubmissionAtomicTest(unittest.TestCase):
         self.assertEqual(rejected[0].error_code, "job_in_progress")
         self.assertEqual(rejected[0].job_id, accepted[0].job_id)
         self.assertEqual(len(make_job_calls), 1)
+        self.assertEqual(make_job_calls[0]["submit_source"], "direct_runtime_client")
+        self.assertEqual(make_job_calls[0]["description"], "atomic-submit-test")
         self.assertEqual(len(backend._ops.records), 1)
         self.assertEqual(len(backend._runtime_state.updates), 1)
         self.assertEqual(len(backend._job_state_pub.messages), 1)

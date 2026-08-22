@@ -159,6 +159,24 @@ std::size_t canonicalizeInitialLatticeMotion(
   double primitive_boundary_yaw_epsilon = 0.02);
 
 /**
+ * @brief Return the directional Voronoi half-cell around a lattice heading.
+ *
+ * State-Lattice heading tables are not necessarily uniformly spaced.  The
+ * admissible quantization residual therefore depends on both the selected bin
+ * and the side of that bin on which the requested yaw lies.  The returned
+ * value is half the angular gap to the neighboring heading on that side plus
+ * the supplied serialization margin.
+ *
+ * @throws std::invalid_argument for malformed headings, an invalid selected
+ * bin, or non-finite inputs.
+ */
+double directionalHeadingResidualLimit(
+  const std::vector<float> & heading_angles,
+  std::size_t selected_bin,
+  double requested_yaw,
+  double serialization_margin = 0.002);
+
+/**
  * @brief Make the measured start-to-Theta-tangent alignment an explicit
  * direction-encoded sequence of bounded same-position rotation edges.
  *

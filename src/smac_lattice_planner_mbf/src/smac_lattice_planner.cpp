@@ -195,6 +195,9 @@ void SmacLatticePlanner::initialize(
     "theta_prefix_candidate_max_planning_time",
     theta_prefix_candidate_max_planning_time_, 20.0);
   private_nh.param(
+    "state_start_max_heading_error",
+    state_start_max_heading_error_, 0.30);
+  private_nh.param(
     "theta_prefix_join_max_heading_error",
     theta_prefix_join_max_heading_error_, 0.20);
   private_nh.param(
@@ -306,6 +309,8 @@ void SmacLatticePlanner::initialize(
       0.05, theta_suffix_candidate_max_planning_time_);
     theta_prefix_candidate_max_planning_time_ = std::max(
       0.05, theta_prefix_candidate_max_planning_time_);
+    state_start_max_heading_error_ = std::clamp(
+      std::fabs(state_start_max_heading_error_), 0.01, M_PI_2);
     theta_prefix_join_max_heading_error_ = std::clamp(
       std::fabs(theta_prefix_join_max_heading_error_), 0.01, M_PI_2);
     theta_prefix_join_max_curvature_jump_ = std::max(
@@ -634,6 +639,13 @@ uint32_t SmacLatticePlanner::makePlan(
           const unsigned int nearest_bin =
             a_star_->getContext()->motion_table.getClosestAngularBin(exact_yaw);
           seeds.clear();
+          if (collision_checker_->inCollisionContinuous(
+              exact_x, exact_y, exact_yaw,
+              exact_x, exact_y, exact_yaw, allow_unknown_))
+          {
+            reason = "exact segment-start footprint is in collision";
+            return false;
+          }
           seeds.reserve(static_cast<std::size_t>(1 + 2 * start_heading_seed_span_));
           for (int radius = 0; radius <= start_heading_seed_span_; ++radius) {
             const int directions = radius == 0 ? 1 : 2;
@@ -646,8 +658,13 @@ uint32_t SmacLatticePlanner::makePlan(
               const auto candidate_bin = static_cast<unsigned int>(wrapped);
               const double candidate_yaw =
                 a_star_->getContext()->motion_table.getAngleFromBin(candidate_bin);
+              // A start bin is a graph representation, not a commanded
+              // in-place turn. Check both endpoint footprints independently;
+              // the canonical exact-start-to-first-motion edge is swept after
+              // backtracing. Sweeping exact_yaw -> candidate_yaw here would
+              // reject valid forward departures that never execute that turn.
               if (collision_checker_->inCollisionContinuous(
-                  exact_x, exact_y, exact_yaw,
+                  exact_x, exact_y, candidate_yaw,
                   exact_x, exact_y, candidate_yaw, allow_unknown_))
               {
                 continue;
@@ -803,9 +820,25 @@ uint32_t SmacLatticePlanner::makePlan(
             const HeadingSeeds * active_start_bins = &segment_start_bins;
             if (search_goal.continuous_forward_only) {
               a_star_->setTransitionValidator(
-                [](const nav2_smac_planner::NodeLattice::Coordinates & from,
+                [segment_start_x, segment_start_y, segment_start_yaw, this](
+                  const nav2_smac_planner::NodeLattice::Coordinates & from,
                   const nav2_smac_planner::NodeLattice::Coordinates & to) {
-                  return std::hypot(to.x - from.x, to.y - from.y) > 1e-4f;
+                  const double dx = to.x - from.x;
+                  const double dy = to.y - from.y;
+                  if (std::hypot(dx, dy) <= 1e-4) {
+                    return false;
+                  }
+                  // Only the first graph transition is compared with the
+                  // measured continuous yaw. Later primitives use their own
+                  // lattice headings. The converted short edge is still
+                  // continuously footprint-validated before publication.
+                  if (std::hypot(from.x - segment_start_x, from.y - segment_start_y) <= 1e-4) {
+                    const double departure = std::atan2(dy, dx);
+                    const double error = std::abs(angles::shortest_angular_distance(
+                        segment_start_yaw, departure));
+                    return error <= state_start_max_heading_error_ + 1e-9;
+                  }
+                  return true;
                 });
               // A graph start seed is not a physical motion, but selecting a
               // distant neighboring heading bin would become an implicit
@@ -818,7 +851,7 @@ uint32_t SmacLatticePlanner::makePlan(
                   a_star_->getContext()->motion_table.getAngleFromBin(seed.first);
                 const double seed_error = std::abs(
                   angles::shortest_angular_distance(segment_start_yaw, seed_yaw));
-                if (seed_error <= theta_prefix_join_max_heading_error_ + 1e-9) {
+                if (seed_error <= state_start_max_heading_error_ + 1e-9) {
                   admissible_start_bins.push_back(seed);
                 }
               }
@@ -924,7 +957,21 @@ uint32_t SmacLatticePlanner::makePlan(
           float previous_y = segment_start_y;
           double previous_yaw = segment_start_yaw;
           std::size_t segment = 0u;
-          for (auto iterator = candidate.rbegin(); iterator != candidate.rend(); ++iterator) {
+          auto iterator = candidate.rbegin();
+          // NodeLattice backtracing begins with one or more graph-only samples
+          // at the start coordinates. They are not physical rotations. Skip
+          // them and prove the canonical edge from the measured pose directly
+          // to the first translated primitive sample.
+          while (iterator != candidate.rend() &&
+            std::hypot(iterator->x - segment_start_x, iterator->y - segment_start_y) <= 1e-4)
+          {
+            ++iterator;
+          }
+          if (iterator == candidate.rend()) {
+            reason = "candidate contains no translated motion";
+            return false;
+          }
+          for (; iterator != candidate.rend(); ++iterator) {
             if (cancel_requested_.load()) {
               reason = "candidate validation canceled";
               return false;
@@ -994,7 +1041,7 @@ uint32_t SmacLatticePlanner::makePlan(
           // samples and is never removed by this operation.
           theta_state_suffix::canonicalizeInitialLatticeMotion(
             output, largest_seed_quantization,
-            theta_prefix_join_max_heading_error_, 1e-4,
+            state_start_max_heading_error_, 1e-4,
             0.1 * bin_width + 1e-3);
 
           return true;
@@ -1035,7 +1082,7 @@ uint32_t SmacLatticePlanner::makePlan(
           state_prefix.back() = std::move(canonical_join);
           if (!theta_state_suffix::containsContinuousForwardOnly(
               state_prefix, reason, 1e-4, 1e-6,
-              theta_prefix_join_max_heading_error_))
+              state_start_max_heading_error_))
           {
             return false;
           }
@@ -1298,7 +1345,7 @@ uint32_t SmacLatticePlanner::makePlan(
             if (maybeSmoothStatePath(state_prefix, prefix_deadline, prefix_mode)) {
               if (!theta_state_suffix::containsContinuousForwardOnly(
                   state_prefix, prefix_reason, 1e-4, 1e-6,
-                  theta_prefix_join_max_heading_error_) ||
+                  state_start_max_heading_error_) ||
                 !theta_state_suffix::joinIsPositionHeadingCurvatureContinuous(
                   state_prefix, prefix_selection.theta_from_join, prefix_reason,
                   1e-6, 1e-6, theta_prefix_join_max_heading_error_,
@@ -1550,7 +1597,7 @@ uint32_t SmacLatticePlanner::makePlan(
           std::string state_direction_reason;
           if (!theta_state_suffix::containsContinuousForwardOnly(
               state_suffix, state_direction_reason, 1e-4, 1e-6,
-              theta_prefix_join_max_heading_error_))
+              state_start_max_heading_error_))
           {
             ROS_WARN(
               "Theta/State suffix %s failed the continuous-forward contract: %s; "
@@ -1818,7 +1865,7 @@ uint32_t SmacLatticePlanner::makePlan(
         std::string direction_reason;
         if (!theta_state_suffix::containsContinuousForwardOnly(
             plan, direction_reason, 1e-4, 1e-6,
-            theta_prefix_join_max_heading_error_))
+            state_start_max_heading_error_))
         {
           plan.clear();
           message = "State Lattice A* path violates the continuous-forward contract: " +
@@ -1940,14 +1987,19 @@ uint32_t SmacLatticePlanner::makePlan(
       const double max_lattice_position_residual =
         std::sqrt(2.0) * planning_costmap_->getResolution() + 1e-3;
       constexpr double kRequestedYawTolerance = 0.20;
-      // Generated lattice headings and DB endpoint yaws are serialized at
-      // different precisions. Keep a 0.002 rad engineering margin above the
-      // ideal half-bin bound (pi / 32 ~= 0.098175). Together with the State
-      // MPPI 0.08 rad path-goal tolerance, the worst-case requested-goal yaw
-      // error remains below MBF's outer 0.20 rad acceptance threshold.
+      // Generated lattice headings and requested endpoint yaws are serialized
+      // at different precisions. State-Lattice heading tables are generally
+      // nonuniform, so pi / heading_count is not a valid nearest-bin bound.
+      // Use the actual neighboring heading on the requested side of the
+      // selected terminal bin, i.e. that bin's directional Voronoi half-cell.
       constexpr double kHeadingBinFloatEpsilon = 0.002;
+      const unsigned int terminal_heading_bin =
+        a_star_->getContext()->motion_table.getClosestAngularBin(
+        tf2::getYaw(plan.back().pose.orientation));
       const double max_nearest_bin_residual =
-        M_PI / static_cast<double>(heading_count) + kHeadingBinFloatEpsilon;
+        theta_state_suffix::directionalHeadingResidualLimit(
+        metadata_.heading_angles, terminal_heading_bin,
+        tf2::getYaw(goal.pose.orientation), kHeadingBinFloatEpsilon);
       if (end_distance > max_lattice_position_residual ||
         end_yaw_error > kRequestedYawTolerance ||
         end_yaw_error > max_nearest_bin_residual)

@@ -229,6 +229,11 @@ protected:
   double critics_time_total_ms_{0.0};
   double update_time_total_ms_{0.0};
 
+  // Number of failed, fully-scored batches in the current evalControl call.
+  // This must be per optimizer instance (not a function-static counter), since
+  // multiple controller instances may coexist in one process.
+  int retry_counter_{0};
+
   CriticData critics_data_ = {
     state_, generated_trajectories_, path_, goal_,
     costs_, settings_.model_dt, false, nullptr,

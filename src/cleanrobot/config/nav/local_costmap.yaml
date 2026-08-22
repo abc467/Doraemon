@@ -14,16 +14,15 @@ local_costmap:
   # static layer below turns the mapped free area into known free space; cells
   # outside the loaded map remain unknown and are rejected by the safety chain.
   track_unknown_space: true
-  # 6m滚动窗口同时容纳Standard的1.90m最大空间前视和State的
-  # 2.28m最大空间前视；两者加0.71m车体外接半径后仍小于3m半窗。
-  width: 6.0
-  height: 6.0
+  # 7m滚动窗口提供3.5m半窗，扩大路径重捕获和局部障碍观测范围。
+  width: 7.0
+  height: 7.0
   resolution: 0.05
   transform_tolerance: 1.0
   obstacle_layer:
-    # 激光雷达与三路深度障碍点云共同写入局部动态障碍层。
-    # 深度 obstacle_2d 仅负责 marking，自由空间清除仍由激光雷达完成。
-    observation_sources: laser_scan_sensor left_cam_source right_cam_source up_cam_source
+    # 本轮U形弯A/B：暂时隔离已确认产生幽灵障碍的左右深度源；
+    # 保留激光和前向深度避障，左右 obstacle_2d 仍发布但不写入代价图。
+    observation_sources: laser_scan_sensor up_cam_source
     left_cam_source:
       data_type: PointCloud2
       topic: /left/obstacle_2d

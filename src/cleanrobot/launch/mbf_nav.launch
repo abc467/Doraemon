@@ -1,6 +1,6 @@
 <launch>
   <arg name="mbf_nav_yaml" default="$(find cleanrobot)/config/nav/mbf_nav.yaml"/>
-  <!-- Temporary module-level A/B: exact v9 MPPI code and Standard parameters. -->
+  <!-- Production baseline: validated v9 MPPI code and Standard parameters. -->
   <arg name="mppi_v9_ab_enabled" default="true"/>
   <arg name="mppi_v9_ab_yaml" default="$(find cleanrobot)/launch/mppi_v9_ab.yaml"/>
   <arg name="mbf_timing_yaml" default="$(find cleanrobot)/config/nav/mbf_timing.yaml"/>

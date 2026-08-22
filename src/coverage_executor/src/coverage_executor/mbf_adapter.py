@@ -7,6 +7,7 @@ from nav_msgs.msg import Path
 from std_srvs.srv import Empty
 
 from mbf_msgs.msg import MoveBaseAction, MoveBaseGoal, ExePathAction, ExePathGoal
+from mbf_msgs.srv import CheckPose, CheckPoseRequest
 
 
 class MBFAdapter:
@@ -28,6 +29,7 @@ class MBFAdapter:
         connect_controller: str = "",
         recovery: str = "",
         clear_costmaps_service: str = "/move_base_flex/clear_costmaps",
+        check_pose_cost_service: str = "/move_base_flex/check_pose_cost",
     ):
         self.move_base_action = move_base_action
         self.exe_path_action = exe_path_action
@@ -36,6 +38,7 @@ class MBFAdapter:
         self.connect_controller = str(connect_controller or "").strip()
         self.recovery = recovery
         self.clear_costmaps_service = str(clear_costmaps_service or "").strip()
+        self.check_pose_cost_service = str(check_pose_cost_service or "").strip()
 
         self._mb = actionlib.SimpleActionClient(self.move_base_action, MoveBaseAction)
         self._exe = actionlib.SimpleActionClient(self.exe_path_action, ExePathAction)
@@ -44,11 +47,20 @@ class MBFAdapter:
         self._last_connect_result = None
         self._last_exe_result = None
         self._clear_costmaps_cli = None
+        self._check_pose_cost_cli = None
         if self.clear_costmaps_service:
             try:
                 self._clear_costmaps_cli = rospy.ServiceProxy(self.clear_costmaps_service, Empty)
             except Exception:
                 self._clear_costmaps_cli = None
+        if self.check_pose_cost_service:
+            try:
+                self._check_pose_cost_cli = rospy.ServiceProxy(
+                    self.check_pose_cost_service,
+                    CheckPose,
+                )
+            except Exception:
+                self._check_pose_cost_cli = None
 
     def wait_for_servers(self):
         rospy.loginfo("[MBF] waiting %s ...", self.move_base_action)
@@ -184,3 +196,33 @@ class MBFAdapter:
         except Exception as e:
             rospy.logwarn("[MBF] clear_costmaps failed: %s", str(e))
             return False
+
+    def check_global_pose(self, pose: Optional[PoseStamped] = None, *, current_pose: bool = False):
+        """Check the complete robot footprint on MBF's global costmap.
+
+        Returns ``(service_ok, state, cost, message)``.  ``state`` follows
+        ``mbf_msgs/CheckPose``: FREE=0, INSCRIBED=1, LETHAL=2,
+        UNKNOWN=3, OUTSIDE=4.  A service failure is kept distinct from a
+        collision so recovery code can fail closed without misreporting the
+        map state.
+        """
+        if self._check_pose_cost_cli is None or (not self.check_pose_cost_service):
+            return False, -1, 0, "check_pose_cost service is not configured"
+        if (not current_pose) and pose is None:
+            return False, -1, 0, "target pose is required"
+
+        try:
+            rospy.wait_for_service(self.check_pose_cost_service, timeout=0.5)
+            request = CheckPoseRequest()
+            if pose is not None:
+                request.pose = pose
+            request.safety_dist = 0.0
+            request.lethal_cost_mult = 1.0
+            request.inscrib_cost_mult = 1.0
+            request.unknown_cost_mult = 1.0
+            request.costmap = CheckPoseRequest.GLOBAL_COSTMAP
+            request.current_pose = bool(current_pose)
+            response = self._check_pose_cost_cli(request)
+            return True, int(response.state), int(response.cost), ""
+        except Exception as exc:
+            return False, -1, 0, str(exc)

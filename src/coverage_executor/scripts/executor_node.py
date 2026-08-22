@@ -87,6 +87,17 @@ def main():
     retry_pause_recovery_on_exhausted = rospy.get_param("~retry_pause_recovery_on_exhausted", True)
     retry_clear_costmaps = rospy.get_param("~retry_clear_costmaps", False)
     clear_costmaps_service = rospy.get_param("~clear_costmaps_service", "/move_base_flex/clear_costmaps")
+    check_pose_cost_service = rospy.get_param(
+        "~check_pose_cost_service", "/move_base_flex/check_pose_cost"
+    )
+    recovery_rejoin_enable = rospy.get_param("~recovery_rejoin_enable", True)
+    recovery_rejoin_back_search_m = rospy.get_param("~recovery_rejoin_back_search_m", 1.5)
+    recovery_rejoin_forward_search_m = rospy.get_param("~recovery_rejoin_forward_search_m", 3.0)
+    recovery_rejoin_stable_span_m = rospy.get_param("~recovery_rejoin_stable_span_m", 0.30)
+    recovery_rejoin_sample_step_m = rospy.get_param("~recovery_rejoin_sample_step_m", 0.10)
+    recovery_rejoin_allow_inscribed_goal = rospy.get_param(
+        "~recovery_rejoin_allow_inscribed_goal", False
+    )
 
     resume_backtrack_m = rospy.get_param("~resume_backtrack_m", 0.5)
     resume_accept_dist = rospy.get_param("~resume_accept_dist", 1.0)
@@ -191,6 +202,7 @@ def main():
         connect_controller=connect_controller,
         recovery=recovery,
         clear_costmaps_service=str(clear_costmaps_service),
+        check_pose_cost_service=str(check_pose_cost_service),
     )
     act = CleaningActuator()
 
@@ -274,6 +286,12 @@ def main():
         follow_retry_reconnect_on_fail=bool(follow_retry_reconnect_on_fail),
         retry_pause_recovery_on_exhausted=bool(retry_pause_recovery_on_exhausted),
         retry_clear_costmaps=bool(retry_clear_costmaps),
+        recovery_rejoin_enable=bool(recovery_rejoin_enable),
+        recovery_rejoin_back_search_m=float(recovery_rejoin_back_search_m),
+        recovery_rejoin_forward_search_m=float(recovery_rejoin_forward_search_m),
+        recovery_rejoin_stable_span_m=float(recovery_rejoin_stable_span_m),
+        recovery_rejoin_sample_step_m=float(recovery_rejoin_sample_step_m),
+        recovery_rejoin_allow_inscribed_goal=bool(recovery_rejoin_allow_inscribed_goal),
     )
 
     # 节点被 kill / roslaunch 退出时：必须停下 + 关清洁 + 硬停

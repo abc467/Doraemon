@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <pluginlib/class_loader.hpp>
+#include <ros/publisher.h>
 
 #include "geometry_msgs/TwistStamped.h"
 #include "costmap_2d/costmap_2d_ros.h"
@@ -72,6 +73,24 @@ protected:
   bool timing_diagnostics_{false};
   mutable size_t timing_cycles_{0};
   mutable std::vector<double> critic_time_totals_ms_;
+
+  // Subscriber-gated diagnostics.  These accumulators never participate in
+  // trajectory scoring; when no recorder subscribes, the hot path performs
+  // only one inexpensive subscriber-count check per control cycle.
+  struct CriticStatsAccumulator
+  {
+    double cost_mean_sum{0.0};
+    double cost_max_sum{0.0};
+    double changed_ratio_sum{0.0};
+    double score_time_ms_sum{0.0};
+    size_t executed_cycles{0};
+    size_t fail_cycles{0};
+  };
+  bool publish_critic_stats_{false};
+  int critic_stats_publish_period_{10};
+  ros::Publisher critic_stats_pub_;
+  mutable size_t critic_stats_cycles_{0};
+  mutable std::vector<CriticStatsAccumulator> critic_stats_accumulators_;
 };
 
 }  // namespace mppi

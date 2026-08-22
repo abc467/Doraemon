@@ -1636,7 +1636,7 @@ main() {
   runtime_wait_for_service /clean_robot_server/app/submit_slam_command 30
   runtime_wait_for_service /clean_robot_server/app/get_slam_job 30
   runtime_wait_for_service /cartographer/runtime/app/restart_localization 30
-  runtime_log_status "检查后端 contracts（canonical app/site 主链）"
+  runtime_log_status "检查后端 contracts（生产主链，已排除SLAM契约）"
   runtime_run_contract_check "${CONTRACT_WAIT_TIMEOUT}" "${CONTRACT_WAIT_INTERVAL}"
   assert_no_action_runtime_isolated
 

@@ -386,6 +386,7 @@ class CartographerSlamJobController:
         include_unfinished_submaps: bool = True,
         switch_to_localization_after_save: bool = False,
         relocalize_after_switch: bool = False,
+        submit_source: str = "",
     ) -> Dict[str, object]:
         backend = self._backend
         now = time.time()
@@ -438,6 +439,7 @@ class CartographerSlamJobController:
             "include_unfinished_submaps": bool(include_unfinished_submaps),
             "switch_to_localization_after_save": bool(switch_to_localization_after_save),
             "relocalize_after_switch": bool(relocalize_after_switch),
+            "submit_source": str(submit_source or "unknown"),
             "status": "queued",
             "phase": "accepted",
             "progress_0_1": 0.0,

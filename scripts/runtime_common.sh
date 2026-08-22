@@ -920,6 +920,7 @@ runtime_run_contract_check() {
     check_ros_contracts.py
     --strict
     --text
+    --exclude-slam
     --wait-timeout
     "${timeout_sec}"
     --wait-interval

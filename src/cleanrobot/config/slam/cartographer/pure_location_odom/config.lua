@@ -93,7 +93,7 @@ POSE_GRAPH.optimize_every_n_nodes = 30 --提高后端优化频率，让定位轨
 -- 全图轮询。该时间仅保留给其他跨轨迹约束逻辑。
 POSE_GRAPH.global_constraint_search_after_n_seconds = 30.
 POSE_GRAPH.global_sampling_ratio = 0.005 --active->frozen 不做全图轮询；该参数仅限制其他全局约束
-POSE_GRAPH.constraint_builder.min_score = 0.58
+POSE_GRAPH.constraint_builder.min_score = 0.60
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.66 --提高全局重定位弱匹配门槛，降低重复结构误匹配
 -- active->frozen 后端约束只用近距离端点。前端仍保留 20 m 激光；这样避免
 -- 长通道 8~20 m 的掠射点因微小角度误差跨越多个 5 cm 栅格、拉低整帧 CSM 分数。

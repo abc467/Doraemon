@@ -28,6 +28,7 @@ from coverage_planner.slam_workflow.api import (
     SubmitValidationContext,
     validate_submit_request,
 )
+from coverage_planner.slam_workflow.job_events import encode_submit_audit_description
 
 
 class SlamApiSubmitController:
@@ -301,7 +302,10 @@ class SlamApiSubmitController:
                 map_name=effective_map_name,
                 map_revision_id=map_revision_id,
                 set_active=bool(req.set_active),
-                description=str(req.description or ""),
+                description=encode_submit_audit_description(
+                    "slam_api_service",
+                    str(req.description or ""),
+                ),
                 frame_id=str(getattr(req, "frame_id", "map") or "map"),
                 has_initial_pose=bool(getattr(req, "has_initial_pose", False)),
                 initial_pose_x=float(getattr(req, "initial_pose_x", 0.0) or 0.0),

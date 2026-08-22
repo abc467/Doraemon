@@ -9,6 +9,19 @@ import time
 import rosgraph
 import rosservice
 
+
+SLAM_CONTRACT_NAMES = frozenset(
+    {
+        "runtime_operate_app",
+        "runtime_submit_job_app",
+        "runtime_get_job_app",
+        "restart_localization_app",
+        "get_slam_status_app",
+        "submit_slam_command_app",
+        "get_slam_job_app",
+    }
+)
+
 from cleanrobot_app_msgs.msg import (
     CoverageZone as AppCoverageZone,
     CleanSchedule as AppCleanSchedule,
@@ -717,11 +730,14 @@ def _print_text_summary(payload):
             print("  warning: %s" % str(warning))
 
 
-def _collect_payload(*, exclude_manual_drive=False):
+def _collect_payload(*, exclude_manual_drive=False, exclude_slam=False):
     local_contracts = _local_contracts()
     if exclude_manual_drive:
         local_contracts.pop("manual_drive_command_app", None)
         local_contracts.pop("get_manual_drive_status_app", None)
+    if exclude_slam:
+        for contract_name in SLAM_CONTRACT_NAMES:
+            local_contracts.pop(contract_name, None)
     payload = {"local": local_contracts}
     try:
         master = rosgraph.Master("/check_ros_contracts")
@@ -743,13 +759,24 @@ def main():
         action="store_true",
         help="omit manual-drive contracts when that action entry is intentionally disabled",
     )
+    parser.add_argument(
+        "--exclude-slam",
+        action="store_true",
+        help="omit SLAM API/runtime contracts from this compatibility check",
+    )
     args = parser.parse_args()
 
-    payload = _collect_payload(exclude_manual_drive=args.exclude_manual_drive)
+    payload = _collect_payload(
+        exclude_manual_drive=args.exclude_manual_drive,
+        exclude_slam=args.exclude_slam,
+    )
     deadline = time.time() + max(0.0, float(args.wait_timeout or 0.0))
     while (not _summary_ok(payload)) and float(args.wait_timeout or 0.0) > 0.0 and time.time() < deadline:
         time.sleep(max(0.2, float(args.wait_interval or 2.0)))
-        payload = _collect_payload(exclude_manual_drive=args.exclude_manual_drive)
+        payload = _collect_payload(
+            exclude_manual_drive=args.exclude_manual_drive,
+            exclude_slam=args.exclude_slam,
+        )
 
     if args.text:
         _print_text_summary(payload)

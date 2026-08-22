@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -141,6 +142,64 @@ std::size_t canonicalizeInitialLatticeMotion(
 
   path.erase(path.begin() + 1u);
   return removed + 1u;
+}
+
+double directionalHeadingResidualLimit(
+  const std::vector<float> & heading_angles,
+  std::size_t selected_bin,
+  double requested_yaw,
+  double serialization_margin)
+{
+  requireValidEpsilon(serialization_margin, "serialization_margin");
+  if (heading_angles.size() < 2u) {
+    throw std::invalid_argument("heading_angles must contain at least two headings");
+  }
+  if (selected_bin >= heading_angles.size()) {
+    throw std::invalid_argument("selected heading bin is out of range");
+  }
+  if (!std::isfinite(requested_yaw)) {
+    throw std::invalid_argument("requested_yaw must be finite");
+  }
+  for (const float heading : heading_angles) {
+    if (!std::isfinite(heading)) {
+      throw std::invalid_argument("heading_angles must be finite");
+    }
+  }
+
+  const double selected_yaw = heading_angles[selected_bin];
+  const double requested_delta = angles::shortest_angular_distance(
+    selected_yaw, requested_yaw);
+  const bool positive_side = requested_delta >= 0.0;
+  double neighboring_gap = std::numeric_limits<double>::infinity();
+  double nearest_gap_on_either_side = std::numeric_limits<double>::infinity();
+  constexpr double kDistinctHeadingEpsilon = 1e-9;
+  for (std::size_t index = 0u; index < heading_angles.size(); ++index) {
+    if (index == selected_bin) {
+      continue;
+    }
+    const double delta = angles::shortest_angular_distance(
+      selected_yaw, static_cast<double>(heading_angles[index]));
+    const double magnitude = std::abs(delta);
+    if (magnitude <= kDistinctHeadingEpsilon) {
+      throw std::invalid_argument("heading_angles contains duplicate headings");
+    }
+    nearest_gap_on_either_side = std::min(nearest_gap_on_either_side, magnitude);
+    if ((positive_side && delta > kDistinctHeadingEpsilon) ||
+      (!positive_side && delta < -kDistinctHeadingEpsilon))
+    {
+      neighboring_gap = std::min(neighboring_gap, magnitude);
+    }
+  }
+  // A two-heading table may place its only neighbor exactly at pi, for which
+  // shortest_angular_distance has only one signed representation.  The same
+  // geometric neighbor bounds both sides in that degenerate case.
+  if (!std::isfinite(neighboring_gap)) {
+    neighboring_gap = nearest_gap_on_either_side;
+  }
+  if (!std::isfinite(neighboring_gap)) {
+    throw std::invalid_argument("heading_angles has no distinct neighboring heading");
+  }
+  return 0.5 * neighboring_gap + serialization_margin;
 }
 
 ThetaPrefixCut selectThetaPrefixCut(

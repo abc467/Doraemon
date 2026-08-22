@@ -138,6 +138,17 @@
     <param name="retry_pause_recovery_on_exhausted" value="true"/>
     <param name="retry_clear_costmaps" value="true"/>
     <param name="clear_costmaps_service" value="/move_base_flex/clear_costmaps"/>
+    <!-- 失败恢复不再原样重试同一个checkpoint。先用全局代价图对当前完整
+         车体做硬碰撞检查；当前车体安全时，再在block路径前后寻找一段稳定、
+         满足State目标契约的FREE重入点。当前车体已LETHAL/unknown/越图时
+         fail-closed进入PAUSED_RECOVERY，不自动猜测脱困方向。 -->
+    <param name="check_pose_cost_service" value="/move_base_flex/check_pose_cost"/>
+    <param name="recovery_rejoin_enable" value="true"/>
+    <param name="recovery_rejoin_back_search_m" value="1.5"/>
+    <param name="recovery_rejoin_forward_search_m" value="3.0"/>
+    <param name="recovery_rejoin_stable_span_m" value="0.30"/>
+    <param name="recovery_rejoin_sample_step_m" value="0.10"/>
+    <param name="recovery_rejoin_allow_inscribed_goal" value="false"/>
 
     <!-- 自动回充：由上层 launch 传参控制（默认 false） -->
     <param name="auto_charge_enable" value="$(arg auto_charge_enable)"/>

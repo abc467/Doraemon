@@ -73,9 +73,9 @@ class LifecycleSourceContractTest(unittest.TestCase):
         nav = (
             WORKSPACE_SRC / "cleanrobot/config/nav/mbf_nav.yaml"
         ).read_text(encoding="utf-8")
-        state = nav[nav.index("MPPI_State_Lattice_Controller:") :]
-        self.assertRegex(state, r"controller_frequency:\s*10\.0")
-        self.assertRegex(state, r"model_dt:\s*0\.10")
+        standard = nav[nav.index("MPPI_Standard_Controller:") :]
+        self.assertRegex(standard, r"controller_frequency:\s*10\.0")
+        self.assertRegex(standard, r"model_dt:\s*0\.10")
 
     def test_old_controller_callbacks_have_a_separate_generation(self):
         source = _read("src/move_base_action.cpp")

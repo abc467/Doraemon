@@ -216,7 +216,25 @@ CORE_TOPICS=(
   /cartographer/runtime/job_state
   /clean_robot_server/slam_state
   /clean_robot_server/slam_job_state
+  /clean_robot_server/slam_audit_events
   /clean_robot_server/odometry_state
+  /coverage_task_manager/state
+  /coverage_task_manager/event
+  /coverage_task_manager/system_readiness
+  /task_state
+  /coverage_executor/state
+  /coverage_executor/event
+  /coverage_executor/run_progress
+  /auto_charge_monitor/event
+  /move_base_flex/get_path/goal
+  /move_base_flex/get_path/result
+  /move_base_flex/get_path/status
+  /move_base_flex/exe_path/goal
+  /move_base_flex/exe_path/result
+  /move_base_flex/exe_path/status
+  /move_base_flex/move_base/goal
+  /move_base_flex/move_base/result
+  /move_base_flex/move_base/status
 )
 
 ANALYSIS_TOPICS=(
@@ -246,8 +264,6 @@ NAV_TOPICS=(
   /move_base_flex/local_costmap/footprint
   /move_base_flex/MPPI_Standard_Controller/optimal_trajectory
   /move_base_flex/MPPI_Standard_Controller/critic_stats
-  /move_base_flex/MPPI_State_Lattice_Controller/optimal_trajectory
-  /move_base_flex/MPPI_State_Lattice_Controller/critic_stats
   /move_base_flex/ThetaStarPlanner/theta_star_plan
   /coverage_executor/state
   /coverage_executor/run_progress

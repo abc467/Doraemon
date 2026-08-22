@@ -59,6 +59,13 @@ void Optimizer::getParams()
   nh_.param("retry_attempt_limit", s.retry_attempt_limit, 1);
   nh_.param("timing_diagnostics", timing_diagnostics_, false);
 
+  if (s.retry_attempt_limit < 0) {
+    ROS_WARN(
+      "retry_attempt_limit must be non-negative; clamping %d to 0",
+      s.retry_attempt_limit);
+    s.retry_attempt_limit = 0;
+  }
+
   s.base_constraints.ax_max = fabs(s.base_constraints.ax_max);
   if (s.base_constraints.ax_min > 0.0) {
     s.base_constraints.ax_min = -1.0 * s.base_constraints.ax_min;
@@ -176,21 +183,32 @@ void Optimizer::optimize()
 
 bool Optimizer::fallback(bool fail)
 {
-  static size_t counter = 0;
-
   if (!fail) {
-    counter = 0;
+    retry_counter_ = 0;
     return false;
   }
 
   reset();
 
-  if (++counter > settings_.retry_attempt_limit) {
-    counter = 0;
-    ROS_ERROR("Optimizer fail to compute path");
-    return false;
+  // A fallback is a fresh optimization attempt.  Do not carry the previous
+  // batch's terminal failure or trajectory-derived critic caches into the
+  // resampled batch, otherwise every configured retry immediately inherits
+  // the original failure without being evaluated independently.
+  critics_data_.fail_flag = false;
+  critics_data_.furthest_reached_path_point.reset();
+  critics_data_.path_pts_valid.reset();
+
+  const int failed_batches = ++retry_counter_;
+  if (failed_batches > settings_.retry_attempt_limit) {
+    retry_counter_ = 0;
+    throw std::runtime_error(
+      "Optimizer failed to compute a valid control after " +
+      std::to_string(failed_batches) + " fully-scored batch(es)");
   }
 
+  ROS_WARN(
+    "Optimizer batch failed; retrying with fresh samples (%d/%d)",
+    failed_batches, settings_.retry_attempt_limit);
   return true;
 }
 
@@ -200,6 +218,10 @@ void Optimizer::prepare(
   const nav_msgs::Path & plan,
   const geometry_msgs::Pose & goal)
 {
+  // Each controller tick gets an independent retry budget. A failure returned
+  // to MBF must not consume attempts from the next control tick.
+  retry_counter_ = 0;
+
   state_.pose = robot_pose;
   state_.speed = robot_speed;
   path_ = utils::toTensor(plan);
