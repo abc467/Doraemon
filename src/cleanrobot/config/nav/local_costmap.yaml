@@ -52,6 +52,7 @@ local_costmap:
     # only on the instantaneous laser view leaves MPPI without a wall fallback
     # whenever a scan is occluded or momentarily delayed.
     - {name: static_layer, type: "costmap_2d::StaticLayer"}
+    - {name: static_artifact_clear_layer, type: "coverage_constraints_nav/StaticArtifactClearLayer"}
     - {name: obstacle_layer, type: "costmap_2d::ObstacleLayer"}
     - {name: keepout_constraint_layer, type: "coverage_constraints_nav/KeepoutConstraintLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

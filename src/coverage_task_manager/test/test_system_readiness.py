@@ -262,6 +262,75 @@ class TaskManagerReadinessTest(unittest.TestCase):
         self.assertEqual(odom_check.level, "OK")
         self.assertEqual(odom_check.summary, "mode=odom_stream stream=true valid=true code=- msg=ok")
 
+    def test_active_dock_supply_blocks_new_task_without_reporting_failure(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            online_nodes={"/move_base_flex", "/mcore_tcp_bridge"},
+        )
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "CHARGE_CONFIRMED"
+        # The state topic is transition-driven.  Remaining in the same state
+        # for several minutes must not be interpreted as stale telemetry.
+        mgr._dock_supply_state_ts = self.now - 240.0
+
+        with mock.patch(
+            "coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param
+        ), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch(
+            "coverage_task_manager.task_manager.time.time", return_value=self.now
+        ):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        self.assertFalse(readiness.overall_ready)
+        self.assertFalse(readiness.can_start_task)
+        self.assertIn(
+            "dock supply active: CHARGE_CONFIRMED (blocks new task start only)",
+            list(readiness.blocking_reasons),
+        )
+        dock_check = next(item for item in readiness.checks if item.key == "dock_supply")
+        self.assertFalse(dock_check.ok)
+        self.assertEqual(dock_check.level, "INFO")
+        self.assertTrue(dock_check.fresh)
+        self.assertFalse(dock_check.stale)
+        self.assertFalse(dock_check.missing)
+        self.assertEqual(dock_check.age_s, -1.0)
+        self.assertEqual(
+            dock_check.summary,
+            "state=CHARGE_CONFIRMED active=true blocks_new_task=true",
+        )
+
+    def test_failed_dock_supply_remains_a_blocking_error(self):
+        mgr, get_param, fake_now = self._build_manager(
+            odometry_msg=self._odometry_msg(valid=True),
+            require_odometry=True,
+            online_nodes={"/move_base_flex", "/mcore_tcp_bridge"},
+        )
+        mgr._dock_supply_enable = True
+        mgr._dock_supply_state = "FAILED_CHARGE_TIMEOUT"
+        mgr._dock_supply_state_ts = self.now
+
+        with mock.patch(
+            "coverage_task_manager.task_manager.rospy.get_param", side_effect=get_param
+        ), mock.patch(
+            "coverage_task_manager.task_manager.rospy.Time.now", return_value=fake_now
+        ), mock.patch(
+            "coverage_task_manager.task_manager.time.time", return_value=self.now
+        ):
+            readiness = mgr._build_system_readiness(task_id=0, refresh_map_identity=False)
+
+        self.assertFalse(readiness.overall_ready)
+        self.assertFalse(readiness.can_start_task)
+        self.assertIn(
+            "dock supply failed: FAILED_CHARGE_TIMEOUT",
+            list(readiness.blocking_reasons),
+        )
+        dock_check = next(item for item in readiness.checks if item.key == "dock_supply")
+        self.assertFalse(dock_check.ok)
+        self.assertEqual(dock_check.level, "ERROR")
+        self.assertEqual(dock_check.summary, "state=FAILED_CHARGE_TIMEOUT failed=true")
+
     def test_latched_health_warning_uses_space_delimited_readiness_text(self):
         mgr, get_param, fake_now = self._build_manager(
             odometry_msg=self._odometry_msg(valid=True),

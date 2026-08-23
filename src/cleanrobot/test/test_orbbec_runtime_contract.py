@@ -36,6 +36,7 @@ class OrbbecRuntimeContractTest(unittest.TestCase):
             "RUNTIME_REQUIRE_DEPTH_CAMERA_TOPICS=true",
             "DORAEMON_REQUIRE_DEPTH_CAMERA_IDENTITIES=true",
             "RUNTIME_DEPTH_CAMERA_WATCHDOG_ENABLE=true",
+            "RUNTIME_DEPTH_CAMERA_PAUSE_AND_RECOVER_ON_STALE=false",
         ):
             self.assertIn(assignment, config)
 
@@ -53,6 +54,19 @@ class OrbbecRuntimeContractTest(unittest.TestCase):
         self.assertIn('rospy.Subscriber(\n            "/task_state", TaskState', source)
         self.assertIn("_task_is_definitely_idle", source)
         self.assertIn("skipped executor pause fallback: no running mission", source)
+        self.assertIn('rospy.get_param("~pause_and_recover_on_stale", True)', source)
+        self.assertIn("monitoring-only mode keeps the task running", source)
+
+    def test_watchdog_monitor_only_policy_is_runtime_configurable(self):
+        source = self.read("scripts/start_runtime.sh")
+        self.assertIn(
+            'RUNTIME_DEPTH_CAMERA_PAUSE_AND_RECOVER_ON_STALE="${RUNTIME_DEPTH_CAMERA_PAUSE_AND_RECOVER_ON_STALE:-true}"',
+            source,
+        )
+        self.assertIn(
+            '_pause_and_recover_on_stale:="${RUNTIME_DEPTH_CAMERA_PAUSE_AND_RECOVER_ON_STALE}"',
+            source,
+        )
 
     def test_startup_owns_camera_chain_until_hard_gate_passes(self):
         source = self.read("scripts/start_runtime.sh")

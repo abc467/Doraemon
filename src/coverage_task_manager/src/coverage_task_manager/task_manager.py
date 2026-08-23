@@ -2033,17 +2033,45 @@ class TaskManager:
         ))
 
         if self._dock_supply_enable:
-            dock_busy = dock_supply_state not in ("", "IDLE", "DONE", "FAILED", "CANCELED") and (not dock_supply_state.startswith("FAILED"))
-            if dock_busy:
-                result.blockers.append("dock supply busy: %s" % dock_supply_state)
+            dock_state = str(dock_supply_state or "IDLE").strip().upper()
+            dock_failed = bool(
+                dock_state == "FAILED"
+                or dock_state.startswith("FAILED_")
+                or dock_state in ("ERROR", "ABORTED", "FAULT")
+            )
+            dock_busy = bool(
+                (not dock_failed)
+                and dock_state not in _DOCK_SUPPLY_QUIESCENT_STATES
+            )
+            if dock_failed:
+                result.blockers.append("dock supply failed: %s" % dock_state)
+                dock_level = "ERROR"
+                dock_summary = "state=%s failed=true" % dock_state
+            elif dock_busy:
+                # This is a task-start occupancy gate, not an operational
+                # failure.  States such as CHARGE_CONFIRMED are expected while
+                # the current return-home workflow owns the dock.  Keep the
+                # blocker so a second task cannot start concurrently, but do
+                # not report the active workflow as failed.
+                result.blockers.append(
+                    "dock supply active: %s (blocks new task start only)" % dock_state
+                )
+                dock_level = "INFO"
+                dock_summary = "state=%s active=true blocks_new_task=true" % dock_state
+            else:
+                dock_level = "OK"
+                dock_summary = "state=%s" % dock_state
             result.checks.append(self._make_readiness_check(
                 key="dock_supply",
-                level="ERROR" if dock_busy else "OK",
-                ok=bool(not dock_busy),
+                level=dock_level,
+                ok=bool((not dock_busy) and (not dock_failed)),
                 fresh=bool(dock_supply_ts > 0.0),
                 missing=bool(dock_supply_ts <= 0.0),
-                age_s=float(max(0.0, now - dock_supply_ts)) if dock_supply_ts > 0.0 else -1.0,
-                summary="state=%s" % (dock_supply_state or "IDLE"),
+                # /dock_supply/state is transition-driven rather than a
+                # heartbeat.  A stable state age therefore says how long the
+                # state has remained unchanged, not that the data is stale.
+                age_s=-1.0,
+                summary=dock_summary,
             ))
 
         station_node_ok = self._node_online("/station_tcp_bridge")
@@ -6621,17 +6649,34 @@ class TaskManager:
             self._mission_update_state(self._active_run_id, "SUSPENDED", reason="auto_dock")
             self._mission_state = "PAUSED"
 
-        def _paused_or_idle():
+        def _paused_idle_or_drain_failed():
             st = self._get_exec_state()
-            return st in ["PAUSED", "IDLE", "DONE", "FAILED", "CANCELED"] or st.startswith("PWR_")
-
-        if mission_was_running and (not self._wait(self.wait_executor_paused_s, _paused_or_idle, sleep_s=0.05)):
-            self._enter_charge_fault(
-                "ERROR_DOCK_PREP",
-                reason="executor_suspend_timeout",
-                manual=(not self._active_run_id),
+            return (
+                st in ["PAUSED", "PAUSED_NAV_DRAIN_TIMEOUT", "IDLE", "DONE", "FAILED", "CANCELED"]
+                or st.startswith("PWR_")
             )
-            return False
+
+        if mission_was_running:
+            paused_or_terminal = self._wait(
+                self.wait_executor_paused_s,
+                _paused_idle_or_drain_failed,
+                sleep_s=0.05,
+            )
+            executor_state = self._get_exec_state()
+            if executor_state == "PAUSED_NAV_DRAIN_TIMEOUT":
+                self._enter_charge_fault(
+                    "ERROR_DOCK_PREP",
+                    reason="executor_navigation_drain_timeout",
+                    manual=(not self._active_run_id),
+                )
+                return False
+            if not paused_or_terminal:
+                self._enter_charge_fault(
+                    "ERROR_DOCK_PREP",
+                    reason="executor_suspend_timeout",
+                    manual=(not self._active_run_id),
+                )
+                return False
 
         if self._dock_sys_profile_name:
             self._emit(f"DOCK_APPLY_SYS_PROFILE:{self._dock_sys_profile_name}")

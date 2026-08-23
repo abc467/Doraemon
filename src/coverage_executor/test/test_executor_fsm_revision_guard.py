@@ -104,6 +104,34 @@ class ExecutorFSMRevisionGuardTest(unittest.TestCase):
         self.assertIn("ERROR:MAP_MISMATCH:", fsm.emitted[0])
         logerr.assert_called()
 
+    @mock.patch("coverage_executor.fsm.rospy.logerr")
+    def test_pause_is_not_advertised_until_navigation_is_drained(self, _logerr):
+        fsm = self._fsm()
+        fsm.navigation_cancel_drain_timeout_s = 4.0
+        fsm.mbf = mock.Mock()
+        fsm.mbf.wait_for_navigation_drain.return_value = False
+
+        drained = fsm._publish_paused_after_navigation_drain("connect")
+
+        self.assertFalse(drained)
+        fsm.mbf.wait_for_navigation_drain.assert_called_once_with(4.0)
+        self.assertEqual(fsm.states, ["PAUSED_NAV_DRAIN_TIMEOUT"])
+        self.assertEqual(fsm._error_code, "NAV_DRAIN_TIMEOUT")
+        self.assertIn("context=connect", fsm._error_msg)
+
+    def test_pause_is_advertised_after_navigation_is_drained(self):
+        fsm = self._fsm()
+        fsm.navigation_cancel_drain_timeout_s = 4.0
+        fsm.mbf = mock.Mock()
+        fsm.mbf.wait_for_navigation_drain.return_value = True
+
+        drained = fsm._publish_paused_after_navigation_drain("follow")
+
+        self.assertTrue(drained)
+        fsm.mbf.wait_for_navigation_drain.assert_called_once_with(4.0)
+        self.assertEqual(fsm.states, ["PAUSED"])
+        self.assertIn("NAV_DRAINED:context=follow", fsm.emitted)
+
 
 if __name__ == "__main__":
     unittest.main()

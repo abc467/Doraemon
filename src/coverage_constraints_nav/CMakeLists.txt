@@ -36,6 +36,7 @@ include_directories(
 
 add_library(coverage_constraints_nav
   src/keepout_constraint_layer.cpp
+  src/static_artifact_clear_layer.cpp
 )
 target_link_libraries(coverage_constraints_nav
   ${catkin_LIBRARIES}
@@ -47,6 +48,16 @@ if(CATKIN_ENABLE_TESTING)
   )
   if(TARGET test_constraint_identity)
     target_link_libraries(test_constraint_identity
+      coverage_constraints_nav
+      ${catkin_LIBRARIES}
+    )
+  endif()
+
+  catkin_add_gtest(test_static_artifact_clear_layer
+    test/test_static_artifact_clear_layer.cpp
+  )
+  if(TARGET test_static_artifact_clear_layer)
+    target_link_libraries(test_static_artifact_clear_layer
       coverage_constraints_nav
       ${catkin_LIBRARIES}
     )

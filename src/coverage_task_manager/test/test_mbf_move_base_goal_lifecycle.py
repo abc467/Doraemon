@@ -11,13 +11,18 @@ class _FakeSimpleActionClient:
         self.state = actionlib.GoalStatus.LOST
         self.sent_goals = []
         self.cancel_count = 0
+        self.cancel_all_count = 0
 
     def send_goal(self, goal):
         self.sent_goals.append(goal)
         self.state = actionlib.GoalStatus.PENDING
 
-    def cancel_all_goals(self):
+    def cancel_goal(self):
         self.cancel_count += 1
+        self.state = actionlib.GoalStatus.PREEMPTED
+
+    def cancel_all_goals(self):
+        self.cancel_all_count += 1
         self.state = actionlib.GoalStatus.PREEMPTED
 
     def get_state(self):
@@ -62,6 +67,7 @@ class MBFMoveBaseGoalLifecycleTest(unittest.TestCase):
         self.nav.cancel_all()
 
         self.assertEqual(self.nav._cli.cancel_count, 1)
+        self.assertEqual(self.nav._cli.cancel_all_count, 0)
         self.assertFalse(self.nav.done())
 
 

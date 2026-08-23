@@ -26,6 +26,9 @@ class OrbbecCameraWatchdog:
         self._recovery_timeout = max(30.0, float(rospy.get_param("~recovery_timeout", 150.0)))
         self._recovery_script = rospy.get_param("~recovery_script", "")
         self._required_bad_checks = max(2, int(rospy.get_param("~required_bad_checks", 3)))
+        self._pause_and_recover_on_stale = bool(
+            rospy.get_param("~pause_and_recover_on_stale", True)
+        )
         self._task_state_stale_timeout = max(
             1.0, float(rospy.get_param("~task_state_stale_timeout", 3.0))
         )
@@ -137,6 +140,10 @@ class OrbbecCameraWatchdog:
             KeyValue(key="stale_timeout_s", value=str(self._stale_timeout)),
             KeyValue(key="stale_topics", value=",".join(stale)),
             KeyValue(key="recovery_active", value=str(self._recovery_active).lower()),
+            KeyValue(
+                key="pause_and_recover_on_stale",
+                value=str(self._pause_and_recover_on_stale).lower(),
+            ),
         ]
         msg = DiagnosticArray()
         msg.header.stamp = rospy.Time.now()
@@ -157,6 +164,24 @@ class OrbbecCameraWatchdog:
             self._bad_checks += 1
             self._publish(False, stale, "raw depth stream stale or empty")
             if self._recovery_active or self._bad_checks < self._required_bad_checks:
+                return
+            # This policy is deliberately read at runtime so a field test can
+            # switch to monitoring-only behavior without restarting the robot.
+            # Monitoring stays active and continues publishing unhealthy
+            # diagnostics, but it must neither pause the mission nor restart
+            # all cameras while the vehicle is moving.
+            self._pause_and_recover_on_stale = bool(
+                rospy.get_param(
+                    "~pause_and_recover_on_stale",
+                    self._pause_and_recover_on_stale,
+                )
+            )
+            if not self._pause_and_recover_on_stale:
+                rospy.logerr_throttle(
+                    10.0,
+                    "Depth camera chain stale (%s); monitoring-only mode keeps the task running",
+                    ", ".join(stale),
+                )
                 return
             if now - self._last_recovery < self._cooldown:
                 return

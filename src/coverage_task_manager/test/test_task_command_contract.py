@@ -84,6 +84,7 @@ class TaskCommandContractTest(unittest.TestCase):
         mgr._charge_last_fresh_ts = 0.0
         mgr._executor_state = "IDLE"
         mgr._get_exec_state = lambda: str(mgr._executor_state)
+        mgr.wait_executor_paused_s = 20.0
         mgr._last_run_progress = None
         mgr._last_run_progress_ts = 0.0
         mgr._last_run_progress_msg_ts = 0.0
@@ -1357,6 +1358,27 @@ class TaskCommandContractTest(unittest.TestCase):
 
         self.assertFalse(started)
         self.assertFalse(mgr._armed)
+
+    @mock.patch("coverage_task_manager.task_manager.time.time", return_value=101.0)
+    def test_auto_dock_never_dispatches_while_executor_navigation_is_not_drained(self, _time):
+        mgr = self._enable_calibration_gate(self._manager())
+        mgr._is_mission_running = lambda: True
+        mgr._mission_state = "RUNNING"
+        mgr._executor_state = "PAUSED_NAV_DRAIN_TIMEOUT"
+        mgr._wait = lambda _timeout, predicate, sleep_s=0.05: bool(predicate())
+        mgr._dock_sys_profile_name = ""
+        mgr.nav = mock.Mock()
+        mgr._dock_stage2_nav = mock.Mock()
+
+        started = mgr._start_dock_sequence(manual=False)
+
+        self.assertFalse(started)
+        self.assertIn("suspend", mgr._exec_cmds)
+        self.assertEqual(
+            mgr._charge_faults,
+            [("ERROR_DOCK_PREP", "executor_navigation_drain_timeout", False)],
+        )
+        mgr.nav.send_goal.assert_not_called()
 
     def test_post_run_dock_failure_enters_explicit_blocking_fault(self):
         mgr = self._manager()

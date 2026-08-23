@@ -40,9 +40,19 @@ class MBFMoveBase:
         rospy.loginfo("[TASK/MBF] server ready")
 
     def cancel_all(self):
+        """Cancel this client's current dock/undock goal only.
+
+        ``cancel_all_goals`` broadcasts to every client sharing the action
+        name.  Task navigation and coverage navigation deliberately use
+        separate clients on /move_base_flex/move_base, so a broadcast can race
+        a newly dispatched goal from the other owner.
+        """
         with self._goal_lock:
+            if not self._goal_inflight:
+                self._terminal_state = None
+                return
             try:
-                self._cli.cancel_all_goals()
+                self._cli.cancel_goal()
             except Exception:
                 pass
             self._goal_inflight = False

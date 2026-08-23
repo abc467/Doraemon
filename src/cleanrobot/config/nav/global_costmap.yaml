@@ -16,5 +16,6 @@ global_costmap:
   # rolling costmap where MPPI performs real-time dynamic avoidance.
   plugins:
     - {name: static_layer, type: "costmap_2d::StaticLayer"}
+    - {name: static_artifact_clear_layer, type: "coverage_constraints_nav/StaticArtifactClearLayer"}
     - {name: keepout_constraint_layer, type: "coverage_constraints_nav/KeepoutConstraintLayer"}
     - {name: inflation_layer, type: "costmap_2d::InflationLayer"}

@@ -129,6 +129,9 @@
     <param name="follow_no_progress_timeout_s" value="45.0"/>
     <param name="navigation_progress_dist_m" value="0.03"/>
     <param name="navigation_progress_yaw_rad" value="0.08"/>
+    <!-- Do not hand auto-docking a MoveBase goal until a canceled coverage
+         CONNECT/FOLLOW action and its MBF child actions have drained. -->
+    <param name="navigation_cancel_drain_timeout_s" value="4.0"/>
     <param name="resume_accept_dist" value="1.0"/>
     <param name="resume_finish_thresh_m" value="0.3"/>
     <param name="connect_retry_max" value="2"/>

@@ -109,6 +109,10 @@ class ExecutorFSM:
         follow_no_progress_timeout_s: float = 45.0,
         navigation_progress_dist_m: float = 0.03,
         navigation_progress_yaw_rad: float = 0.08,
+        # A pause/suspend is not handed to another navigator until the MBF
+        # action actually owned by this executor has drained.  This prevents a
+        # new auto-dock goal from racing a canceled CONNECT/FOLLOW child.
+        navigation_cancel_drain_timeout_s: float = 4.0,
 
         resume_backtrack_m: float = 0.5,
         resume_accept_dist: float = 1.0,
@@ -218,6 +222,9 @@ class ExecutorFSM:
         self.follow_no_progress_timeout_s = max(0.0, float(follow_no_progress_timeout_s))
         self.navigation_progress_dist_m = max(0.0, float(navigation_progress_dist_m))
         self.navigation_progress_yaw_rad = max(0.0, float(navigation_progress_yaw_rad))
+        self.navigation_cancel_drain_timeout_s = max(
+            0.1, float(navigation_cancel_drain_timeout_s)
+        )
 
         self.resume_backtrack_m = float(resume_backtrack_m)
         self.resume_accept_dist = float(resume_accept_dist)
@@ -2220,6 +2227,49 @@ class ExecutorFSM:
                 return "PAUSE"
         return ""
 
+    def _publish_paused_after_navigation_drain(self, context: str) -> bool:
+        """Publish PAUSED only once the canceled MBF action has actually drained.
+
+        TaskManager treats PAUSED as permission to dispatch an auto-dock goal.
+        It must therefore not be published merely because the executor worker
+        noticed its pause flag: an outer MoveBase action can be CANCELED while
+        its internal get_path/exe_path/recovery child still owns MBF.
+        """
+        wait_for_drain = getattr(self.mbf, "wait_for_navigation_drain", None)
+        drained = True
+        if callable(wait_for_drain):
+            try:
+                drained = bool(
+                    wait_for_drain(self.navigation_cancel_drain_timeout_s)
+                )
+            except Exception as exc:
+                drained = False
+                rospy.logwarn(
+                    "[EXEC] navigation drain check failed context=%s: %s",
+                    str(context),
+                    str(exc),
+                )
+
+        if drained:
+            self._emit("NAV_DRAINED:context=%s" % str(context))
+            self._publish_state("PAUSED")
+            return True
+
+        reason = "navigation_drain_timeout:context=%s timeout=%.2fs" % (
+            str(context),
+            float(self.navigation_cancel_drain_timeout_s),
+        )
+        with self._lock:
+            self._error_code = "NAV_DRAIN_TIMEOUT"
+            self._error_msg = reason
+        self._emit("NAV_DRAIN_TIMEOUT:%s" % reason)
+        rospy.logerr("[EXEC] %s", reason)
+        # Do not advertise the executor as safely paused.  TaskManager will
+        # fail the dock preparation rather than dispatching a new MoveBase goal
+        # into a navigation stack that still owns an old action.
+        self._publish_state("PAUSED_NAV_DRAIN_TIMEOUT")
+        return False
+
     # ---------- main spin ----------
     def spin(self):
         self.mbf.wait_for_servers()
@@ -3466,7 +3516,10 @@ class ExecutorFSM:
                         rospy.logwarn("[EXEC] CONNECT interrupted by %s", reason)
                         self._force_cleaning_all_off(f"connect_interrupted:{reason}")
                         self._save_checkpoint(zone_id, plan.plan_id, state=("PAUSED" if reason == "PAUSE" else "CANCELED"))
-                        self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
+                        if reason == "PAUSE":
+                            self._publish_paused_after_navigation_drain("connect")
+                        else:
+                            self._publish_state("IDLE")
                         return False
                     now_ts = time.time()
                     connect_anchor, connect_last_progress_ts = self._advance_motion_watchdog(
@@ -3624,7 +3677,10 @@ class ExecutorFSM:
                 if reason:
                     rospy.logwarn("[EXEC] FOLLOW interrupted by %s", reason)
                     self._save_checkpoint(zone_id, plan.plan_id, state=("PAUSED" if reason == "PAUSE" else "CANCELED"))
-                    self._publish_state("PAUSED" if reason == "PAUSE" else "IDLE")
+                    if reason == "PAUSE":
+                        self._publish_paused_after_navigation_drain("follow")
+                    else:
+                        self._publish_state("IDLE")
                     return False
 
                 p = self._get_robot_xyt()

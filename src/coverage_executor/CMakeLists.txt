@@ -4,6 +4,7 @@ project(coverage_executor)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   actionlib
+  actionlib_msgs
   std_msgs
   std_srvs
   sensor_msgs

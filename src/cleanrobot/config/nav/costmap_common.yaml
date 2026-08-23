@@ -56,3 +56,16 @@ keepout_constraint_layer:
 static_layer:
   enabled: true
   map_topic: map
+
+# Remove one confirmed 5 cm frozen-map artifact without weakening runtime
+# obstacle safety. This layer is intentionally ordered after StaticLayer and
+# before ObstacleLayer / KeepoutConstraintLayer: real sensor observations and
+# hard no-go constraints can therefore mark the same cell lethal again.
+# Scope it to this exact map revision so the coordinate can never clear a wall
+# after another map is selected.
+static_artifact_clear_layer:
+  enabled: true
+  source_frame: map
+  required_map_revision_id: "rev_02_0b6542f773c1"
+  points_x: [-61.625]
+  points_y: [12.204]

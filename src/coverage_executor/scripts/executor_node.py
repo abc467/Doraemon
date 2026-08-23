@@ -78,6 +78,9 @@ def main():
     follow_no_progress_timeout_s = rospy.get_param("~follow_no_progress_timeout_s", 45.0)
     navigation_progress_dist_m = rospy.get_param("~navigation_progress_dist_m", 0.03)
     navigation_progress_yaw_rad = rospy.get_param("~navigation_progress_yaw_rad", 0.08)
+    navigation_cancel_drain_timeout_s = rospy.get_param(
+        "~navigation_cancel_drain_timeout_s", 4.0
+    )
 
     # retry / recovery params
     connect_retry_max = rospy.get_param("~connect_retry_max", 2)
@@ -235,6 +238,7 @@ def main():
         follow_no_progress_timeout_s=float(follow_no_progress_timeout_s),
         navigation_progress_dist_m=float(navigation_progress_dist_m),
         navigation_progress_yaw_rad=float(navigation_progress_yaw_rad),
+        navigation_cancel_drain_timeout_s=float(navigation_cancel_drain_timeout_s),
         resume_backtrack_m=resume_backtrack_m,
         resume_accept_dist=resume_accept_dist,
         resume_finish_thresh_m=resume_finish_thresh_m,

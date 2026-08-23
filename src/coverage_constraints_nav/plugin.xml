@@ -6,4 +6,11 @@
       Costmap layer that applies persistent no-go areas and virtual-wall keepouts.
     </description>
   </class>
+  <class name="coverage_constraints_nav/StaticArtifactClearLayer"
+         type="coverage_constraints_nav::StaticArtifactClearLayer"
+         base_class_type="costmap_2d::Layer">
+    <description>
+      Map-revision-scoped removal of explicitly confirmed static-map artifact cells.
+    </description>
+  </class>
 </library>
